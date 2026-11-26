@@ -1,0 +1,520 @@
+{
+  "id": "decenthyperexplugin.reaplugin",
+  "author": "ladiosupp",
+  "name": "HyperEx Pulse Filter",
+  "description": "Adaptive three-stage flow controller for the Decent DE1. Maps pump commands to cup flow, holds S1/S2/S3 targets with predictive live trim, and learns bounded next-shot adjustments per resistance bucket. New: soak-band Vi learning for refill (per-ratio-band memory, no-under-extraction floor) and finer-grained grind advice with cause triage and confidence. Guarded refill, diagnostics, CSV export.",
+  "version": "2.2.71",
+  "apiVersion": 1,
+  "permissions": [
+    "log",
+    "api",
+    "emit",
+    "events.machine",
+    "events.workflow",
+    "network.websocket",
+    "pluginStorage"
+  ],
+  "settings": {
+    "Enabled": {
+      "type": "boolean",
+      "label": "Enable HyperEx controller",
+      "description": "Only controls shots whose selected workflow profile title exactly matches Profile title.",
+      "default": true
+    },
+    "ActiveRelease": {
+      "type": "enum",
+      "label": "泄压模式 · Release mode",
+      "values": [
+        "auto",
+        "on",
+        "off"
+      ],
+      "description": "Default auto: a real 0 bar release/soak frame at S1 weight, then S2/S3 continue in the same shot; no second GHC press. on: original Idle / soak / GHC restart. off: one continuous S1→S2→S3 extraction. Auto and on share the active-release learning family; off keeps its own. Change only while idle; saving reloads the plugin. Safety pressure/final-weight stops remain active.",
+      "default": "auto"
+    },
+    "AdaptiveLearningLevel": {
+      "type": "enum",
+      "label": "杯间学习强度 · Learning strength",
+      "values": [
+        "保守",
+        "温和",
+        "正常",
+        "激进"
+      ],
+      "default": "正常",
+      "description": "Default 正常: one clean completed shot can adjust the next. 保守 requires two comparable cups; 温和 permits a single clean large error; 正常 uses bounded single-cup correction; 激进 uses higher gains and bounds. History is a command-normalized reference across small parameter changes, never mixed across active-release modes or physical LUT/basket contexts. Pressure, execution, scale quality and shape limits remain active. Independent of live trim level. 激进的统计学习准入范围为正常档1.3倍：S2稳态及起步CV上限12%→15.6%，拟合残差容差0.10→0.13即R²0.90→0.87；最少统计窗口/样本按1.3折算（样本向上取整）。出液目标与压力、反馈新鲜度、驱动ACK、错杯排除和写入预算保护不随之放宽。"
+    },
+    "Temperature": {
+      "type": "number",
+      "label": "新建曲线默认温度 (°C)",
+      "description": "Only the initial temperature when generating a new HyperEx profile. For an existing selected HyperEx profile, adjust brew temperature on the home page; its persisted uniform stage temperature is preserved during verification, adaptation and reload. Bounds70–100°C.",
+      "default": 92.0
+    },
+    "Stage1Flow": {
+      "type": "number",
+      "label": "S1 desired real flow (g/s)",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30–6.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "default": 2.0
+    },
+    "Stage1Weight": {
+      "type": "number",
+      "label": "S1 transition weight (g) · S1 转换重量",
+      "description": "At this cumulative beverage weight the plugin leaves S1. auto: skipStep into the 0 bar release/soak frame. on: request Idle, soak, then GHC restart. off: one direct S1→S2 advance. Runtime limited to 1–20 g.",
+      "default": 4.0
+    },
+    "Stage1PressureLimit": {
+      "type": "number",
+      "label": "Stage 1 pressure limiter (bar)",
+      "description": "Safety pressure limiter for S1. Runtime limited to the emergency pressure stop and never above 12 bar.",
+      "default": 3.0
+    },
+    "DumpFlowThreshold": {
+      "type": "number",
+      "label": "Release flow threshold (ml/s)",
+      "description": "Near-zero flow threshold used as a secondary active-release confirmation when the exact Idle state frame is missed during shot finalization.",
+      "default": 0.4
+    },
+    "DumpFlowStableSamples": {
+      "type": "number",
+      "label": "Release low-flow stable samples",
+      "description": "Retained for compatibility. Release confirmation now uses exact Idle, pouringDone/settled telemetry, or reinforced acknowledged Idle fallback.",
+      "default": 2
+    },
+    "DumpMinSettleSeconds": {
+      "type": "number",
+      "label": "Minimum release settle time (s)",
+      "description": "Minimum valve/water-path settling time after active release confirmation before the soak begins.",
+      "default": 0.8
+    },
+    "DumpFallbackSeconds": {
+      "type": "number",
+      "label": "Release fallback time (s)",
+      "description": "If the exact Idle frame is not seen by this time after an acknowledged Idle request, the plugin sends one reinforcing Idle request and uses the resulting state/telemetry as a fallback confirmation.",
+      "default": 1.5
+    },
+    "DumpTimeoutSeconds": {
+      "type": "number",
+      "label": "Dump timeout (s)",
+      "description": "Final fail-safe. The plugin aborts only if fresh telemetry still explicitly shows active espresso pouring with meaningful flow, or no Idle request was ever acknowledged.",
+      "default": 5.0
+    },
+    "SoakSeconds": {
+      "type": "number",
+      "label": "Zero-pressure soak (s)",
+      "description": "Pause duration after active water-path release has been confirmed.",
+      "default": 10.0
+    },
+    "GHCConfirmTimeoutSeconds": {
+      "type": "number",
+      "label": "GHC confirmation timeout (s)",
+      "description": "After the soak, maximum time to wait for the physical GHC Espresso button. On timeout the plugin sends Idle and fully resets the HyperEx sequence so the next shot starts cleanly.",
+      "default": 20.0
+    },
+    "AutoArmRetry1Seconds": {
+      "type": "number",
+      "label": "Auto arm retry 1 (s)",
+      "description": "Seconds after the initial second-stage Espresso arm request to resend it once if preinfusion/pouring has not started. Set 0 to disable.",
+      "default": 3.0
+    },
+    "AutoArmRetry2Seconds": {
+      "type": "number",
+      "label": "Auto arm retry 2 (s)",
+      "description": "Seconds after the initial second-stage Espresso arm request to send the final automatic reinforcement if preinfusion/pouring has not started. Set 0 to disable.",
+      "default": 7.0
+    },
+    "Stage2Flow": {
+      "type": "number",
+      "label": "S2 desired real flow (g/s)",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30–6.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "default": 5.0
+    },
+    "Stage2Weight": {
+      "type": "number",
+      "label": "Low-flow transition weight (g)",
+      "description": "At this cumulative beverage weight the plugin advances once from S2 to S3. Runtime forces this value to remain at least 2 g above the S1 dump trigger.",
+      "default": 40.0
+    },
+    "Stage2PressureLimit": {
+      "type": "number",
+      "label": "S2 pressure limiter (bar)",
+      "description": "Safety pressure limiter for S2. Runtime limited to the emergency pressure stop and never above 12 bar.",
+      "default": 6.0
+    },
+    "Stage3Flow": {
+      "type": "number",
+      "label": "S3 desired real flow (g/s)",
+      "description": "User-facing physical cup-scale mass-flow target. Runtime hard-clamped to 0.30–6.50 g/s. Low Water calibration dynamically searches around this value and a valid LUT maps it to a bounded DE1 command.",
+      "default": 1.5
+    },
+    "FinalWeight": {
+      "type": "number",
+      "label": "Final beverage weight (g)",
+      "description": "At this cumulative beverage weight the plugin ends espresso. Runtime forces this value to remain at least 5 g above the S2 transition.",
+      "default": 100.0
+    },
+    "Stage3PressureLimit": {
+      "type": "number",
+      "label": "S3 pressure limiter (bar)",
+      "description": "Safety pressure limiter for S3. Runtime limited to the emergency pressure stop and never above 12 bar.",
+      "default": 3.0
+    },
+    "HardPressureLimit": {
+      "type": "number",
+      "label": "Emergency pressure stop (bar)",
+      "description": "Independent fail-safe. Runtime hard-clamped to 1–12 bar; if measured pressure exceeds this limit for three snapshots, the plugin stops the shot.",
+      "default": 8.0
+    },
+    "ScaleResetThreshold": {
+      "type": "number",
+      "label": "Scale tare detection threshold (g)",
+      "description": "A sudden downward weight jump larger than this is treated as a tare/reset so cumulative weight survives the second Espresso start.",
+      "default": 2.0
+    },
+    "NoScaleTimeoutSeconds": {
+      "type": "number",
+      "label": "No-scale timeout (s)",
+      "description": "Fail-safe: stop if no usable weight snapshot arrives from /ws/v1/scale/snapshot after the controlled pour starts.",
+      "default": 5.0
+    },
+    "UseCalibrationLut": {
+      "type": "boolean",
+      "label": "Use real-flow calibration LUT",
+      "description": "When a valid scale-derived calibration exists, HyperEx flow settings are treated as desired real beverage mass flow (g/s) and mapped to DE1 command flow.",
+      "default": true
+    },
+    "FlowMultiplierScope": {
+      "type": "enum",
+      "label": "DE1 flowMultiplier scope",
+      "values": [
+        "Off",
+        "HyperEx only",
+        "Global"
+      ],
+      "default": "HyperEx only",
+      "description": "Off never changes flowMultiplier. HyperEx only temporarily applies the calibration multiplier for HyperEx/Flow Calibration and restores the prior value when leaving. Global leaves the machine multiplier in effect for all profiles; writing a global value still requires the explicit diagnostic-page action."
+    },
+    "CalibrationMode": {
+      "type": "enum",
+      "label": "Calibration mode",
+      "values": [
+        "Low Water",
+        "Full"
+      ],
+      "default": "Low Water",
+      "description": "Selects one of two persistent calibration profiles. Low Water (default) runs a target-focused 3×3 search around the current HyperEx real-flow targets and auto-generates a validated LUT. Full retains the wider 12-point engineering staircase."
+    },
+    "CalibrationStepSeconds": {
+      "type": "number",
+      "label": "Legacy calibration step duration (unused by dual-mode profiles)",
+      "description": "Legacy compatibility setting. v0.1.26 Low Water/Full calibration programs use mode-specific timings.",
+      "default": 10.0
+    },
+    "CalibrationSettleSeconds": {
+      "type": "number",
+      "label": "Legacy calibration settle exclusion (unused by dual-mode profiles)",
+      "description": "Legacy compatibility setting. v0.1.26 calibration uses mode-specific settling windows.",
+      "default": 4.0
+    },
+    "CalibrationWindowSeconds": {
+      "type": "number",
+      "label": "Legacy calibration fit window (unused by dual-mode profiles)",
+      "description": "Legacy compatibility setting. v0.1.26 calibration uses mode-specific regression windows.",
+      "default": 3.5
+    },
+    "CalibrationAutoSync": {
+      "type": "boolean",
+      "label": "Auto-sync calibration to HyperEx",
+      "description": "After a calibration run passes all quality gates, persist the new LUT and rewrite the HyperEx profile command flows automatically. Invalid runs keep the previous valid LUT unchanged.",
+      "default": true
+    },
+    "AutoApplyNextShot": {
+      "type": "boolean",
+      "label": "Auto-apply verified next-shot adaptation",
+      "description": "Default ON after installation. When a completed HyperEx shot produces an actionable suggestion that passes the same consensus, bounds, readback, and profile verification used by manual APPLY NEXT SHOT, apply it automatically for the next shot. If disabled, v0.1.39 manual-confirmation behavior is restored.",
+      "default": true
+    },
+    "DiagnosticEnabled": {
+      "type": "boolean",
+      "label": "Diagnostic logging",
+      "description": "Capture the last HyperEx run in memory for machine Flow vs scale GFlow analysis. Does not change brew control.",
+      "default": true
+    },
+    "IdleDashboardShortcut": {
+      "type": "boolean",
+      "label": "Dashboard idle DIAG/CAL shortcut",
+      "description": "Streamline header shortcut while HyperEx is idle. Default on for convenient DIAG/CAL access. If another plugin occupies the reserved header slot and the shortcut is not visible, use Plugins → HyperEx Pulse Filter. HyperEx does not run an active reclaim/retry loop for the slot.",
+      "default": true
+    },
+    "DiagnosticSampleIntervalMs": {
+      "type": "number",
+      "label": "Diagnostic sample interval (ms)",
+      "description": "Target cadence for combined machine/scale diagnostic samples. 100 ms is recommended.",
+      "default": 100
+    },
+    "MaxRunSeconds": {
+      "type": "number",
+      "label": "Maximum sequence time (s)",
+      "description": "Overall fail-safe time limit for a HyperEx sequence.",
+      "default": 180.0
+    },
+    "DirectDriverStartTest": {
+      "type": "boolean",
+      "label": "TEST: direct driver write after soak",
+      "description": "Default OFF. Optional REST Espresso then one A002=04 attempt. Device test still required physical GHC. Original GHC countdown/retries and safety guards retained. No extra 20s cup-weight watchdog.",
+      "default": false
+    },
+    "LiveFlowTrimTest": {
+      "type": "boolean",
+      "label": "TEST: live flow trim · 杯内控流",
+      "description": "Default ON at level3 (250ms/200writes). Saved explicit preferences are retained. Up to2000 checks per shot across S2+S3; separate write limits50/150/200/250 by level, including retries. Keep fresh regression, pressure/command limits, ACK/target feedback and ACK+matching target releases waiting after50ms; next level tick plus new scale data required. Missing-response timeout2s. After3 consecutive missing targets, continue observation and retry the SAME unresolved target no sooner than3s after dispatch; matching feedback recovers automatically. Normal next-shot learning retained. Cup-flow target band±2%; next-shot learning band follows the learning policy (Normal±8%, Aggressive±5%). Native1/16ml/s quantization and lag mean2% is a target, not guaranteed accuracy. Verified command windows can now feed next-shot learning through explicitly labelled local-model normalization. In continuous mode the same shot budget also covers S1 live control; corrected S1 startup learning uses observed-target exposure normalization with original quality gates.",
+      "default": true
+    },
+    "LiveFlowTrimLevel": {
+      "type": "enum",
+      "label": "杯内调流档位 · Live flow trim level",
+      "description": "默认三档。每杯 S2+S3 最多检查2000次；写入上限含重试。1：原周期/50次；2：300ms/150次；3：250ms/200次；4：200ms/250次。已保存开关和档位保持不变。 Default level3;2000checks; write caps50/150/200/250. Explicit saved settings retained.",
+      "default": "3",
+      "values": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ]
+    },
+    "S2StartupAssist": {
+      "type": "boolean",
+      "label": "S2 起步响应补偿 · Startup assist",
+      "description": "主动泄压后提前补水；启动延时、目标比例（基准可选：基础泵倍率 / 目标折算）、收回 / 收口起点（30–99%，同时决定满灌结束点、补水跳过阈值与实测噪声底）、最长补水与渐进时间可在诊断页的下一杯可视化曲线编辑区用滑块设置并保存。默认0ms、160%、85%、4s、0.2s；灌水上限默认固定 7 ml/s（曲线目标–8，可改自适应按预测实时收）。目标折算是把S2目标杯流按上一杯实测尾段折算成泵指令，无合格实测时退回曲线基础指令。补水窗口按「帧确认 → onset → 预测杯流达到目标」计，收回收到驱动ACK即完成；节点与S2重叠区间在诊断页列出。机器指令仍受min(8ml/s,基准×1.6)、原限压90%、数据新鲜度、驱动ACK和预算保护；g/s经LUT/局部模型换算，不直接当ml/s。连续模式仍用旧短脉冲策略。 Configure refill in Next-shot curve editor; defaults0ms/160%/85%/4s/0.2s. Basis: base pump multiplier or target cup-flow (observed-tail model, profile-base fallback). Hardware-response accuracy is not guaranteed by editable software limits.",
+      "default": true
+    }
+  },
+  "api": [
+    {
+      "id": "skin",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "ui",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "status",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "rearm",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "advanced-settings",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "control-mode",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "diagnostics",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "diagnostics-csv",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "history-export",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "history-import",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-import",
+      "type": "http",
+      "data": {}
+    },    {
+      "id": "presets",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "presets-save",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "presets-apply",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "presets-clear",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "external-hello",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "external-status",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "external-flow",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "adaptive-next-apply",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "adaptive-auto-set",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "test-command-set",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "test-command-clear",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-status",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-mode",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-prepare",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-scope",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-sync",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-use-suggested",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-apply-global",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-restore-global",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "calibration-clear",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "startup-apply",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "startup-clear",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "changed",
+      "type": "websocket",
+      "data": {
+        "what": {
+          "type": "string",
+          "description": "Plugin-surface refresh hint"
+        }
+      }
+    },
+    {
+      "id": "ghcPrompt",
+      "type": "websocket",
+      "data": {
+        "status": {
+          "type": "string",
+          "description": "soak, waiting, confirmed, or cleared"
+        },
+        "secondsRemaining": {
+          "type": "number",
+          "description": "Whole seconds remaining in the current HyperEx prompt phase"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable HyperEx prompt/status"
+        }
+      }
+    },
+    {
+      "id": "adaptive-audit",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "curve-edit-apply",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "language",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "history-review",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "gain-memory-restore",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "perf-timing",
+      "type": "http",
+      "data": {}
+    },
+    {
+      "id": "refill-settings-save",
+      "type": "http",
+      "data": {}
+    }
+  ]
+}

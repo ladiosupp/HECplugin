@@ -1,0 +1,12496 @@
+function createPlugin(host) {
+  "use strict";
+
+  const API = "http://localhost:8080/api/v1";
+  const SCALE_WS = "ws://localhost:8080/ws/v1/scale/snapshot";
+  const WATER_WS = "ws://localhost:8080/ws/v1/machine/waterLevels";
+  const ID = "decenthyperexplugin.reaplugin";
+const PLUGIN_VERSION = "2.2.71";
+  
+  
+  
+  const STATUS_TIMING_ENABLED_DEFAULT = true;
+  const STATUS_TIMING_SAMPLES = 200;
+  
+  
+  const HYPEREX_TITLE_PREFIX = "HyperEx";
+  
+  
+  
+  
+  const LIMITS = Object.freeze({
+    commandFlowMin: 0.10, commandFlowMax: 8.00,
+    desiredRealFlowMin: 0.30, desiredRealFlowMax: 6.50,
+    temperatureMin: 70.0, temperatureMax: 100.0,
+    pressureMin: 0.50, pressureMax: 12.00,
+    stage1WeightMin: 1.0, stage1WeightMax: 20.0,
+    stage2WeightMax: 200.0, finalWeightMax: 300.0,
+    maxProfileFrames: 20
+  });
+  
+  
+  const ANGLE_DEADBAND_DEG=2;
+  
+  
+  
+  const CALIBRATION_MODES = {
+    low: {
+      label: "Low Water",
+      algorithm: "target-lut",
+      
+      
+      
+      
+      primeFlow: 3.00, primeSeconds: 3.0,
+      targetBlocks: [
+        { id: "S1", targetSource: "stage1", target: 2.00, commands: [0.65, 0.80, 0.95] },
+        { id: "S2", targetSource: "stage2", target: 5.00, commands: [2.20, 2.40, 2.60] },
+        { id: "S3", targetSource: "stage3", target: 1.50, commands: [0.70, 0.60, 0.50] }
+      ],
+      stepSeconds: 7.5, settleSeconds: 2.8, windowSeconds: 4.4,
+      hardStopG: 240, recommendedContainerMl: 300,
+      waterWarnMarginMm: 15, waterBlockMarginMm: 5
+    },
+    full: {
+      label: "Full",
+      algorithm: "staircase",
+      primeFlow: 3.00, primeSeconds: 3.0,
+      commands: [0.25, 0.40, 0.60, 0.80, 1.00, 1.25, 1.50, 2.00, 2.50, 3.00, 4.00, 5.00],
+      stepSeconds: 6.0, settleSeconds: 2.2, windowSeconds: 3.4,
+      hardStopG: 270, recommendedContainerMl: 300,
+      waterWarnMarginMm: 20, waterBlockMarginMm: 7
+    }
+  };
+  const STORAGE_UI_LANGUAGE="uiLanguage";
+  function createUiTranslator(pairs) {
+    const maps={zh:new Map(),en:new Map()};
+    for(const [en,zh] of pairs){if(en&&zh){maps.zh.set(en,zh);maps.en.set(zh,en);}}
+    const escape=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+    const patterns={};for(const lang of ["zh","en"])patterns[lang]=new RegExp([...maps[lang].keys()].sort((a,b)=>b.length-a.length).map(escape).join("|"),"g");
+    return (value,language)=>{
+      const source=String(value==null?"":value),lang=language==="en"?"en":"zh",map=maps[lang],trim=source.trim();
+      if(map.has(trim))return source.slice(0,source.indexOf(trim))+map.get(trim)+source.slice(source.indexOf(trim)+trim.length);
+      return source.replace(patterns[lang],(match,offset)=>{
+        const prev=source[offset-1]||"",next=source[offset+match.length]||"";
+        if(/[A-Za-z]/.test(match[0])&&/[A-Za-z]/.test(prev)||/[A-Za-z]/.test(match[match.length-1])&&/[A-Za-z]/.test(next))return match;
+        return map.get(match);
+      });
+    };
+  }
+
+  const UI_LANGUAGE_PAIRS=[["Last shot","上一杯"],["S2 measured","S2 实测"],["Next shot state","下一杯状态"],["History","历史"],["Refill command ceiling","补水指令上限"],["Calibration status","校准状态"],["Calibration mode / scope","校准模式与作用域"],["Run calibration","执行校准"],["LUT table","校准表 LUT"],["Reference advice","参考建议"],["Precise numeric editor","精确数值编辑"],["Release mode / learning strength","泄压模式与学习强度"],["Release mode","泄压模式"],["Auto","自动"],["Auto · 0 bar release frame","自动 · 0 bar 泄压帧"],["On · Idle / soak / GHC restart","开 · 待机／浸泡／GHC 重启"],["Off · Continuous","关 · 连续"],["Release: AUTO · 0 bar release / soak → S2","自动泄压：0 bar 泄压／浸泡 → S2"],["Release: ON · Release / soak / GHC restart","主动泄压：开 · 泄压／浸泡／GHC 重启"],["Release: OFF · Continuous S1 → S2 → S3","连续萃取：S1 → S2 → S3"],["Targets / pressure safety","目标与压力保护"],["Direct driver start test","直接驱动启动试验"],["Saving submits the current values of every fold above","保存提交以上所有折叠的当前值"],["Last shot · Validation","上一杯 · 验证结果"],["S1 startup / S3 stability","S1 启动 / S3 稳定性"],["Next shot · Learning advice","下一杯 · 学习建议"],["Next shot · Applied profile","下一杯 · 已应用曲线"],["Learning history · Exclude / restore","学习历史 · 排除 / 恢复"],["Presets · Target → command","预设 · 目标 → 指令"],["Last shot · Command snapshot","上一杯 · 启动指令快照"],["Live / end-of-run telemetry","实时 / 结束数据"],["EXPORT HISTORY JSON","导出历史 JSON"],["IMPORT HISTORY JSON","导入学习历史 JSON"],["IMPORT LUT JSON","导入 LUT JSON"],["IMPORT FROM URL","从链接导入"],["ABORT","中止"],["APPLY PRESET","应用预设"],["PRESETS · TARGET → COMMAND","预设 · 目标 → 指令"],["Save the current targets and effective commands into a slot. Applying a slot writes its targets back to plugin settings and re-applies its commands as the next-shot override.","把当前目标与实际指令存进一格；应用时会把该目标写回插件设置，并把该指令作为下一杯覆盖重新应用。"],["HISTORY JSON","历史 JSON"],["Up to 80 shots; new shots keep the per-shot trace.","最多 80 杯；新增杯保留逐点记录。"],["CONTROL LAW CURVE: the angle between the check-to-check trend line (previous check → current regression) and the target line; 0° = trend lies on the target, 90° = parallel offset, above 90° = diverging.","控制律曲线：每次检测点的趋势线（上一检测点 → 当前回归）与目标线的夹角；0° 表示趋势落在目标线上，90° 表示平行偏离，大于 90° 表示背离目标。"],["monitoring-unresponsive-trend","趋势未响应，重新决策中"],["Save refill settings", "保存补水参数"], ["Refill settings saved for next shot", "补水参数已保存，下一杯生效"], ["Checking…", "正在检查…"], ["CHECKING", "正在检查"], ["ENTRY", "入口"], ["Dashboard", "首页"], ["DIAG / CAL", "诊断／校准"], ["Plugins → HyperEx Pulse Filter", "插件 → HyperEx Pulse Filter"], ["is enabled by default. If another plugin occupies the reserved header slot, open", "默认启用。如果入口被其他插件占用，请打开"], ["STEP 1 · FLOW CALIBRATION", "步骤 1 · 流量校准"], ["First-time setup. Use an", "首次设置。请使用"], ["EMPTY BASKET", "空粉碗"], ["and a large catch vessel. A valid RAW-scale calibration creates the real-flow LUT used by HyperEx. Invalid calibration never overwrites the previous valid LUT.", "和大容量接液容器。有效的原始秤重校准会生成 HyperEx 的实际杯流 LUT；失败不会覆盖已有有效 LUT。"], ["CALIBRATION LUT", "校准 LUT"], ["WATER / VESSEL / TANK PREFLIGHT", "水量／容器／水箱检查"], ["Waiting for live DE1 tank level…", "正在读取 DE1 水箱水位…"], ["PREPARE FLOW CAL", "准备流量校准"], ["SYNC HYPEREX", "同步 HyperEx"], ["USE SUGGESTED FOR NEXT CAL", "下次校准使用建议值"], ["APPLY SUGGESTED GLOBALLY", "全局应用建议值"], ["RESTORE PREVIOUS GLOBAL", "恢复原全局设置"], ["CLEAR CAL MAP", "清除校准表"], ["WAITING", "等待中"], ["STEP 2 · SHOT-TO-SHOT AUTO ADAPTIVE", "步骤 2 · 杯间自动学习"], ["Normal daily workflow after calibration. Every completed HyperEx shot is measured with RAW scale weight + timestamp regression. S1, S2 and S3 are evaluated separately; verified changes apply only to the", "校准后的日常流程。每杯完成后，用原始秤重及时间戳回归分别评价 S1、S2、S3；通过校验的调整仅用于"], ["next shot", "下一杯"], [". Normal mode has no running-shot scale closed loop. The optional live-flow test is labelled separately below. No extra skipStep calls.", "。常规模式不进行杯内秤重闭环；可选杯内调流试验在下方单独标注，不增加跳步。"], ["ADAPTIVE HISTORY", "学习历史"], ["checking persistent storage…", "正在检查持久化存储…"], ["NEXT SHOT · APPLIED PROFILE", "下一杯 · 已应用曲线"], ["Actual workflow commands below come from GET /workflow. Real g/s targets and LUT commands remain reference values. VERIFIED also requires successful machine upload acknowledgement.", "下方实际指令来自曲线读取结果。杯流目标 g/s 和 LUT 指令仅作参考；已校验状态还要求机器上传确认成功。"], ["READ RAW WORKFLOW", "读取原始曲线"], ["Raw workflow / adaptive audit JSON", "原始曲线／学习审计 JSON"], ["Next shot · Curve editor", "下一杯 · 曲线编辑"], ["Select S1, S2 or an S3 early/mid/late point. Drag vertically or use the buttons. Orange previews the next-shot machine-flow commands (ml/s), gray shows current settings. Actual cup flow in g/s is below; the preview does not guarantee output.", "选择 S1、S2 或 S3 前／中／后控制点，上下拖动或按按钮调整。橙线是下一杯机器流量指令草稿（ml/s），灰虚线是当前设置；杯中实测 g/s 见下方曲线，预览不代表实际出液保证。"], ["Current settings", "当前设置"], ["Draft commands", "草稿指令"], ["S3 three-stage curve", "S3 三段曲线"], ["↓ One level down", "↓ 下调一档"], ["↑ One level up", "↑ 上调一档"], ["One level = 1/16 ml/s. S3 may place EARLY above MID or LATE below MID; only an adjacent rise is capped. Adjustment stops at a bound.", "一档 = 1/16 ml/s。S3 允许前段高于中段、后段低于中段；只限制相邻增幅。到边界时停止调整。"], ["Apply to next shot", "应用到下一杯"], ["Reload current curve", "重新载入当前曲线"], ["Reading current curve…", "正在读取当前曲线…"], ["LATEST SHOT · COMMAND SNAPSHOT", "上一杯 · 启动指令快照"], ["Historical command snapshot captured at shot start. It may differ from NEXT SHOT after adaptation.", "此快照记录该杯开始时的指令，可能与学习调整后的下一杯设置不同。"], ["LATEST SHOT · VALIDATION", "上一杯 · 验证结果"], ["RAW real flow is a multi-second linear regression of unmodified scale weight vs scale timestamp. Instantaneous RAW dW/dt is not the acceptance reference.", "实际杯流通过数秒原始秤重与秤时间戳的线性回归计算；瞬时 RAW dW/dt 不作为验收依据。"], ["S1 STARTUP / S3 STABILITY", "S1 启动／S3 稳定性"], ["S1 separates first-rise delay from active cup flow. S3 tracks EARLY / MID / LATE stability and stall/decay behavior.", "S1 分别分析首次出液延迟和出液后的杯流；S3 跟踪前、中、后段稳定性及停滞／衰减。"], ["NEXT SHOT ADAPTIVE", "下一杯学习建议"], ["AUTOMATIC PATH", "自动流程"], ["S1 startup, S2 level and S3 LEVEL + SHAPE use repeated completed-shot evidence and bounded corrections. Calibration LUT is never rewritten by adaptive history.", "S1 启动、S2 流量及 S3 总体流量与形状均使用已完成杯的重复证据进行限幅调整；学习历史不会改写校准 LUT。"], ["LIVE / END-OF-RUN TELEMETRY", "实时／结束时数据"], ["REAL SCALE CURVES", "实际秤重曲线"], ["Machine target / machine flow: ml/s. Cup target / Decaid weightFlow / RAW-scale slope: g/s. Weight chart is the unmodified scale weight stream.", "机器目标／机器流量单位为 ml/s；杯流目标／Decaid 杯流／原始秤重斜率单位为 g/s。重量图保留原始秤重数据。"], ["LIVE TEST: green circles = check RAW g/s; gray circles on baseline = check without usable regression; orange ↑/↓ = write vector drawn on the previous-check → this-write trend line (arrow up/down = command increase/decrease in absolute terms; divergence from the target line is shown as-is, length = step amplitude ml/s); the vector angle is that trend line vs the target line (0° = trend lying on the target); ↻ = fresh vector on an unresponsive trend; pale blue = smoothed trend trajectory (check → write points joined); pale squares = machine target/trend response ml/s. Tap/hover markers for details.", "杯内试验：绿圆点表示有效杯流检查；底部灰点表示无有效回归；橙色 ↑／↓ 表示写入矢量（箭头画在上一检测点到本次写入的趋势连线上；上下＝指令增／减的绝对方向，与目标背离时如实显示；长短＝指令幅度 ml/s；矢量角度＝这条连线与目标线的夹角，0° 表示趋势落在目标线上）；↻ 表示趋势未响应时的重新决策（不是重发同值）；浅蓝细线表示检测点／控制点连线平滑后的趋势轨迹；浅色方块表示机器目标／趋势响应。点击或悬停查看详情。"], ["OPTIONAL", "可选"], ["STEP 3 · MANUAL / ENGINEERING", "步骤 3 · 手动／工程设置"], ["Optional precise numeric and engineering settings. For daily use, edit the next-shot curve in STEP 2; with AUTO APPLY enabled, learning continues after new shots.", "可选的精确数值和工程设置。日常可在 STEP 2 直接编辑下一杯曲线；AUTO APPLY 保持开启时，新杯完成后继续学习。"], ["Optional precise numeric and engineering settings. For daily use, edit the next-shot curve in STEP 2; with AUTO APPLY enabled, learning continues after new shots.", "可选的精确数值和工程设置。日常可在 步骤 2 直接编辑下一杯曲线；自动应用 保持开启时，新杯完成后继续学习。"], ["REFERENCE ADVISORY · NO RUNNING-SHOT CONTROL", "参考建议 · 不改变正在运行的杯"], ["Manual reference ranges derived from the latest shot. These are not LUT rewrites.", "根据上一杯提供手动参考范围，不改写 LUT。"], ["ADVANCED / TEST OVERRIDE EDITOR", "高级／手动指令编辑"], ["EDITOR ONLY.", "仅为编辑草稿。"], ["AUTO / LUT uses the saved calibration LUT. MANUAL TEST changes only future HyperEx profile commands. S3 shape advances by profile time only.", "自动／LUT 使用已保存校准表；手动设置只改变之后的 HyperEx 指令；S3 三段仅按曲线时间推进。"], ["Precise numeric editor (optional)", "精确数值编辑（可选）"], ["APPLY SELECTED MODES & COMMANDS", "应用所选模式与指令"], ["Selecting ADAPTIVE is a draft; press APPLY SELECTED MODES & COMMANDS to take effect.", "选 ADAPTIVE 为草稿态，需按「应用所选模式与指令」才生效。"], ["RETURN ALL TO LUT", "全部恢复 LUT"], ["ADVANCED SETTINGS · QUICK EDIT", "高级设置 · 快速编辑"], ["Same source of truth as", "与以下设置使用相同来源："], [". Saving here writes normal plugin Settings; there is no second settings store.", "。在这里保存会写入常规插件设置，不另建设置副本。"], ["REAL-FLOW TARGETS", "实际杯流目标"], ["Parameter", "参数"], ["Value", "数值"], ["S1 target (g/s)", "S1 目标 (g/s)"], ["S2 target (g/s)", "S2 目标 (g/s)"], ["S3 target (g/s)", "S3 目标 (g/s)"], ["TEMPERATURE / PRESSURE SAFETY", "温度／压力保护"], ["Temperature (°C)", "温度 (°C)"], ["Current profile temperature · adjust on home page", "当前曲线温度 · 在首页调整"], ["Emergency pressure (bar)", "紧急压力上限 (bar)"], ["S1 pressure limiter (bar)", "S1 压力限制 (bar)"], ["S2 pressure limiter (bar)", "S2 压力限制 (bar)"], ["S3 pressure limiter (bar)", "S3 压力限制 (bar)"], ["EXPERIMENTAL S2/S3 LIVE FLOW TRIM · DEFAULT OFF", "S2／S3 杯内调流试验 · 默认关闭"], ["Enable live flow trim", "开启杯内调流"], ["Level", "档位"], ["DIRECT DRIVER START TEST · DEFAULT OFF", "直接驱动启动试验 · 默认关闭"], ["After soak: Espresso request, then raw A002=04 write", "浸泡后：请求萃取，再尝试写入 A002=04"], ["One optional raw write. Original GHC confirmation countdown, re-arm retries and safety guards remain active. Physical GHC confirmation was still required in the 1.54 device test.", "仅一次可选原始写入。原有 GHC 确认倒计时、重新准备重试及保护保持有效；1.54 真机试验仍需实体按键确认。"], ["RELEASE / SCALE / RETRY / DIAGNOSTICS", "泄压／秤／重试／诊断"], ["Release flow threshold (ml/s)", "泄压流量阈值 (ml/s)"], ["Low-flow stable samples", "低流量稳定样本数"], ["Release fallback (s)", "泄压备用延时 (s)"], ["Release timeout (s)", "泄压超时 (s)"], ["Scale tare threshold (g)", "秤归零识别阈值 (g)"], ["No-scale timeout (s)", "秤数据超时 (s)"], ["Auto-arm retry 1 (s)", "自动准备重试 1 (s)"], ["Auto-arm retry 2 (s)", "自动准备重试 2 (s)"], ["Diagnostic sample (ms)", "诊断采样间隔 (ms)"], ["Maximum sequence (s)", "流程最长时间 (s)"], ["SAVE TO PLUGIN SETTINGS", "保存到插件设置"], ["EXPORT", "导出"], ["STEP 4 · COPY CSV", "步骤 4 · 复制 CSV"], ["Raw engineering export for offline analysis or bug reports. This is intentionally last because it is not needed for normal brewing.", "供离线分析或问题排查的原始数据导出；日常冲煮无需使用，因此放在最后。"], ["LAST RUN CSV", "上一杯 CSV"], ["Combined DE1/Decaid samples plus RAW scale weight/timestamp/dW-dt and profile-frame markers.", "合并 DE1／Decaid 样本、原始秤重／时间戳／重量变化率以及曲线帧标记。"], ["RE-ARM", "重新准备"], ["COPY CSV", "复制 CSV"], ["CLOSE / HOME", "关闭／首页"], ["CLOSE", "关闭"], ["DIAGNOSTICS UI ERROR", "诊断界面错误"], ["The diagnostics script failed to initialize. CLOSE / HOME remains available.", "诊断脚本初始化失败；仍可使用关闭／首页。"], ["Unknown UI error", "未知界面错误"], ["S3 EARLY", "S3 前段"], ["S3 MID", "S3 中段"], ["S3 LATE", "S3 后段"], ["Generated parameters", "生成参数"], ["Current", "当前"], ["Draft ml/s", "草稿 ml/s"], ["Early", "前段"], ["Mid", "中段"], ["Late until end", "后段至结束"], ["FLAT", "平直"], ["Verifying and applying to next shot…", "正在校验并应用到下一杯…"], ["Current parameters changed; draft retained. Reload the current curve before editing.", "当前参数已更新；草稿已保留，请先重新载入当前曲线再编辑。"], ["Draft not applied · press Apply to next shot to activate.", "草稿未应用 · 点击“应用到下一杯”后生效。"], ["Manual curve applied to next shot; learning continues after new shots.", "手动曲线已应用到下一杯；新杯完成后继续自动学习。"], ["Select a point, then drag vertically or use the up/down buttons.", "点选控制点后上下拖动，或点击上调／下调。"], ["Running or profile unverified; preview only.", "当前运行中或曲线未校验，只能预览。"], ["Next-shot curve not verified", "下一杯曲线未校验"], ["Verified and applied, but UI refresh failed. Reopen diagnostics:", "已校验应用到下一杯，但界面刷新失败，请重新打开诊断页："], ["Not applied:", "未应用："], [". Draft retained.", "。草稿已保留。"], ["Cup target g/s", "杯中目标 g/s"], ["RAW cup flow g/s", "RAW杯流 g/s"], ["Decaid cup flow g/s", "Decaid杯流 g/s"], ["Machine target ml/s", "机器目标 ml/s"], ["Machine actual ml/s", "机器实际 ml/s"], ["Issued command ml/s", "写入指令 ml/s"], ["Active release is complete. Wait until the soak reaches 0. The plugin will arm the second stage only after the full soak.", "主动泄压已完成。请等待浸泡倒计时归零，插件会在浸泡完成后准备第二阶段。"], ["CHECK PINK LIGHT", "检查粉红灯"], ["Pink ON → press the physical GHC Espresso button. Pink OFF → tap RE-ARM, then press GHC when the light turns pink.", "粉红灯亮 → 按实体 GHC 萃取键；粉红灯灭 → 点击重新准备，待灯亮后再按实体键。"], ["FLOW CAL RUNNING", "流量校准运行中"], ["EMPTY BASKET. Leave the staircase running until Idle. Do not remove the catch vessel; the plugin will stop at the selected-mode actual-water safety cap before 300 ml.", "请使用空粉碗。阶梯校准运行至空闲前不要移走接液容器；插件会在所选模式的实际水量上限停止，低于 300 ml。"], ["HYPEREX IDLE", "HyperEx 空闲"], ["No GHC action is required.", "当前无需操作 GHC 按键。"], ["arm requests", "准备请求次数"], ["DIRECT TEST:", "直接启动试验："], ["RE-ARMING…", "正在重新准备…"], ["RE-ARM REQUEST SENT", "已发送重新准备请求"], ["Wait for the pink GHC Espresso light, then press the physical GHC Espresso button.", "等待 GHC 粉红灯亮，再按实体萃取键。"], ["RE-ARM FAILED", "重新准备失败"], ["MANUAL TEST", "手动设置"], ["AUTO / LUT", "自动／LUT"], ["Current profile command state unavailable.", "无法读取当前曲线指令状态。"], ["Source:", "来源："], ["Manual LUT restore", "手动恢复 LUT"], ["Manual curve editor", "手动曲线编辑"], ["Next-shot execution", "下一杯执行"], ["WORKFLOW READBACK VERIFIED", "曲线读取校验通过"], ["WORKFLOW NOT VERIFIED", "曲线尚未校验"], ["expected commands are shown only as a reference until repair succeeds.", "修复成功前，预期指令仅供参考。"], ["Stage", "阶段"], ["Target REAL g/s", "实际杯流目标 g/s"], ["LUT cmd", "LUT 指令"], ["Mode", "模式"], ["ACTUAL WORKFLOW COMMAND", "实际曲线指令"], ["No completed HyperEx shot command snapshot is available.", "尚无已完成 HyperEx 杯的启动指令快照。"], ["LIVE TRIM ENABLED:", "杯内调流已开启："], ["this table is the shot-start snapshot. In-shot commands and machine target responses are plotted and exported below.", "本表为启动快照；杯内写入及机器目标反馈在下方绘制并导出。"], ["Target", "目标"], ["Mode AT SHOT START", "启动时模式"], ["COMMANDS USED BY THIS SHOT", "该杯启动指令"], ["Historical snapshot only. It does not change when NEXT SHOT ADAPTIVE writes a new profile after this shot.", "仅为历史快照，不随该杯完成后的下一杯学习调整而改变。"], ["Level 1 · original cadence / max 50 writes", "一档 · 原周期 / 最多50次写入"], ["Level 2 · 300 ms / max 150 writes", "二档 · 300 ms / 最多150次写入"], ["Level 3 · 250 ms / max 200 writes", "三档 · 250 ms / 最多200次写入"], ["Level 4 · 200 ms / max 250 writes", "四档 · 200 ms / 最多250次写入"], ["Single settings source · core curve: S1", "统一设置来源 · 核心曲线：S1"], ["GHC timeout", "GHC 超时"], ["DIRECT DRIVER TEST:", "直接驱动试验："], ["Settings load error:", "设置读取失败："], ["Invalid setting:", "无效设置："], ["Save these values to the normal HyperEx plugin Settings?", "将这些值保存到常规 HyperEx 插件设置吗？"], ["This uses the same settings source shown on the Plugins page and reloads HyperEx once.", "这会写入插件页面的同一设置来源，并重新载入 HyperEx 一次。"], ["Save failed:", "保存失败："], ["Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.", "设置已保存，正在重新载入 HyperEx；如果页面关闭，请重新打开诊断／校准。"], ["CAL READY", "校准就绪"], ["REQUIRED FIRST", "请先完成"], ["ACTIVE · AUTO NEXT SHOT", "已启用 · 自动学习下一杯"], ["WAITING FOR VALID LUT", "等待有效 LUT"], ["ADAPTIVE HISTORY · PERSISTENT", "学习历史 · 已持久保存"], ["saved shot(s),", "杯已保存，"], ["compatible with the current calibration/LUT and basket context.", "杯与当前校准／LUT 及粉碗阶段兼容。"], ["empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.", "条空粉碗／升级前基线已保留；有粉共识从日常出杯积累。"], ["ADAPTIVE HISTORY · SESSION ONLY", "学习历史 · 仅本次会话"], ["Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.", "本次会话仍可杯间学习，但无法跨重新载入／版本保留。"], ["checking pluginStorage write/readback…", "正在校验插件存储写入和读回…"], ["Low Water", "低水量"], ["Full", "完整阶梯"], ["Tank level unavailable", "水箱水位不可用"], ["refill threshold:", "补水阈值："], ["calibration plateaus", "校准平台"], ["nominal DE1 command water", "DE1 指令估算水量"], ["ml or larger", "ml 或更大容量"], ["catch vessel. Plugin actively stops around", "接液容器。插件会主动停止于约"], ["actual collected water.", "实际接液量。"], ["CALIBRATION READY", "校准已就绪"], ["CALIBRATION NOT READY", "校准未就绪"], ["map base:", "校准基准："], ["LUT valid", "LUT 有效"], ["LAST CAL RUN INVALID — previous valid LUT retained", "上次校准无效，已保留原有效 LUT"], ["LAST CAL RUN VALID", "上次校准有效"], ["Test mode:", "手动模式："], ["HYPEREX ONLY", "仅 HyperEx"], ["TARGET LUT:", "目标 LUT："], ["Frame", "曲线帧"], ["Block / target", "区段／目标"], ["DE1 cmd", "DE1 指令"], ["RAW real g/s", "RAW 实测 g/s"], ["DE1 flow", "DE1 流量"], ["Status", "状态"], ["ANCHOR SOURCE", "校准锚点来源"], ["No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.", "尚无校准记录。低水量模式会自动搜索三个实际杯流目标，全部通过后生成 LUT；完整模式保留宽范围工程阶梯。"], ["Stable skip topology:", "固定跳步流程："], ["scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.", "此处为杯间参考；可选 S3 衰减补偿使用 5 帧，子阶段仅由自身计时推进，不增加插件跳步。"], ["Legacy S1 startup factor", "旧版 S1 启动系数"], ["is stored but ignored in", "已保存，但在当前版本中不使用："], ["CLEAR LEGACY", "清除旧设置"], ["Clear failed:", "清除失败："], ["Calibration status error:", "校准状态错误："], ["Same-target retry ↻", "同值重试 ↻"], ["Command up ↑", "上调指令 ↑"], ["Command down ↓", "下调指令 ↓"], ["Issued command (direction unknown)", "写入指令（方向未知）"], ["no valid RAW regression", "无有效 RAW 回归"], ["EXPERIMENTAL LIVE FLOW TRIM", "杯内调流试验"], ["level", "档位"], ["checks", "检查"], ["writes", "写入"], ["streak", "连续缺失"], ["retries", "重试"], ["interval", "间隔"], ["driver ACK", "驱动 ACK"], ["target responses", "目标反馈"], ["target misses", "目标反馈缺失"], ["(after 3: slower same-target retry, auto-recover)", "（超过 3 次后降低同值重试频率，反馈恢复后自动继续）"], ["next-shot band ±8%; confirmed windows pooled with labelled seed-normalization model", "杯间容差 ±8%；汇总有效窗口，使用已标注的初始指令归一化模型"], ["No complete shot yet; brew normally.", "尚无完整杯数据；请按正常流程出杯。"], ["Next-shot decision · output error and adjustment eligibility are evaluated separately", "下一杯决策 · 输出偏差与调整资格分别判断"], ["Manual curve supersedes this shot's proposal", "手动曲线已替代此杯建议"], ["Verified and applied", "已校验应用"], ["Apply failed; previous curve retained", "应用失败，保留原曲线"], ["Adjustment proposed; awaiting verification and application", "有调整建议，等待校验应用"], ["Adjustment proposed; automatic application disabled", "有调整建议，自动应用已关闭"], ["Within algorithm tolerance; hold", "在算法容差内，保持"], ["Shot variability too high; hold instead of chasing it", "杯间差异较大，暂不自动追调"], ["Limited by pressure or actuator conditions", "受压力／执行条件限制"], ["Waiting for comparable learning evidence", "等待可比学习证据"], ["No learning evidence yet", "尚无学习证据"], ["To adjust manually, use the Next shot · Curve editor above, then apply and verify.", "若需主动调整，可使用上方“下一杯 · 曲线编辑”；修改后需应用并校验。"], ["No S1/S3 stability diagnostics available yet.", "尚无 S1／S3 稳定性诊断。"], ["S1 STARTUP", "S1 启动"], ["confidence", "置信度"], ["First cup rise:", "首次出液："], ["active avg", "出液期均值"], ["Quality:", "数据质量："], ["S3 STABILITY", "S3 稳定性"], ["EARLY 25%", "前段 25%"], ["MID 50%", "中段 50%"], ["LATE 25%", "后段 25%"], ["Stall window", "停滞窗口"], ["YES", "是"], ["none", "无"], ["LATEST SHOT · S3 FRAME MEASUREMENTS", "上一杯 · S3 分段测量"], ["The Command column is the command captured for this completed shot, not the current NEXT SHOT profile.", "指令列记录该杯启动指令，不代表当前下一杯设置。"], ["SHOT command", "该杯启动指令"], ["MEASURED RAW regression", "RAW 回归实测"], ["Window", "窗口"], ["No advisory available yet. Run a complete HyperEx shot.", "尚无参考建议；正常完成一杯 HyperEx 后生成。"], ["Confidence", "置信度"], ["Action", "动作"], ["Current cmd", "当前指令"], ["Mid ref", "中间参考值"], ["Reference Range", "参考范围"], ["Advice", "建议"], ["Range is deliberately only a partial step toward the theoretical correction. LOW confidence may still show a broad manual-test range; INSUFFICIENT never shows a numeric range.", "参考范围仅为朝理论修正值移动的一小步。低置信度可显示较宽的手动范围；证据不足时不显示数值范围。"], ["SHAPE ACTIVE ↓", "三段曲线已启用 ↓"], ["LATE DECAY", "后段衰减"], ["WAITING FOR SHOT EVIDENCE", "等待出杯证据"], ["After STEP 1 calibration is valid, run HyperEx normally. The plugin will collect completed-shot evidence and adjust only the next shot when its safety gates pass.", "步骤 1 校准有效后正常出杯；插件会积累已完成杯的证据，通过保护条件后仅调整下一杯。"], ["HOLD", "保持"], ["Source run:", "来源杯："], ["all numeric changes below apply to the", "下方所有数值修改仅用于"], ["NEXT SHOT ONLY", "下一杯"], ["Evidence", "证据"], ["LEARNING seed / fixed command", "学习初始／固定指令"], ["NEXT action / command", "下一杯动作／指令"], ["Next shot uses the manual curve.", "下一杯已采用手动曲线。"], ["Analysis below is from the old shot; it has not validated the new curve.", "以下为旧杯分析，尚未作为新曲线效果验证。"], ["RAW multi-second regression", "RAW 数秒回归"], ["LEVEL error", "总体流量误差"], ["max var", "最大变异"], ["normalized shape var", "归一化形状变异"], ["normalized SHAPE", "归一化形状"], ["Shot control review", "本杯控制诊断"], ["Controller status:", "杯内状态："], ["Tail error", "后段误差"], ["Ripple CV", "波动 CV"], ["Overshoot", "过冲"], ["writes ·", "次写入 ·"], ["ACTUAL RAW OUTPUT", "RAW 实际输出"], ["phase error", "整段误差"], ["Manual curve applied to next shot.", "手动曲线已应用到下一杯。"], ["The table retains the old-shot analysis; NEXT SHOT · APPLIED PROFILE shows current execution. Learning continues after new shots.", "上表保留旧杯算法分析；当前执行以 NEXT SHOT · APPLIED PROFILE 为准。新杯完成后继续自动学习。"], ["The table retains the old-shot analysis; NEXT SHOT · APPLIED PROFILE shows current execution. Learning continues after new shots.", "上表保留旧杯算法分析；当前执行以 下一杯 · 已应用曲线 为准。新杯完成后继续自动学习。"], ["APPLIED ✓ TO NEXT SHOT", "已校验应用 ✓ 到下一杯"], ["Readback and profile sync completed. The NEXT SHOT · APPLIED PROFILE block above is authoritative.", "读取校验及曲线同步已完成；以上方“下一杯 · 已应用曲线”为准。"], ["NOT APPLIED", "尚未应用"], ["AUTO APPLY failed safely:", "自动应用失败，已保留原设置："], ["unknown error", "未知错误"], ["Previous profile retained.", "已保留原曲线。"], ["AUTO APPLY ARMED", "自动应用已准备"], ["An actionable proposal exists; wait for successful APPLIED readback before treating it as current.", "已有可执行建议，读取校验成功后才算当前已应用设置。"], ["APPLY NEXT SHOT", "应用到下一杯"], ["AUTO APPLY is OFF.", "自动应用已关闭。"], ["NO NUMERIC CHANGE YET", "暂未修改数值"], ["the plugin keeps the current profile until the required repeated evidence agrees.", "达到重复证据一致性要求前，插件保留当前曲线。"], ["Apply the bounded NEXT SHOT adaptive suggestion?", "应用已限幅的下一杯学习建议吗？"], ["This changes only future-shot profile commands. It does NOT modify the calibration LUT and does NOT change a running shot.", "只改变之后的曲线指令，不修改校准 LUT，也不改变正在运行的杯。"], ["server did not verify the applied override", "服务器尚未验证应用结果"], ["Next-shot suggestion VERIFIED and applied.", "下一杯建议已通过校验并应用。"], ["The NEXT SHOT · APPLIED PROFILE block is authoritative.", "以“下一杯 · 已应用曲线”为准。"], ["Apply next shot failed:", "下一杯应用失败："], ["CHECKING BASELINE", "正在检查基线"], ["Checking calibration and saved empty-basket evidence.", "正在检查校准及已保存空粉碗证据。"], ["Empty-basket Step 2:", "空粉碗步骤 2："], ["empty/pre-upgrade references retained. Starting LUT and bounded commands are kept; normal coffees then refine the next-shot trajectory automatically.", "条空粉碗／升级前参考已保留。初始 LUT 及限幅指令保持，之后通过正常出杯自动改进下一杯曲线。"], ["Reading fresh workflow without repair/upload…", "正在重新读取曲线，不进行修复或上传…"], ["Read failed", "读取失败"], ["expected current profile match:", "与当前预期曲线一致："], ["latest proposal match:", "与最新建议一致："], ["no actionable proposal", "无可执行建议"], ["no attempt recorded", "尚无应用记录"], ["Upload acknowledgement is not independent DE1 memory readback.", "上传确认不等于独立读回 DE1 内存。"], ["Raw readback unavailable:", "原始读取结果不可用："], ["Auto apply state:", "自动应用状态："], ["AUTO APPLY NEXT SHOT:", "自动应用下一杯："], ["Default mode · verified actionable suggestions apply automatically.", "默认模式 · 自动应用通过校验的可执行建议。"], ["Manual mode · enter DIAG and press APPLY NEXT SHOT when a numeric suggestion is available.", "手动模式 · 有数值建议时，在诊断中点击应用到下一杯。"], ["AUTO APPLY NEXT SHOT?", "自动应用下一杯吗？"], ["Verified actionable suggestions will apply automatically after completed HyperEx shots.", "HyperEx 出杯完成后，会自动应用通过校验的可执行建议。"], ["The plugin will return to the v0.1.39 manual APPLY NEXT SHOT workflow.", "插件将恢复为手动应用下一杯建议的流程。"], ["AUTO APPLY setting failed:", "自动应用设置失败："], ["REPEAT SAME SHAPE", "保持相同形状，再观察"], ["keep the current shape unchanged until repeated evidence is consistent.", "重复证据一致前保留当前形状。"], ["from NEXT SHOT ADAPTIVE", "来自下一杯学习建议"], ["from latest LATE DECAY", "来自最新后段衰减分析"], ["S3 SHAPE OVERRIDE EDITOR", "S3 三段曲线编辑"], ["profile-time only, no extra skipStep", "仅按曲线时间推进，不增加跳步"], ["APPLIED SHAPE", "已应用三段曲线"], ["inputs below are loaded from the current applied override.", "下方输入来自当前已应用设置。"], ["inputs below are only a TEST/PROPOSED editor until APPLY SELECTED MODES & COMMANDS succeeds.", "应用所选模式与指令成功前，下方输入仅为编辑草稿。"], ["EARLY cmd", "前段指令"], ["EARLY time", "前段时间"], ["MID cmd", "中段指令"], ["MID time", "中段时间"], ["LATE cmd", "后段指令"], ["DECAY COMP TEST", "衰减补偿设置"], ["Commands must be non-decreasing. Adjacent rises are bounded to ≤35% and ≤0.25 ml/s.", "指令须前段≤中段≤后段，并保留相邻增幅保护。"], ["The shape is enabled automatically only when AUTO APPLY is ON and a verified actionable adaptive suggestion passes all safety checks.", "自动应用开启，且可执行学习建议通过全部保护校验后，才会自动启用三段曲线。"], ["Target g/s", "目标 g/s"], ["Ref range", "参考范围"], ["Editor mode", "编辑模式"], ["Editor flat cmd", "平直指令草稿"], ["CURRENTLY APPLIED", "当前已应用"], ["DE1 command hard limit: 0.10–8.00 ml/s. MANUAL TEST changes only the HyperEx profile command; calibration LUT data remains untouched. If S3 DECAY COMP is enabled, its three shape commands override the flat S3 command.", "DE1 指令范围为 0.10–8.00 ml/s。手动设置仅改变 HyperEx 指令，不改校准 LUT。启用 S3 三段补偿后，其指令优先于平直设置。"], ["manual command must be 0.10–8.00 ml/s.", "手动指令必须为 0.10–8.00 ml/s。"], ["S3 shape commands must be 0.10–8.00 ml/s.", "S3 三段指令必须为 0.10–8.00 ml/s。"], ["S3 DECAY COMP commands must be non-decreasing: EARLY ≤ MID ≤ LATE.", "S3 补偿指令必须满足前段≤中段≤后段。"], ["S3 EARLY/MID times must be 3–30 seconds.", "S3 前段／中段时间必须为 3–30 秒。"], ["Apply these TEST commands to HyperEx?", "将这些手动指令应用到 HyperEx 吗？"], ["S1/S2/manual flat commands are static. S3 DECAY COMP, if enabled, advances only by profile time and adds NO plugin skipStep calls. Calibration LUT remains unchanged. Changes apply to the next normal shot only.", "S1／S2 及手动平直指令固定；启用 S3 补偿时仅按曲线时间推进，不增加跳步。校准 LUT 不变，修改仅用于下一杯正常出杯。"], ["Apply failed:", "应用失败："], ["Return S1/S2/S3 to AUTO / LUT and clear all manual test overrides, including S3 shape?", "将 S1／S2／S3 全部恢复自动／LUT，并清除包含 S3 三段曲线的手动设置吗？"], ["Reset failed:", "恢复失败："], ["DIAGNOSTICS / FLOW CAL", "诊断／流量校准"], ["STEP 1 calibrates the physical real-flow LUT. STEP 2 measures every completed shot and automatically adapts S1/S2/S3 for the next shot only. STEP 3 is manual engineering; STEP 4 exports CSV.", "步骤 1 校准实际杯流 LUT；步骤 2 测量完成的杯，并仅调整下一杯的 S1／S2／S3；步骤 3 为手动工程设置；步骤 4 导出 CSV。"], ["S1 target / RAW reg", "S1 目标／RAW 回归"], ["S2 target / RAW reg", "S2 目标／RAW 回归"], ["S3 target / RAW reg", "S3 目标／RAW 回归"], ["DE1 Flow", "DE1 流量"], ["RAW regression", "RAW 回归"], ["Status / error", "状态／误差"], ["LATEST RUN", "最近运行"], ["Latest diagnostic run is not a HyperEx shot. Run HyperEx to populate current-shot validation.", "最近的诊断记录不是 HyperEx 出杯；正常完成 HyperEx 后显示验证结果。"], ["S1/S3 stability diagnostics are generated only from a HyperEx shot.", "S1／S3 稳定性诊断仅根据 HyperEx 出杯生成。"], ["NEW INSTALL / NO PREVIOUS SHOT", "新安装／暂无上一杯"], ["Run one complete HyperEx validation shot to generate the first next-shot suggestion.", "正常完成一杯 HyperEx 后生成首次下一杯建议。"], ["Reference advice is generated only from a HyperEx shot.", "参考建议仅根据 HyperEx 出杯生成。"], ["RAW SCALE WEIGHT", "原始秤重"], ["RAW instantaneous dW/dt", "原始瞬时重量变化率"], ["Decaid weightFlow", "Decaid 杯流"], ["RUN RESULT", "运行结果"], ["COMBINED SAMPLES", "合并样本数"], ["RAW SCALE SAMPLES", "原始秤样本数"], ["LAST RUN", "上次运行"], ["none yet", "暂无"], ["Latest-shot command snapshot unavailable:", "上一杯指令快照不可用："], ["DIAG ERROR", "诊断错误"], ["WATER PREFLIGHT BLOCKED.", "水箱检查未通过。"], ["DE1 tank level is too close to/below the refill threshold.", "DE1 水位接近或低于补水阈值。"], ["Refill the tank and try again.", "请补水后重试。"], ["DE1 tank level is unavailable or stale.", "DE1 水位不可用或已过期。"], ["The plugin cannot verify tank water automatically. Continue only if you have manually checked the tank.", "插件无法自动确认水量；请人工检查水箱后再继续。"], ["DE1 tank water margin is low.", "DE1 水箱剩余水位余量较低。"], ["Continue anyway?", "仍要继续吗？"], ["EMPTY BASKET ONLY", "仅限空粉碗"], ["target/search plateaus", "目标／搜索平台"], ["Nominal DE1 commanded water:", "DE1 指令估算水量："], ["Actual-water safety stop:", "实际水量保护停止点："], ["Tare the scale, then start Espresso manually. Do not remove the vessel until Idle.", "请秤归零后手动启动萃取，进入空闲前不要移走接液容器。"], ["Continue?", "继续吗？"], ["calibration profile selected. EMPTY BASKET. Tare scale, start Espresso, and leave the vessel in place until Idle.", "已选择校准曲线。请使用空粉碗、秤归零后启动萃取，空闲前保持接液容器原位。"], ["Prepare failed:", "准备失败："], ["Sync failed:", "同步失败："], ["Suggested multiplier will be used for the NEXT calibration run. Re-run Flow Cal to create a LUT tied to that multiplier.", "建议倍率将用于下次校准。使用该倍率重新校准后生成对应 LUT。"], ["Action failed:", "操作失败："], ["This changes DE1 flowMultiplier globally for ALL profiles. The current value will be saved for Restore. After applying, run Flow Cal again. Continue?", "这会全局修改所有曲线的 DE1 流量倍率，当前值会保留供恢复。应用后需重新流量校准。继续吗？"], ["Global multiplier applied. Run Flow Cal again before using the LUT.", "全局倍率已应用；使用 LUT 前请重新流量校准。"], ["Global apply failed:", "全局应用失败："], ["Restore the DE1 flowMultiplier saved before the last global apply?", "恢复上次全局应用前保存的 DE1 流量倍率吗？"], ["Restore failed:", "恢复失败："], ["Clear the saved real-flow LUT? HyperEx will return to direct DE1 flow commands.", "清除已保存实际杯流 LUT 吗？HyperEx 将恢复为直接 DE1 流量指令。"], ["All levels: max 2000 checks per shot; continuous mode also includes S1. Write budget is separate and shown by level; retries count as writes. ACK + matching target releases waiting after at least50ms; new writes occur only at level checks with fresh scale data. Missing responses retain the2s fault timeout. After 3 consecutive ACK-without-target misses, continue checks with recoverable same-target retries spaced at least3s apart. Unconfirmed targets retry without accumulating commands. Level 1 defaults to 944 ms. Level 4 is an experimental software cap, not a proven hardware maximum. Target band ±2% (native quantization and response dynamics may prevent reaching it); bounded raw A010 changes, no extra skips. Normal shot-to-shot learning remains ON; confirmed target windows are pooled and normalized to the starting seed with a labelled local response model. Original profile restored afterwards.", "全部档位每杯最多检查 2000 次；连续模式包含 S1，三段共用预算；写入上限按档位独立计算，包含重试。收到 ACK 及匹配目标后至少等待 50ms，之后仅在档位检查点、秤数据更新时考虑写入。缺失反馈仍使用 2s 超时；连续超过 3 次缺少目标反馈后，继续检查，同值重试至少间隔 3s，恢复反馈后自动继续。未确认指令不累加。一档默认 944ms；四档是软件试验上限，未证明为硬件极限。杯流目标容差 ±2%，量化和响应动态可能使其无法达到。A010 写入限幅且不增加跳步；正常杯间学习保持有效，采用明确标注的局部归一化模型，结束后恢复原曲线。"], ["S3 early", "S3 前段"], ["S3 mid", "S3 中段"], ["S3 late", "S3 后段"], ["; S1/S2 still transition by cumulative weight; release/soak are omitted from this diagram.", "；S1、S2仍按累计重量转换，泄压和浸泡在示意图中省略。"], ["Next-shot machine-flow curve editor", "下一杯机器流量曲线编辑器"], ["Live-trim level", "杯内调流档位"], ["Manually edited curve supersedes the old-shot proposal; learning continues after the next shot", "手动曲线已替代旧杯建议，下一杯完成后继续学习"], ["Curve running or synchronizing; apply when idle", "曲线正在运行或同步，请空闲后再应用"], ["Select and verify the HyperEx profile first", "请先选择并校验 HyperEx 曲线"], ["A valid LUT is not ready", "有效 LUT 尚未就绪"], ["Next-shot parameters changed; reload the current curve before editing", "下一杯参数已改变，请重新载入当前曲线后编辑"], ["Flow commands must be within 0.10–8.00 ml/s", "流量指令必须在0.10–8.00 ml/s内"], ["S3 early/mid durations must be within 3–30s", "S3前段、中段时间必须在3–30秒内"], ["S3 requires early≤mid≤late and bounded adjacent rises", "S3需满足前段≤中段≤后段，且相邻增幅在现有保护范围内"], ["Flat S3 requires identical commands at all three points", "平直 S3 的三个指令必须一致"], ["Curve has not changed", "曲线尚未修改"], ["Selected profile changed", "所选曲线已改变"], ["Home or next-shot curve changed; reload before editing", "首页或下一杯曲线已改变，请重新载入后编辑"], ["Next-shot curve verification has not succeeded", "下一杯曲线尚未校验成功"], ["Manual curve verified and applied; learning continues after new shots", "手动曲线已校验并应用到下一杯；新杯完成后继续自动学习"], ["No reliable cup-flow window", "缺少可靠杯流量窗口"], ["Good target tracking and smoothness", "目标跟踪及平滑度良好"], ["Cup flow remains off target", "杯流量仍偏离目标"], ["Mean near target; ripple needs improvement", "均值接近目标，波动仍需改善"], ["Overlapping action group; evaluate combined outcome only", "重叠动作组，仅评价组合后的变化"], ["Before/after one action; a single observation does not prove causality", "单次动作前后变化，不能单凭一次观察确定因果"], ["Insufficient clean before/after windows; record retained", "前后有效窗口不足，保留记录"], ["Target error decreased after group", "组后目标误差减小"], ["Target error increased after group", "组后目标误差增大"], ["Little change across the group", "组前后变化较小"], ["Admitted as learning candidate; consensus and bounds still apply", "已纳入学习候选；仍经过杯间共识与限幅"], ["Not admitted yet:", "暂未纳入："], ["Original fixed-curve learning rules", "使用原固定曲线学习规则"], ["Good tail target tracking and smoothness for this shot", "本杯后段目标跟踪及平滑度良好"], ["Shot still has errors or insufficient data; see stage diagnostics", "本杯仍有偏差或数据不足，详情见阶段诊断"], ["Live trim disabled", "未开启杯内调流"], ["Automatic analysis supports daily use; overlapping actions are evaluated together. Routine screenshots/CSV are not required; export is optional for deeper troubleshooting.", "自动分析用于日常判断；动作响应重叠时评价组合效果。无需日常上传截图或CSV；异常时可选择导出深入排查。"], ["Profile synchronizing; try later", "曲线正在同步，请稍后再试"], ["Next-shot parameters changed; reload before editing", "下一杯参数已改变，请重新载入后编辑"], ["Manual parameters verified and applied; learning continues after new shots", "手动参数已校验并应用；新杯完成后继续自动学习"], ["RELEASING", "泄压中"], ["ACTIVE PRESSURE RELEASE", "主动泄压"], ["ACTIVE RELEASE", "主动泄压"], ["STATUS", "状态"], ["WAITING FOR SETTLE", "等待稳定"], ["SOAK", "浸泡"], ["WAIT — PINK LIGHT AFTER 0", "等待归零后粉红灯亮"], ["ACTIVE RELEASE COMPLETE", "主动泄压完成"], ["NEXT", "下一步"], ["WAIT FOR PINK", "等待粉红灯"], ["WAIT FOR PINK LIGHT", "等待粉红灯亮"], ["ARMING", "正在准备"], ["PINK OFF? TAP HERE", "粉红灯灭？点击此处"], ["TIME", "时间"], ["PRESS GHC", "按实体 GHC 键"], ["PINK ON", "粉红灯亮"], ["PINK OFF", "粉红灯灭"], ["TAP RE-ARM", "点击重新准备"], ["FLOW CAL", "流量校准"], ["RUNNING", "运行中"], ["READY · ADD COFFEE", "就绪 · 可以加粉"], ["EMPTY BASELINE COMPLETE", "空粉碗基线完成"], ["FLOW CAL / DIAG", "流量校准／诊断"], ["OFF", "关闭"], ["ON", "开启"], ["Off", "关闭"], ["Global", "全局"], ["GLOBAL", "全局"], ["HyperEx only", "仅 HyperEx"], ["HIT", "达标"], ["NEAR", "接近"], ["MISS", "偏离"], ["STARTUP / REPEAT", "启动阶段／继续观察"], ["STABLE", "稳定"], ["MEDIUM", "中等"], ["HIGH", "高"], ["LOW", "低"], ["INSUFFICIENT", "证据不足"], ["PENDING", "等待共识"], ["REPEAT SAME COMMAND", "保持相同指令，再观察"], ["VARIABLE / REPEAT", "杯间波动较大／继续观察"], ["REPEAT", "继续观察"], ["ADJUST", "调整"], ["LEVEL + SHAPE", "总体流量＋形状"], ["LIMITED / HOLD", "受限／保持"], ["SHAPE ADVISED", "建议调整形状"], ["TRANSIENT", "过渡阶段"], ["READY FOR COFFEE · AUTO", "可以加粉 · 自动"], ["NORMAL COFFEE · AUTO", "正常有粉出杯 · 自动"], ["STEP 2 · EMPTY BASELINE", "步骤 2 · 空粉碗基线"], ["Original fixed-command evidence path", "原固定指令证据流程"], ["confirmed-target windows normalized to shot-start seed (local model)", "已确认目标窗口归一化到启动指令（局部模型）"], ["startup 20–80%", "启动 20–80%"], ["Live learning admitted:", "杯内数据已纳入学习："], ["Live learning:", "杯内数据学习："], ["withheld:", "暂不纳入："], ["no usable RAW windows", "无可用 RAW 窗口"], ["usable", "有效时长"], ["temporal coverage", "时间覆盖率"], ["consistent-window share", "一致窗口占比"], ["RAW windows require", "RAW 窗口要求"], ["unique samples", "独立样本"], ["region(s)", "个区段"], ["across", "分布于"], ["confirmed-target windows", "已确认目标窗口"], ["response normalized to starting seed using a local proportional model", "使用局部比例模型将响应归一化到启动指令"], ["fresh machine target/frame coverage below80% or fewer than4 samples", "新鲜机器目标／帧数据覆盖率低于 80%，或不足 4 个样本"], ["pressure limiter active in at least20% of samples", "至少 20% 样本触及压力限制"], ["actual flow below70% of observed target in at least25% of samples", "至少 25% 样本中，机器实际流量低于所见目标的 70%"], ["confirmed S3 stall; withhold normalized numeric evidence", "发现 S3 停滞，暂不使用归一化数值证据"], ["fewer than6 RAW scale samples after latest tare", "最近归零后不足 6 个原始秤样本"], ["S3 confirmed-target windows total below5s", "S3 已确认目标窗口总计不足 5s"], ["Two matching S1 startup shots agree on the same error direction; apply one bounded damped step to the next shot.", "两杯可比 S1 启动证据方向一致，下一杯应用一次限幅缓和修正。"], ["One clean S1 startup shot is not enough. Repeat the same command once more.", "目前只有一杯合格 S1 启动证据；保持相同指令，从正常出杯继续积累。"], ["S2 data is not clean enough for numeric adaptation.", "S2 数据尚不足以进行数值学习。"], ["S3 segment/overall data is insufficient.", "S3 分段／整体证据不足。"], ["One clean S3 shot is not enough. Repeat the same shape once more before numeric next-shot adaptation.", "目前只有一杯合格 S3 证据；保持相同形状，从正常出杯继续积累后再做数值学习。"], ["2 matching MEDIUM-confidence startup shots", "2 杯匹配的中等置信度启动证据"], ["2 matching shots", "2 杯匹配证据"], ["deadband", "容差"], ["per next shot", "每下一杯"], ["max", "最多"], ["normal next-shot learning retained", "保留正常杯间学习"], ["shot-finished", "该杯已结束"], ["monitoring", "持续检查"], ["monitoring-degraded-target-feedback", "目标反馈缺失，低频同值重试中"], ["armed-for-S2", "等待 S2"], ["driver-ack-timeout", "驱动 ACK 超时"], ["raw-transport-failed", "原始传输断开"], ["waiting-for-write-response", "等待写入反馈"], ["minimum-write-interval", "等待最短写入间隔"], ["waiting-for-new-scale-sample", "等待新秤样本"], ["degraded-target-feedback-cooldown", "目标反馈缺失，等待重试间隔"], ["inside-2pct-band", "已在 ±2% 目标范围内"], ["pressure-or-actuator-limited", "压力或执行流量受限"], ["unconfirmed-target-direction-changed", "未确认目标的修正方向已反转，暂缓重试"], ["command-bound", "已到指令边界"], ["stage-transition", "阶段转换中"], ["frame-not-confirmed", "曲线帧未确认"], ["frame-settle", "等待当前帧稳定"], ["settling-or-stale-telemetry", "等待稳定或新鲜数据"], ["raw-regression-insufficient", "RAW 回归证据不足"], ["raw-socket-not-ready", "原始连接未就绪"], ["frame-changed-or-command-busy", "曲线帧变化或指令处理中"], ["driver-ack", "驱动 ACK"], ["machine-target-response", "机器目标反馈"], ["check", "检查"], ["write", "写入"], ["hold", "保持"], ["final60% mean", "后 60% 均值"], ["ripple CV", "波动 CV"], ["overshoot", "过冲"], ["collected", "接液量"], ["transit", "通过时间"], ["samples", "样本"], ["late/early", "后／前段比值"], ["20–80% flow", "20–80% 杯流"], ["20–80% samples", "20–80% 样本"], ["active", "出液期"], ["mean", "均值"], ["var", "变异"], ["overall", "整体"], ["LEVEL", "总体流量"], ["SHAPE", "形状"], ["APPLIED", "已应用"], ["scheduled", "已排队"], ["applying", "正在应用"], ["applied", "已应用"], ["waiting", "等待中"], ["manual-applied", "已手动应用"], ["curve-applied", "已应用手动曲线"], ["error", "错误"], ["failed", "失败"], ["true", "是"], ["false", "否"], ["maximum", "上限"], ["Enable", "开启"], ["Disable", "关闭"], ["Enable AUTO APPLY NEXT SHOT?", "开启自动应用下一杯吗？"], ["Disable AUTO APPLY NEXT SHOT?", "关闭自动应用下一杯吗？"], ["g/s while DE1", "g/s，同时 DE1 流量为"], ["auto apply:", "自动应用："], ["NEXT SHOT:", "下一杯："], ["raw scale", "原始秤数据"], ["catch vessel.", "接液容器。"], ["checking persistent history storage", "正在检查历史持久化存储"], ["Single source of truth: values are loaded from Plugins → HyperEx Pulse Filter settings.", "统一设置来源：数值来自插件 → HyperEx Pulse Filter 设置。"], ["legacy calibration map; rerun v0.1.27+ Flow Cal", "旧版校准表，需更新版本流量校准"], ["legacy v0.1.37 adaptive override ignored; run a new validation shot and apply again", "旧版 0.1.37 学习设置已忽略，后续正常出杯后再应用"], ["basket context changed; previous overrides ignored; using LUT baseline", "粉碗阶段已改变，忽略原覆盖值，使用 LUT 基线"], ["calibration LUT changed; manual test override ignored", "校准 LUT 已改变，忽略原手动覆盖值"], ["real-flow targets changed; manual test override ignored", "实际杯流目标已改变，忽略原手动覆盖值"], ["empty/pre-upgrade baseline seed; normal coffee learning", "使用空粉碗／升级前初始基线，继续正常有粉学习"], ["stored S3 shape rejected:", "已保存 S3 形状被拒绝："], ["non-finite value", "存在非有限数值"], ["command outside hard limits", "指令超出硬边界"], ["timing outside 3–30 s", "时间超出 3–30s"], ["commands must be non-decreasing", "指令必须单调不减"], ["adjacent rise exceeds test bound", "相邻增幅超出限制"], ["Could not read DE1 flowMultiplier:", "无法读取 DE1 流量倍率："], ["Fresh DE1 flowMultiplier readback unavailable", "无法重新读取 DE1 流量倍率"], ["selection left scope during multiplier update", "倍率更新时所选曲线已离开作用范围"], ["Could not restore previous flowMultiplier", "无法恢复原流量倍率"], ["S1 startup trajectory is not long/clean enough for a numeric test range. Keep the current command and repeat.", "S1 启动轨迹时长或质量不足以给出数值范围；保持当前指令继续观察。"], ["S1 whole-phase regression is startup-sensitive; the 20–80% trajectory is still insufficient for a numeric adjustment.", "S1 整段回归受启动影响较大，20–80% 轨迹仍不足以支持数值调整。"], ["% of target. Keep the current command; startup delay is reported separately.", "% 目标范围内。保持当前指令；启动延迟单独报告。"], ["S1 command is indicated by the startup 20–80% trajectory. This range is intentionally small; first-rise delay is not treated as flow error.", "S1 指令参考启动 20–80% 轨迹。范围有意较小，首次出液延迟不视为流量误差。"], ["Not enough usable RAW weight-regression data; keep the current command and repeat an empty-basket validation.", "有效 RAW 秤重回归证据不足；保持当前指令，继续空粉碗验证。"], ["Regression exists but target error could not be evaluated.", "存在回归，但无法评价目标误差。"], ["LOW-FLOW STALL SUSPECTED: machine flow stayed active while a", "疑似低流量停滞：机器仍有流量，但"], ["g/s. Try a modestly higher static S3 command and repeat; do not rewrite the LUT from one stall run.", "g/s。可适度提高 S3 固定指令继续观察，不要根据一次停滞改写 LUT。"], ["S3 whole-phase average can hide late decay: LATE/EARLY=", "S3 整段均值可能掩盖后段衰减：后／前段比值="], ["Prefer the NEXT SHOT adaptive-shape suggestion over a flat static correction.", "优先参考下一杯三段形状建议。"], ["Regression quality/window is insufficient; keep the current LUT command and repeat the empty-basket validation.", "回归质量或窗口不足；保持当前 LUT 指令，继续空粉碗验证。"], ["Data confidence is low, so repeat once before treating this as confirmed.", "数据置信度低，需进一步证据确认。"], ["% of target; keep the current command.", "% 目标范围内，保持当前指令。"], ["A regression exists, but the command used by this shot is unavailable. Repeat before changing anything.", "存在回归，但无法确认该杯所用指令；暂不修改。"], ["LOW confidence · manual test only; repeat the empty-basket run before treating the result as calibration.", "低置信度 · 仅供手动参考，不能直接作为校准结果。"], ["confidence · still a manual test range, not an automatic correction.", "置信度 · 仍为手动参考范围，不自动修正。"], ["S1 is startup-transient, so its range is intentionally narrower.", "S1 属启动过渡阶段，因此参考范围更窄。"], ["Actual observed target/pressure quality passed", "实际所见目标及压力质量通过"], ["Coffee actuator evidence missing; keep command", "缺少有粉执行证据，保持指令"], ["Coffee machine telemetry/frame coverage insufficient; keep command", "有粉机器数据／帧覆盖不足，保持指令"], ["Pressure limiter may be active; cup-flow target may be unreachable. Keep command, do not increase pressure", "可能触及压力限制，杯流目标或暂不可达；保持指令，不提高压力"], ["Machine flow is not tracking the shot command; withhold numeric correction", "机器流量未跟随该杯指令，暂不做数值修正"], ["Coffee pressure and actuator quality gates passed", "有粉压力及执行质量条件通过"], ["STALL RECOVERY: clean EARLY/MID + confirmed late stall", "停滞恢复：前／中段数据有效，且后段停滞已确认"], ["live target-normalized frame windows", "杯内目标归一化分帧窗口"], ["live target-normalized stability windows", "杯内目标归一化稳定窗口"], ["Run Step 1 with an empty locked-in basket to save the original LUT.", "在步骤 1 锁好空粉碗运行校准，保存原始 LUT。"], ["Continue normal coffees; the retained empty baseline is refined from completed coffee evidence.", "继续正常有粉出杯，使用完成杯的证据改进已保留空粉碗基线。"], ["Wait for the pending next-shot decision and verified application. Do not start an extra test cup.", "等待下一杯决策及应用校验，不必额外开一杯测试。"], ["Waiting for verified workflow and history readback; do not add test cups while checks are pending.", "等待曲线及历史读取校验，检查期间不必增加测试杯。"], ["Automatic application failed. Read the raw workflow/error and fix it; do not add empty-basket cups.", "自动应用失败。请查看原始曲线／错误并处理，不必增加空粉碗测试杯。"], ["Two clean stable empty-basket shots are sufficient. You can fill the basket and brew normally; no further empty-basket tuning.", "已有两杯有效稳定空粉碗证据，可以加粉正常冲煮，无需继续空粉碗调试。"], ["Empty-basket tuning has reached its 3-shot limit. Preserve this baseline and begin coffee use; at most one dedicated filled-basket acceptance shot.", "空粉碗调试已达 3 杯上限，保留基线并开始有粉冲煮；专门有粉验收最多一杯。"], ["The 3-shot limit is reached but data/stall checks need attention. Stop empty-basket tests and inspect existing diagnostics.", "已达 3 杯上限，但数据／停滞检查仍需关注；停止增加空粉碗测试，检查现有诊断。"], ["Run Step 2 with an empty basket. The plugin refines the next-shot command mapping while preserving the original LUT. It will prompt you automatically after 2–3 shots.", "步骤 2 使用空粉碗运行，插件保留原 LUT 并改进下一杯指令映射；2–3 杯后自动提示进入有粉冲煮。"], ["feed-forward prior; not a matching coffee consensus shot", "前馈参考，不是匹配的有粉共识杯"], ["Retain LUT, validated command baseline and historical cup-response reference. Coffee backpressure changes the response; numeric coffee updates require new coffee evidence and actuator/pressure quality.", "保留 LUT、已验证指令基线及历史杯流参考。有粉背压会改变响应；数值更新需要新的有粉证据及执行／压力质量。"], ["Persistent adaptive history unavailable. Shot-to-shot adaptation remains active for this plugin session, but cross-reload/version history is disabled.", "学习历史持久化不可用；本次会话仍可杯间学习，但不跨重新载入或版本保存。"], ["checking pluginStorage write/readback", "正在检查插件存储写入／读回"], ["history file write/read request failed", "历史文件写入／读取请求失败"], ["Adaptive evidence excluded: workflow profile truth was not verified at shot start (", "该杯未纳入学习：启动时曲线真实性尚未校验（"], ["data is not clean enough for numeric adaptation.", "数据不足以支持数值学习。"], ["shot is not enough. Repeat the same command once more.", "杯证据不足，保持相同指令继续观察。"], ["%; keep the same command rather than chasing shot variability.", "%；保持相同指令，避免追逐杯间波动。"], ["Both matching shots are inside the", "两杯匹配证据均处于"], ["The two matching shots do not show the same out-of-band direction; keep the command and collect another shot.", "两杯匹配证据的超差方向不一致，保持指令，从后续出杯继续积累。"], ["Consensus error is too small to justify a command change.", "共识误差较小，不足以调整指令。"], ["shots agree on the same error direction; apply one bounded damped step to the next shot.", "杯证据的误差方向一致，下一杯应用一次限幅缓和修正。"], ["Absolute frame levels vary, but normalized decay agrees in two matching shots. Apply a small next-shot shape correction with LEVEL held. Weighted command exposure is preserved; cup flow still requires validation.", "绝对分段流量有波动，但两杯归一化衰减一致。保持总体流量，下一杯小幅修正形状；保持加权指令量，实际杯流仍待验证。"], ["Not enough S1 RAW scale samples or collected gain.", "S1 原始秤样本或接液增量不足。"], ["2 matching high-quality shots; ±8% HIT deadband; max ±5% and ±0.10 ml/s per next shot", "两杯匹配高质量证据；±8% 容差；下一杯最多调整 ±5% 且 ±0.10 ml/s"], ["2 matching shots; LEVEL and SHAPE are solved separately", "两杯匹配证据，总体流量及形状分别求解"], ["stall recovery requires 2 same-shape shots that both show late weakness", "停滞恢复需要两杯相同形状、且都显示后段偏弱的证据"], ["A confirmed stall exists, but the matching shot does not confirm the same late-weakness pattern. Keep the current profile and repeat rather than chase one stall.", "存在已确认停滞，但另一杯未确认相同后段偏弱模式；保持当前曲线，避免追逐单次停滞。"], ["Two matching S3 shots confirm late weakness and at least one has a dedicated low-flow stall. Apply one conservative next-shot recovery step: LEVEL rises only if both overall flows are low, while normalized SHAPE shifts command toward LATE.", "两杯匹配 S3 均确认后段偏弱，至少一杯有低流量停滞；下一杯做保守恢复，仅两杯整体流量都低时上调总体流量，并把形状指令偏向后段。"], ["Repeated stall evidence was confirmed but the bounded recovery step is too small to justify a profile rewrite.", "重复停滞证据已确认，但限幅恢复值太小，暂不改写曲线。"], ["The repeated S3 response is too variable. Keep the same shape and repeat instead of chasing the latest shot.", "重复 S3 响应波动较大，保持相同形状，避免追逐最新单杯。"], ["S3 overall LEVEL and EARLY/MID/LATE SHAPE were solved separately, then combined into one bounded next-shot profile.", "分别求解 S3 总体流量与前／中／后形状，再组合为限幅的下一杯曲线。"], ["S3 consensus is inside the overall deadband and shape imbalance is too small to justify a change.", "S3 共识处于整体容差内，形状不平衡较小，暂不调整。"], ["Experimental live trim ran in this shot. This table proposes NEXT-SHOT changes only; normalized response is a local model. Actual RAW tracking metrics remain separate; LUT unchanged.", "该杯使用过杯内调流。本表仅建议修改下一杯；归一化响应为局部模型，实际 RAW 跟踪指标单独保留，LUT 不变。"], ["All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten.", "三个阶段均使用已完成杯证据；此杯间流程不做杯内秤控，不增加跳步，也不改写校准 LUT。"], ["Next-shot adaptation can only be applied while HyperEx is idle", "仅可在 HyperEx 空闲时应用下一杯学习建议"], ["No actionable bounded next-shot suggestion is available from the latest HyperEx run", "最新 HyperEx 记录暂无可执行的限幅下一杯建议"], ["adaptive override readback rejected:", "学习覆盖值读回被拒绝："], ["adaptive readback mismatch: expected", "学习值读回不一致，预期"], ["adaptive shape readback mismatch:", "学习形状读回不一致："], ["profile verification failed: effective mode is", "曲线验证失败，当前模式为"], ["No actionable suggestion; current settings retained", "无可执行建议，保留当前设置"], ["Applying proposal; awaiting workflow readback and machine upload acknowledgement", "正在应用建议，等待曲线读回及机器上传确认"], ["Verified next-shot adaptive override applied automatically", "下一杯学习设置已校验并自动应用"], ["flowMultiplier changed; fresh verification required", "流量倍率改变，需要重新读取校验"], ["home temperature changed during synchronization", "同步期间首页温度发生变化"], ["Profile sync blocked while shot or calibration is active", "出杯或校准期间禁止曲线同步"], ["Workflow selection changed during verification", "校验期间所选曲线发生变化"], ["Expected profile changed during verification; retry required", "校验期间预期曲线发生变化，需要重试"], ["Profile writes blocked during an active shot", "出杯期间禁止写入曲线"], ["waiting for fresh workflow readback", "等待读取最新曲线"], ["Shot began during profile verification", "曲线校验期间开始了出杯"], ["checking fresh workflow / multiplier readback", "正在读取最新曲线／倍率"], ["Waiting for stored calibration and overrides / multiplier scope / history context", "等待已存校准、手动设置、倍率作用域及历史阶段"], ["Scoped multiplier change still pending", "限定作用域的倍率调整尚未完成"], ["Valid LUT and matching actual multiplier required before arming", "准备前需要有效 LUT 及匹配的实际倍率"], ["GET /workflow no longer selects HyperEx", "读取结果已不再选择 HyperEx 曲线"], ["Final GET /workflow does not match expected LUT/adaptive profile", "最终读取曲线与预期 LUT／学习曲线不一致"], ["Multiplier or machine upload acknowledgement changed during verification", "校验期间倍率或机器上传确认发生变化"], ["GET /workflow verified; machine upload acknowledged (", "曲线读取校验通过，机器上传已确认（"], ["Cannot determine current DE1 flowMultiplier", "无法确认当前 DE1 流量倍率"], ["Live DE1 tank level is unavailable or stale. Manually verify the tank before calibration.", "DE1 实时水位不可用或过期，请在校准前人工确认水箱。"], ["Refill the tank before calibration.", "校准前请补水。"], ["Tank is above the DE1 refill threshold but the remaining height margin is only", "水箱高于补水阈值，但水位余量仅为"], ["anchor commands are not strictly increasing", "校准锚点指令不严格递增"], ["Experimental raw frame changed; restoring original profile before next shot", "杯内试验改过原始帧，下一杯前正在恢复原曲线"], ["Completed shot queued for next-shot evaluation", "已完成杯已排队进行下一杯分析"], ["New shot started before pending adaptation; current shot commands retained", "学习应用前已开始新杯，保留该杯当前指令"], ["Startup quality gates passed", "启动数据质量条件通过"], ["monitoring-target-feedback-miss-", "目标反馈缺失，继续检查："], ["-check-budget-complete", "次检查预算已用完"], ["-write-budget", "次写入预算已用完"], ["setup-failed:", "初始化失败："], ["write-failed:", "写入失败："], ["confirmed", "已确认"], ["repeat", "继续观察"], ["Early section", "前"], ["s → Mid", "s → 中"], ["s → Late until end", "s → 后段至结束"], ["times", "次"], ["Ripple CV", "波动CV"], ["Issued writes", "写入"], ["actual RAW g/s; rolling regressions over final60% of phase, separate from normalized learning model", "实际 RAW 杯流 g/s；使用阶段后 60% 的滚动回归，与归一化学习模型分别显示"], ["target-normalized local model", "目标归一化局部模型"], ["20–80% startup trajectory", "启动 20–80% 轨迹"], ["REFERENCE RANGE", "参考范围"], ["A higher command is indicated.", "建议参考较高指令。"], ["A lower command is indicated.", "建议参考较低指令。"], ["SHOT-TO-SHOT ONLY", "仅用于杯间调整"], ["Two matching S1", "两杯匹配 S1"], ["Two matching S2", "两杯匹配 S2"], ["2 matching shots; LEVEL uses overall S3; SHAPE is normalized to ~zero weighted level change; each frame max ±7% and ±0.05 ml/s", "两杯匹配证据；总体流量使用 S3 整段结果，形状归一化后保持加权总体流量近似不变；每帧最多 ±7% 且 ±0.05 ml/s"], ["SHAPE ONLY: 2 same-basis clean decay shots; normalized variation ≤15%, overall variation ≤20%; LEVEL held; each frame ≤4% and 0.05 ml/s; weighted command exposure within 0.2%", "仅调形状：两杯相同依据的有效衰减证据；归一化变异 ≤15%，整体变异 ≤20%；总体流量保持；每帧 ≤4% 且 0.05 ml/s；加权指令量变化在 0.2% 内"], ["STALL RECOVERY requires 2 same-shape late-weak shots with ≥1 confirmed stall; LEVEL max +4%; each frame max ±7% and ±0.05 ml/s", "停滞恢复需要两杯相同形状且后段偏弱的证据，至少一杯确认停滞；总体流量最多 +4%，每帧最多 ±7% 且 ±0.05 ml/s"], ["2 matching MEDIUM-confidence startup shots; ±8% deadband; max ±4% and ±0.04 ml/s per next shot", "两杯匹配中等置信度启动证据；±8% 容差；下一杯最多 ±4% 且 ±0.04 ml/s"], ["EXPERIMENTAL S2/S3 LIVE FLOW TRIM · DEFAULT ON / LEVEL 3", "S2／S3 杯内调流试验 · 默认开启／三档"], [". Live flow trim is enabled by default at level 3; its independent switch and diagnostics are below. Shot-to-shot proposals still affect only future shots. No extra skipStep calls.", "。杯内调流默认开启三档，独立开关及诊断见下方；杯间建议仍仅作用于下一杯，不增加跳步。"], ["AUTO APPLY", "自动应用"], ["STEP 1", "步骤 1"], ["STEP 2", "步骤 2"], ["STEP 3", "步骤 3"], ["STEP 4", "步骤 4"], ["History checked:", "已检查历史："], ["missing stage:", "缺少该阶段证据："], ["context mismatch:", "上下文不兼容："], ["command mismatch:", "指令不匹配："], ["storage excluded:", "存储未校验："], ["matched run:", "匹配来源杯："], ["Learning history · Exclude / restore shots", "学习历史 · 排除／恢复杯次"], ["Exclude known operator mistakes or plugin faults from future learning. Original records, LUT and already-applied settings are retained. Restore removes only your exclusion; automatic fault and stage-quality gates still apply. Legacy records without raw fault evidence cannot be fully audited automatically.", "将明确误操作或插件异常的杯次排除在之后学习之外，保留原记录、LUT 及已应用设置。恢复仅撤销人工排除，仍须通过自动异常与阶段质量检查。缺少原始异常证据的旧记录无法完全自动审核。"], ["Shot / time", "杯次／时间"], ["Learning status", "学习状态"], ["Stage evidence", "阶段证据"], ["Reason", "原因"], ["Shot", "杯次"], ["Operator mistake", "操作失误"], ["Plugin fault", "插件异常"], ["Scale / cup disturbed", "秤／容器受干扰"], ["Other", "其他"], ["Exclude from learning", "不参与学习"], ["Restore automatic eligibility", "恢复自动判定"], ["History save awaiting readback verification", "历史保存等待读回校验"], ["History storage verified", "历史存储已校验"], ["History is read-only until idle and storage is verified", "空闲且历史存储校验通过后才可编辑"], ["History review failed:", "历史标记失败："], ["Shot excluded from learning by user", "本杯已由用户标记为不参与学习"], ["Shot excluded from learning automatically", "本杯已因明确异常自动排除学习"], ["No confirmed execution/scale fault; stage quality and consensus gates still apply.", "未发现明确执行／秤重异常；仍须通过阶段质量与共识检查。"], ["Shot excluded from learning; see history review.", "本杯不参与学习，原因见历史审核。"], ["History review requires idle state", "请在空闲状态下标记历史"], ["History storage is not verified", "历史存储尚未校验"], ["Invalid history review", "无效历史标记"], ["History record not found", "未找到该历史杯次"], ["Select an exclusion reason", "请选择排除原因"], ["History exclusion applied in this session; persistent save unavailable", "本次会话已排除该杯，但持久化保存不可用"], ["Shot excluded from learning", "本杯已排除学习"], ["No confirmed fault", "未发现明确异常"], ["manual-excluded", "人工排除"], ["auto-excluded", "自动排除"], ["no-confirmed-fault", "无明确异常"], ["legacy-limited-audit", "旧记录，审核信息有限"], ["not-completed", "未正常完成"], ["unverified-profile", "启动曲线未通过校验"], ["execution-fault", "执行异常"], ["extra-skip-commands", "跳步指令超过正常次数"], ["scale-drop-during-extraction", "萃取期间秤重异常下降"], ["scale-jump-during-extraction", "萃取期间秤重异常跳增"], ["missing-record", "缺少记录"], ["missing-run", "缺少杯次"], ["operator-mistake", "操作失误"], ["plugin-fault", "插件异常"], ["scale-or-cup-disturbance", "秤／容器干扰"], ["other", "其他"], ["excluded", "已排除"], ["S2 startup response", "S2 起步响应"], ["Response delay:", "响应延迟："], ["20–80% rise:", "20–80% 爬升："], ["Tail error:", "后段偏差："], ["Next startup:", "下杯起步策略："], ["Executed startup boost:", "本杯已执行起步补偿："], ["S2 startup data insufficient", "S2 起步数据不足"], ["S2 startup scale discontinuity", "S2 起步秤数据不连续"], ["S2 startup onset samples missing", "S2 起步初始采样缺失"], ["S2 startup pressure or actuator headroom insufficient", "S2 起步压力或执行余量不足"], ["S2 baseline off target; learn level before startup boost", "S2 基础流量偏离目标；先学习整段流量，再判断起步补偿"], ["S2 tail ripple too high for startup boost", "S2 后段波动过大，暂不增加起步补偿"], ["S2 overshoot; startup boost withheld", "S2 有过冲，暂不增加起步补偿"], ["S2 rise crossings incomplete", "S2 未取得完整的 20–80% 爬升过程"], ["S2 startup shape eligible", "S2 起步曲线符合学习条件"], ["S2 startup integrity check failed", "S2 起步完整性检查未通过"], ["S2 startup needs two comparable clean shots", "S2 起步需要两杯可比的合格证据"], ["S2 startup assist disabled", "S2 起步补偿已关闭"], ["S2 startup history not verified", "S2 起步历史存储尚未校验"], ["S2 startup history context invalid", "S2 起步历史条件不匹配"], ["S2 latest comparable responses do not justify a startup boost", "S2 最近可比曲线不支持增加起步补偿"], ["S2 startup rise varies across shots", "S2 杯间爬升时间差异较大"], ["S2 native quantum exceeds startup boost bound", "S2 最小原生流量档位超过起步补偿范围"], ["S2 prior startup boost improved rise without excess ripple or overshoot", "S2 上次起步补偿缩短了爬升，且波动与过冲未超限"], ["S2 startup boost benefit not demonstrated; return to baseline", "S2 起步补偿未体现足够改善；恢复基础起步"], ["S2 two clean slow-rise shots; one-quantum bounded startup boost", "S2 两杯合格证据均爬升偏慢；启用一档限幅起步补偿"], ["S2 startup bounded pulse or base-return confirmation", "S2 限时起步补偿或基础指令回落确认中"], ["S2 startup boost", "S2 起步补偿"], ["S2 startup response settling", "等待 S2 起步响应稳定"], ["S2 startup base return driver ACK missing", "S2 回落基础指令缺少驱动确认"], ["S2 startup base retry driver ACK missing", "S2 重发基础指令缺少驱动确认"], ["S2 startup raw transport failed", "S2 起步驱动连接中断"], ["S2 startup return write failed", "S2 起步回落指令写入失败"], ["Startup dispatch guards not satisfied in time", "起步时间窗内未满足执行条件，保留正常基础指令"], ["monitoring-degraded-startup-base-feedback", "基础目标回读缺失，降级监测中"], ["windowed RAW source-time regression", "按原始秤时间戳计算的窗口回归"], ["Active release: ON · Release / soak / restart", "主动泄压：开 · 泄压／浸泡／重启"], ["Active release: OFF · Continuous S1 → S2 → S3", "主动泄压：关 · 连续萃取 S1 → S2 → S3"], ["Active pressure release", "主动泄压"], ["Active release", "主动泄压模式"], ["Continuous extraction", "连续萃取模式"], ["ON: release, soak and GHC restart. OFF: one continuous S1 → S2 → S3 extraction. Learning and command overrides are separate for each mode. Change only while idle.", "打开：泄压、浸泡并通过 GHC 重启；关闭：一次连续运行 S1 → S2 → S3。两种模式分别学习并保存指令。仅在空闲时切换。"], ["Change settings only while idle", "请在空闲时修改设置"], ["Settings availability check failed", "设置可修改状态检查失败"], ["Brew mode differs; separate command history is used", "萃取模式不同；使用各自独立的指令记录"], ["S1 startup observed-target exposure local model", "S1 起步实际目标流量积分归一化模型"], ["S1 corrected startup quality insufficient", "S1 杯内修正后的起步数据质量不足"], ["S1 corrected startup target or actuator coverage insufficient", "S1 杯内修正后的目标反馈或执行数据不足"], ["S1 corrected startup source gap", "S1 杯内修正后的原始秤时间戳不连续"], ["S1 corrected startup needs eight unique samples over0.9s", "S1 杯内修正后的起步学习需至少 8 个独立采样，覆盖 0.9 秒"], ["S1 corrected startup model fit insufficient", "S1 杯内修正后的起步模型拟合不足"], ["S1 corrected startup admitted using observed target exposure", "S1 杯内修正后的起步证据已按实际目标流量积分归一化纳入学习"], ["S2 startup preceding S1 trajectories differ", "S2 起步之前的 S1 调流轨迹不同，暂不增加起步补偿"], ["S1 and S2 transition by cumulative weight; see the header for brew mode.", "S1、S2按累计重量转换；流程模式见顶栏。"], ["Active release mode · Weight-driven stage progression.", "主动泄压模式 · 按重量进入下一阶段。"], ["Continuous extraction · No intermediate release or restart.", "连续萃取 · 中途不泄压或重启。"], ["armed-for-S1", "已准备 S1 杯内调流"], ["ORIGINAL / LUT", "原始 LUT"], ["ADAPTIVE", "算法学习"], ["MANUAL", "用户手动"], ["RETAINED / UNKNOWN", "沿用值／旧来源未记录"], ["ORIGINAL / LUT is the calibration baseline. ADAPTIVE applies the latest learned command - select it to return from MANUAL to plugin learning. MANUAL is explicitly edited by the user.", "原始 LUT 为校准基线；算法学习立即应用最新学习指令，从用户手动选回算法学习即恢复插件自动调整；用户手动为用户明确编辑。"], ["Shot-to-shot learning strength", "杯间学习强度"], ["Normal: one clean shot can adjust the next. Different historical responses damp the step instead of blocking it. Live-trim level is a separate setting.", "正常档：一杯合格证据即可调整下一杯。历史响应不同时减小步幅，不强制阻止学习。杯内控流档位另行设置。"], ["Conservative", "保守"], ["Gentle", "温和"], ["Normal", "正常"], ["Aggressive", "激进"], ["Learning strength:", "学习强度："], ["History persistence", "历史落盘回读"], ["History session only; persistent save not verified", "当前仅会话记录，持久化保存未校验"], ["Current shot history readback verified", "本杯记录已保存并读回校验"], ["Current shot history awaiting readback", "本杯记录等待读回校验"], ["Current shot history not saved yet", "本杯记录尚未进入历史"], ["records", "条记录"], ["bytes", "字节"], ["Rise basis:", "爬升参考："], ["observed plateau", "实测平台流速"], ["nearby-command local proportional model", "邻近指令局部比例参考模型"], ["per-frame command and timing reference model", "分段指令与时长参考模型"], ["cross-window historical reference", "不同窗口的历史参考"], ["basis mismatch:", "测量依据不同："], ["nearby command comparisons:", "动态指令参考："], ["Response outside numeric learning envelope; inspect output and execution", "响应超出数值学习范围，请检查出液和执行状态"], ["Current clean output is inside the learning band; retain this command", "本杯合格出液已在学习容差内，保留当前指令"], ["Current clean shot requests a bounded correction; differing history reduces the step instead of blocking learning", "本杯合格证据触发限幅纠偏；历史响应不同时缩小步幅，不阻断学习"], ["Current clean shot requests a bounded next-shot correction; comparable history is a reference, not a mandatory identical-command repeat", "本杯合格证据触发下一杯限幅纠偏；历史用于参考，不要求指令完全相同后再重做一杯"], ["Current clean S3 frame responses request a bounded next-shot level and shape correction; history adjusts confidence and damping", "本杯合格 S3 分段响应触发下一杯水平与形状限幅纠偏；历史用于调整置信度和步幅"], ["Current S3 frame responses are inside the learning band; retain the shape", "本杯 S3 分段响应在学习容差内，保留曲线形状"], ["S3 proposed shape cannot satisfy the selected learning bounds", "S3 建议曲线无法同时满足所选档位限幅"], ["S2 startup needs usable slow-rise evidence", "S2 起步需要有效的慢爬升证据"], ["S2 plateau outside startup-assist range", "S2 平台流量超出起步补偿适用范围"], ["S2 rise is already steep enough; hold startup baseline", "S2 爬升已足够陡，保留基础起步"], ["S2 startup needs a second comparable slow-rise shot", "当前档位的 S2 起步补偿还需一杯可比的慢爬升证据"], ["S2 clean slow rise; learning policy permits bounded single-shot startup trial", "S2 合格曲线爬升偏慢，当前学习档位允许限幅单杯起步试调"], ["S2 startup blocked by an existing pending or issued S2 command", "S2 已有待确认或已发送指令，跳过额外起步补偿"], ["S2 startup return budget unavailable", "S2 起步回落所需预算不足"], ["S2 startup dispatch window elapsed", "S2 起步发送时间窗已结束"], ["S2 startup scale data stale", "S2 起步秤数据已过期"], ["S2 startup pressure headroom unavailable", "S2 起步压力余量不足"], ["S2 startup waiting for actual baseline target and actuator response", "S2 起步等待基础目标与实际执行响应"], ["S2 startup cup flow already high; skip late boost", "S2 杯流量已较高，跳过迟到的起步补偿"], ["S2 startup transport or fresh machine feedback unavailable", "S2 起步连接或新鲜机器反馈未就绪"], ["S2 startup returning to baseline", "S2 起步指令回落基础值"], ["not-planned", "本杯未计划起步补偿"], ["armed", "已准备"], ["issued", "已发送"], ["returning", "回落中"], ["skipped", "已跳过"], ["S2 settled-tail RAW regression", "S2 稳定后段原始秤回归"], ["step ≤", "步幅不超过"], ["band;", "容差；"], ["ml/s per frame; original shape bounds retained", "ml/s／段；保留原曲线形状限制"], ["Admission width:", "学习准入范围："], ["all stages ORIGINAL / LUT", "所有阶段使用原始 LUT"], ["MANUAL changes only the HyperEx profile command; calibration LUT data remains untouched. If S3 DECAY COMP is enabled, its three shape commands override the flat S3 command.", "用户手动仅更改 HyperEx 曲线指令，不改动校准 LUT。启用 S3 三段补偿后，三段指令覆盖平直 S3 指令。"], ["Selected learning policy requires another clean observation; changed commands remain eligible historical references", "当前学习档位还需一杯合格证据；指令改变不影响历史作为参考"], ["Selected learning policy requires another comparable S3 observation; command and timing changes remain usable", "当前学习档位还需一杯可比 S3 证据；指令和时长微调后的历史仍可参考"], ["collected gain <", "杯增重低于"], ["20–80% transit <", "20–80% 经过时间低于"], ["20–80% samples <", "20–80% 采样数低于"], ["active duration <", "有效出液时长低于"], ["20–80% regression R² <", "20–80% 回归 R² 低于"], ["S2 tail ripple", "S2 后段波动"], ["exceeds", "超过"], ["learning limit", "学习准入上限"], ["Live learning: S3 confirmed-target windows total below", "杯内学习：S3 已确认目标窗口总时长低于"], ["step", "步幅"], ["band", "容差"], ["per frame", "每段"], ["original shape bounds retained", "保留原曲线形状限制"], ["S3 shape advances by profile time only.", "S3 三段仅按曲线时间自然转换。"], ["S2 refill assist disabled", "S2 补水增强已关闭"], ["S2 refill base command invalid", "S2 补水基础指令无效"], ["S2 refill has no command headroom", "S2 补水指令没有可用余量"], ["S2 active-release refill; return at predicted 85% cup flow or safety deadline", "S2 主动泄压后补水；预测接近85%称流速或到达保护时限即收回"], ["S2 refill pressure margin reached", "S2 补水达到压力余量边界，收回增强"], ["S2 refill maximum duration reached", "S2 补水达到最长时限，收回增强"], ["S2 refill scale became stale", "S2 补水秤数据过期，收回增强"], ["S2 refill reached 85% cup flow", "S2 补水已达到目标称流速85%，收回增强"], ["S2 refill predicted 85% cup flow; return early", "S2 预测即将达到目标称流速85%，提前收回增强"], ["S2 startup baseline return confirmed", "S2 已确认恢复基础流量"], ["S2 startup waiting for confirmed frame 1", "S2 等待确认已进入第1帧"], ["S2 startup base profile changed", "S2 基础曲线指令发生变化，暂不增强"], ["S2 cup flow already at 85%; refill unnecessary", "S2 称流速已达85%，无需补水增强"], ["S2 refill driver ACK missing", "S2 补水驱动确认缺失"], ["S2 refill base return driver ACK missing", "S2 恢复基础值的驱动确认缺失"], ["S2 startup maximum duration reached", "S2 启动增强达到最长时限，恢复基础值"], ["S2 approach upward-write spacing", "S2 渐进阶段等待下一次上调，继续检查"], ["S2 approach rising response; hold for inertia", "S2 流速正在上升，等待惯性响应"], ["S2 refill base return unconfirmed; retain actual curve but withhold steady-level learning", "S2 补水后的基础值恢复尚未确认；保留实测曲线，暂不纳入稳态数值学习"], ["S2 frame ended; no write to previous frame", "S2 阶段已结束，不再写入上一帧"], ["85% cutoff", "85%称流速收回"], ["S2 startup waiting for fresh frame telemetry", "S2 等待新鲜的机器帧号反馈"], ["S2 refill aims at 120% real flow; return at measured 85% cup flow or safety deadline", "S2 以120%目标称流速估算补水；实测达到85%或保护时限时收回"], ["LUT-relative 120% real-flow target", "基于LUT相对换算的120%称流速目标"], ["bounded local proportional 120% target", "有界局部比例估算的120%称流速目标"], ["actual-tail and corroborated machine-flow local model", "基于实测尾段及机器流量佐证的局部模型"], ["Actual RAW tail disagrees with modeled correction; opposite-direction changes withheld", "实测RAW尾段与模型调整方向冲突，已阻止反向修正"], ["Bounded projection retains the current commands", "限幅投影后保持当前指令"], ["FLAT (3 timed frames)", "平直（三段计时）"], ["Actual output and model disagree; hold", "实测与模型方向冲突，保持"], ["Keep current commands", "保持当前指令"], ["S3 command timeline", "S3 指令变化时间线"], ["Earliest retained flat evidence:", "现存历史中最早的平直指令证据："], ["No verified flat command in retained history", "现存历史中没有已校验的平直指令"], ["Retained history only; missing older records cannot establish the first-ever change. Suggestions are not verified applications.", "仅依据现存历史；更早记录缺失时不能认定首次修改时间。建议不等于已校验应用。"], ["Verified next-shot application", "已校验的下一杯应用"], ["Shot-start snapshot", "启动指令快照"], ["Origin / shape", "来源／形态"], ["3 timed frames", "三段计时"], ["Excluded from learning", "已排除学习"], ["S2 early refill", "S2 补水"], ["Start delay", "启动延时"], ["Refill target", "补水目标"], ["Cutoff / taper start", "收回 / 收口起点"], ["Maximum refill duration", "最长补水"], ["Approach100% duration", "渐进至100%时间"], ["Reset refill defaults", "恢复补水默认值"], ["Delay starts at confirmed S2 entry. Sliders edit the draft; apply it to the next shot to take effect.", "启动延时从确认进入S2后计；滑块只修改草稿；请点击保存补水参数，下一杯生效。"], ["Refill enabled", "补水已启用"], ["Refill inactive: enable active release, live trim and S2 startup assist", "当前不执行补水：需开启主动泄压、杯内控流和S2起步增强"], ["S2 refill command preview", "S2补水指令预览"], ["At", "达到"], ["Return rule: predicted ≥ ", "收回判据：预测 ≥ "], [" decides the taper start, the skip threshold and the observed noise floor", "同时决定收口起点、跳过阈值、实测噪声底"], ["Estimated refill target", "估算补水目标"], ["Estimated preview; verified settings are authoritative after applying.", "预览为估算；应用后以校验结果为准。"], ["Machine-command ceiling", "机器指令上限"], ["90% pressure margin, data freshness and driver-ACK guards are fixed.", "原限压90%、数据新鲜度和驱动确认保护固定。"], ["Command ceiling reached.", "已触及指令上限。"], ["Request base return", "请求收回"], ["No later than", "最迟"], ["Invalid saved S2 refill settings; defaults restored", "已保存补水设置无效，已使用默认值"], ["S2 refill settings are still loading", "S2补水设置尚在载入"], ["S2 refill settings could not be saved", "S2补水设置保存失败"], ["S2 refill plan settings invalid", "S2补水计划设置无效"], ["S2 refill start delay", "等待S2补水启动延时"], ["S2 refill reached predicted target with observed above noise floor", "S2预测已达目标、实测高于噪声底，收回增强"], ["S2 predicted flow already at target; refill unnecessary", "S2预测流量已达目标，无需补水增强"], ["S2 refill target needs no extra command", "S2补水目标无需增加指令"], ["S2 configurable refill; predicted target or safety deadline", "S2可调补水；按预测达目标或保护时限收回"], ["LUT-relative real-flow target", "基于LUT相对换算的称流速目标"], ["bounded local proportional real-flow target", "有界局部比例估算的称流速目标"], ["Flow input ml/s", "流量输入 ml/s"], ["Typed values snap to the 1/16 ml/s driver grid; up/down move one step. S3 shape has no order constraint; only an adjacent rise is capped.", "输入值按 1/16 ml/s 驱动档位归档；上下按钮各移动一档。S3 形状不设顺序约束，只限制相邻增幅。"], ["Native driver quantum ≈", "对应驱动档位 ≈"], ["Allowed range for this point", "当前控制点允许范围"], ["Please keep each S3 adjacent rise within its bound.", "请保持在 S3 相邻增幅上限内。"], ["Base pump flow multiplier", "基础泵流量倍率"], ["% base pump flow", "% 基础泵流量"], ["Refill basis", "补水基准"], ["Base pump multiplier", "基础泵倍率"], ["Target cup-flow", "目标折算"], ["Target cup-flow estimate", "目标折算估算"], ["target cup-flow base", "目标折算基值"], ["No clean observed tail; using profile base", "无合格实测尾段，用曲线基础指令"], ["S2 refill migrated to160% of base pump flow; timing and noise floor retained", "S2补水已迁移为基础泵流量160%；保留原时限与收回 / 收口起点"], ["Extraction charts end at extraction stop; release, preparation and post-stop data are hidden. Original records remain exportable.", "萃取图在停止萃取处结束；泄压浸泡间隔按实际时长补零，仅为显示示意，原始记录仍可导出。"], ["Refill boost", "补水增强"], ["Refill return", "补水收回"], ["Previous refill settings", "上一次补水参数"], ["Sliders are drafts; below are saved edits and the previous shot-start snapshot.", "当前滑块是草稿；以下显示已保存的修改记录和上一杯启动快照。"], ["Currently saved", "当前已保存"], ["Previous edit: before → after", "上次修改前 → 修改后"], ["No saved refill edits yet", "尚无已保存的补水修改记录"], ["Previous shot settings", "上一杯实际采用的参数"], ["No boost write recorded for this shot", "该杯未记录增强写入"], ["Sent boost command", "已发送增强指令"], ["Previous refill settings unavailable; current settings are not substituted for history.", "上一杯补水参数尚未记录；不使用当前设置代替历史值。"], ["Full refill settings were not saved in this record", "该记录未保存完整补水参数"], ["Base pump multiplier ", "基础泵倍率 "], ["Legacy cup-target multiplier ", "旧版称流目标倍率 "], ["Start ", "启动 "], ["Cutoff / taper start ", "收回 / 收口起点 "], ["Maximum ", "最长 "], ["Approach ", "渐进 "], ["Base command ", "基础指令 "], ["Planned boost ", "计划增强 "], ["Control handover duration", "接管渐进时间"], ["Holding command ", "接管指令 "], [" · holding ", " · 接管 "], ["S2 effective cup-flow onset:", "S2有效称流起点："], ["Pre-output wait ", "出液前等待 "], [" s, excluded from validation and learning windows", " s，不计入合格与学习窗口"], ["S2 sustained outflow not detected; flow validation is pending", "S2尚未检测到持续有效出液；暂不计算流量合格判定"], ["S2 handover falling response; avoid an extra decrease", "S2接管期流量正在回落，避免继续下调"],["Flood cap","灌水上限"],["Fixed","固定"],["Adaptive","自适应"],["CALIBRATION","校准 · CALIBRATION"],["Empty-basket Flow Cal","空碗 Flow Cal"],["(optional)","（可选）"],["Machine-side anchor verification / multiplier diagnostics. Coffee bootstrap is the primary path; empty-basket Flow Cal is no longer an arming prerequisite and can be rerun at any time; merges retain learned gains.","机器侧锚点验证 / multiplier 诊断。咖啡引导建图为主路径；空碗校准不再作为 arming 前置，可随时重跑，合并保留增益。"]];
+  UI_LANGUAGE_PAIRS.push(
+    
+    
+    
+    ["Will apply the latest learned value","将应用最新学习值"],
+    ["Will apply the estimate","将应用估计值"],
+    ["(draft; press apply to take effect)","（草稿态，按应用生效）"],
+    ["No eligible estimate; clear to LUT (may underflow with coffee) + armed learning","无合格估计→清回 LUT（咖啡下可能欠流）＋armed 学习"],
+    ["No new suggestion (HOLD); clear to LUT + armed learning","无新建议（HOLD）→清回 LUT＋armed 学习"],
+    ["Brew mode","萃取模式"],
+    ["Algorithm intervention","算法介入"],
+    ["Release restart","泄压重启"],["Continuous","连续"],
+    ["Continuous brew","连续萃取"],
+    ["Full on","全开"],
+    ["Full off","全关"],
+    ["This shot: algorithm full","本杯 算法全开"],
+    ["This shot: algorithm off","本杯 算法全关"],
+    ["This shot locked","本杯锁定"],
+    ["Next shot: algorithm full · saved","下一杯 算法全开 · 已保存"],
+    ["Next shot: algorithm off · saved","下一杯 算法全关 · 已保存"],
+    ["Release · soak · GHC restart","泄压 · 浸泡 · GHC 重启"],
+    ["Continuous S1 → S2 → S3","连续 S1 → S2 → S3"],
+    ["Full: normal + rescue · Off: detect only","全开：正常 + 救急 · 全关：只检测"],
+    ["Detect only · no writes","只检测 · 不写入"],
+    ["HEC","HEC"],
+    ["This shot: algorithm HEC","本杯 算法HEC"],
+    ["Next shot: algorithm HEC · saved","下一杯 算法HEC · 已保存"],
+    ["HEC: APK trims · plugin guards + learns","HEC：APK 调流 · 插件监护 + 学习"],
+    ["Full: plugin trims · HEC: APK trims · Off: detect only","全开：插件调流 · HEC：APK 调流 · 全关：只检测"],
+    ["HEC: plugin took over this shot","HEC：本杯插件已接管"],
+    ["APK connected","APK 已连接"],
+    ["APK not connected","APK 未连接"],
+    ["HEC on · APK not connected (background)","HEC 已启用 · APK 未连接（后台）"],
+    ["heartbeat lost","心跳断开"],
+    ["no handshake","未握手"],
+    ["external writes","外部写入"],
+    ["rejected","拒绝"],
+    ["watchdog","看门狗"],
+    ["shot budget","本杯预算"],
+    ["observation-only","仅观测"],
+    ["Algorithm intervention off; observation only","算法介入已关闭：仅观测"],
+    ["Change algorithm intervention only while idle","仅空闲时可改算法介入"],
+    ["Algorithm intervention save failed: ","算法介入保存失败："]
+  );
+  const translateUiText=createUiTranslator(UI_LANGUAGE_PAIRS);
+  const STORAGE_CAL = "flowCalibration";
+  const STORAGE_SCOPE = "flowMultiplierScope";
+  const STORAGE_PENDING_MULT = "pendingCalibrationMultiplier";
+  const STORAGE_GLOBAL_PREVIOUS = "globalPreviousMultiplier";
+  const STORAGE_SCOPED_ORIGINAL = "scopedOriginalMultiplier";
+  const STORAGE_CAL_MODE = "calibrationMode";
+  const STORAGE_S1_STARTUP = "stage1StartupCorrection";
+  const STORAGE_TEST_OVERRIDES = "manualTestOverrides";
+  const STORAGE_S2_REFILL="s2RefillSettingsV1";
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  const STORAGE_ALGORITHM_INTERVENTION="algorithmInterventionV1";
+  const HEC_HEARTBEAT_MS=4000;
+  
+  
+  const S2_REFILL_DEFAULTS=Object.freeze({startDelayMs:0,targetPercent:160,cutoffPercent:85,maxDurationMs:4000,approachMs:800,floodMaxMlS:7});
+  const S2_REFILL_BASES=Object.freeze(["pump-command","cup-target"]);
+  
+  
+  const S2_REFILL_FLOOD_MODES=Object.freeze(["fixed","adaptive"]);
+  
+  
+  
+  
+  const S2_REFILL_LIMITS=Object.freeze({startDelayMs:[0,1500,50],targetPercent:[100,160,1],cutoffPercent:[30,99,1],maxDurationMs:[2000,7000,100],approachMs:[200,6000,100],floodMaxMlS:[1/16,8,1/16]});
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  const S2_REFILL_TRIM_MS=500;
+  
+  
+  
+  
+  const S2_REFILL_BLEED_MS=700;
+  const S2_REFILL_BLEED_FRACTION=.35;
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  const S2_REFILL_SETTLE_MS=800;
+  const S2_REFILL_CHAIN_SETTLE_MS=1500;
+  
+  
+  
+  
+  
+  const S2_REFILL_BLIND_PRESSURE_BAR=2.5;
+  const S2_REFILL_BLIND_RISE_BAR=0.5;
+  
+  
+  
+  
+  
+  
+  const S2_REFILL_CUTOFF_BACKSTOP=0.85;
+  
+  
+  
+  
+  
+  const AUTO_APPLY_GRACE_MS=7000;
+  const AUTO_APPLY_DEFER_MS=1000;
+  const S2_REFILL_ACCEL_HISTORY=4;
+  const S2_REFILL_PREDICTED_CAP=1.6;
+
+
+
+
+const S2_REFILL_INSTANT_CROSS_FACTOR=1.1;
+const S2_REFILL_INSTANT_CROSS_SAMPLES=2;
+
+
+
+
+const S2_DECAY_EXCEPTION_FACTOR=1.5;
+const S2_DECAY_EXCEPTION_SAMPLES=3;
+const S2_DECAY_EXCEPTION_EXIT_FACTOR=1.2;
+const S2_DECAY_EXCEPTION_MAX_WRITES=4;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const S2_REFILL_RISE_TARGET_S=0.8;       
+const S2_REFILL_RR_QUANTILE=4.8;         
+const S2_REFILL_RR_MEDIAN=4.59;          
+const S2_REFILL_CUTOFF_LEAD_S=0.274;     
+const S2_REFILL_FC_FACTOR=0;             
+
+
+
+
+
+
+
+
+const S2_REFILL_VI_A=34.057;             
+const S2_REFILL_VI_B=-32.251;            
+const S2_REFILL_VI_MIN_ML=15;            
+const S2_REFILL_VI_MAX_ML=36;
+const S2_REFILL_VI_FALLBACK_ML=24.8;     
+const S2_REFILL_VI_RATIO_MIN=0.2;        
+const S2_REFILL_VI_RATIO_MAX=0.8;
+const S2_REFILL_VI_WINDOW_S=2;           
+const S2_REFILL_SOAK_MIN_SAMPLES=10;
+const S2_REFILL_SOAK_MIN_P0_BAR=0.05;
+const S2_REFILL_FLOOD_MIN_MLS=3.5;       
+const S2_REFILL_FLOOD_COLD_MLS=5;        
+const S2_REFILL_HOLD_MS_MIN=2000;        
+const S2_REFILL_HOLD_MS_MAX=7000;
+const S2_REFILL_HOLD_MARGIN_S=0.6;       
+const S2_REFILL_BOOST_VOLUME_WARN_ML=32; 
+
+
+
+
+
+
+const S2_VI_LEARN_STORAGE_MIN=12;        
+const S2_VI_LEARN_STORAGE_MAX=40;        
+const S2_VI_LEARN_USED_MIN=15;           
+const S2_VI_LEARN_USED_MAX=40;           
+const S2_VI_LEARN_ALPHA_UP=0.5;          
+const S2_VI_LEARN_ALPHA_DOWN=0.15;       
+const S2_VI_LEARN_DEV_ALPHA_UP=0.55;     
+const S2_VI_LEARN_DEV_ALPHA_DOWN=0.3;    
+const S2_VI_LEARN_WETLAT_MIN_S=0.8;      
+const S2_VI_LEARN_WETLAT_MAX_S=8;
+const S2_VI_LEARN_NEG_MAX=2;             
+const S2_VI_LEARN_DT0_MAX=5;             
+const S2_VI_LEARN_CLUSTER_MAX=100;     
+                                       
+const S2_VI_LEARN_BRIDGE_GAP_S=2;        
+
+
+
+
+
+const S2_VI_BANDS=[[0.2,0.4],[0.4,0.6],[0.6,0.8]];
+
+
+
+
+
+
+
+
+const SCALE_SAMPLE_GATE=Object.freeze({minGapMs:60,monotonic:true});
+  
+  
+  
+  
+  
+  const S2_POST_REFILL_UP_HOLD_MS=1500;
+  
+  
+  
+  
+  const AUTO_S2_FRAME_WAIT_MS=900;
+  
+  
+  
+  const AUTO_S2_REFILL_CONFIRM_MS=100;
+  const GAIN_MEMORY_SCHEMA=1;
+  const GAIN_MEMORY_ALPHA=.35;
+  const GAIN_MEMORY_DEVIATION_ALPHA=.55;
+  const GAIN_MEMORY_DEVIATION=.15;
+  
+  
+  
+  
+  
+  const GAIN_MEMORY_BUCKET_RADIUS=.12;
+  const GAIN_MEMORY_BUCKET_MIN_RADIUS=.08;
+  const GAIN_MEMORY_BUCKET_MAX_RADIUS=.20;
+  const GAIN_MEMORY_SIGNATURE_SAMPLES=6;
+  const GAIN_MEMORY_HYSTERESIS=1.25;
+  
+  
+  const GAIN_R_MIN=.2;
+  const GAIN_R_MAX=3;
+  const GAIN_MEMORY_MIN_SAMPLES=10;
+  const GAIN_MEMORY_MAX_BUCKETS=12;
+  
+  
+  
+  
+  const S2_NORMAL_CEILING_RATIO=1.25;
+  
+  
+  const S2_FINAL_SIGNATURE_BASIS="S2 refill return +2–4 s pressure / machine flow";
+  const STORAGE_AUTO_APPLY = "autoApplyNextShot";
+  const STORAGE_ADAPTIVE_HISTORY = "adaptiveHistoryV1"; 
+  const STORAGE_HISTORY_FILE = "adaptiveHistoryFileV2";
+  const STORAGE_HISTORY_PROBE = "adaptiveHistoryStorageProbeV1";
+  const HISTORY_FILE_MAX_SHOTS = 80;
+  
+  
+  
+  const HISTORY_FULL_SHOTS = 4;
+  const HISTORY_TRACE_SHOTS = 10;
+  const STORAGE_PRESETS = "hyperExPresetsV1";
+  const STORAGE_LEGACY_PROFILE = "legacyCalibrationProfileHiddenV1";
+  const STORAGE_PRESET_PENDING = "hyperExPresetPendingV1";
+
+  function normalizeCalibrationMode(value) {
+    const v = String(value || "").trim().toLowerCase();
+    return v === "full" ? "full" : "low";
+  }
+
+  function calibrationModeConfig(mode) {
+    return CALIBRATION_MODES[normalizeCalibrationMode(mode || state.calibrationMode)] || CALIBRATION_MODES.low;
+  }
+
+  function calibrationProgram(mode) {
+    const normalized = normalizeCalibrationMode(mode || state.calibrationMode);
+    const m = calibrationModeConfig(normalized);
+    if (m.algorithm === "target-lut") {
+      const steps = [];
+      for (const block of (m.targetBlocks || [])) {
+        let targetReal = Number(block.target);
+        if (state.cfg) {
+          if (block.targetSource === "stage1") targetReal = Number(state.cfg.stage1Flow);
+          else if (block.targetSource === "stage2") targetReal = Number(state.cfg.stage2Flow);
+          else if (block.targetSource === "stage3") targetReal = Number(state.cfg.stage3Flow);
+        }
+        let commands = (block.commands || []).map(Number).filter(Number.isFinite);
+        const defaults = { stage1: 2.0, stage2: 5.0, stage3: 1.5 };
+        const defaultTarget = Number(defaults[block.targetSource] || block.target || targetReal || 1);
+        let center = mappedCommandForReal(targetReal);
+        if (!Number.isFinite(center)) {
+          const baseCenter = commands.length ? commands[Math.floor(commands.length / 2)] : Math.max(0.2, targetReal * 0.5);
+          center = baseCenter * (targetReal / Math.max(0.1, defaultTarget));
+        }
+        const span = Math.max(block.targetSource === "stage2" ? 0.16 : 0.10, Math.abs(center) * 0.12);
+        commands = block.targetSource === "stage3"
+          ? [center + span, center, Math.max(0.10, center - span)]
+          : [Math.max(0.10, center - span), center, center + span];
+        for (const command of commands) {
+          steps.push({
+            blockId: String(block.id || ""), targetSource: String(block.targetSource || ""), targetReal,
+            commandFlow: snapCommandFlow(command), seconds: Number(m.stepSeconds),
+            settleSeconds: Number(m.settleSeconds), windowSeconds: Number(m.windowSeconds)
+          });
+        }
+      }
+      return steps;
+    }
+    return (m.commands || []).map(command => ({
+      blockId: "FULL", targetReal: null, commandFlow: snapCommandFlow(command),
+      seconds: Number(m.stepSeconds), settleSeconds: Number(m.settleSeconds), windowSeconds: Number(m.windowSeconds)
+    }));
+  }
+
+  function calibrationCommands(mode) {
+    return calibrationProgram(mode).map(x => Number(x.commandFlow));
+  }
+
+  function calibrationWaterPlan(mode) {
+    const m = calibrationModeConfig(mode);
+    const program = calibrationProgram(mode);
+    const primeMl = Number(m.primeFlow || 0) * Number(m.primeSeconds || 0);
+    const nominalMl = primeMl + program.reduce((sum, step) => sum + Number(step.commandFlow || 0) * Number(step.seconds || m.stepSeconds || 0), 0);
+    return {
+      mode: normalizeCalibrationMode(mode || state.calibrationMode),
+      modeLabel: m.label,
+      algorithm: m.algorithm || "staircase",
+      steps: program.length,
+      stepSeconds: m.stepSeconds,
+      settleSeconds: m.settleSeconds,
+      windowSeconds: m.windowSeconds,
+      primeFlow: Number(m.primeFlow || 0),
+      primeSeconds: Number(m.primeSeconds || 0),
+      hardStopG: m.hardStopG,
+      nominalCommandWaterMl: round(nominalMl, 0),
+      recommendedContainerMl: m.recommendedContainerMl,
+      waterWarnMarginMm: Number(m.waterWarnMarginMm || 0),
+      waterBlockMarginMm: Number(m.waterBlockMarginMm || 0)
+    };
+  }
+
+  function calibrationProfileTitle(mode) {
+    return `${HYPEREX_TITLE_PREFIX} Flow Calibration - ${calibrationModeConfig(mode).label}`;
+  }
+
+  function calibrationModeFromTitle(title) {
+    const t = String(title || "");
+    if (t === calibrationProfileTitle("low")) return "low";
+    if (t === calibrationProfileTitle("full")) return "full";
+    return null;
+  }
+
+  function isCalibrationProfileTitle(title) {
+    return calibrationModeFromTitle(title) !== null;
+  }
+
+  const state = {
+    cfg: null,
+    workflowTitle: "",
+    workflowProfile: null,
+    runtimeProfileVerified: false,
+    profileSyncQueue: Promise.resolve(),
+    profileSyncBusy: 0,
+    temperatureRecheckNeeded: false,
+    machineProfileAckKey: "",
+    profileReadbackAt: null,
+    calibrationStorageLoaded: false,
+    overrideStorageLoaded: false,
+    s2RefillSettings:null,s2RefillPrevious:null,s2RefillStorageLoaded:true,s2RefillLoadWarning:null,
+    algorithmIntervention:"full",algorithmInterventionStorageLoaded:false,
+    hecLastContactAtMs:0,hecClient:null,hecExternalWrites:0,hecExternalRejects:0,hecWatchdogs:0,hecSoakSource:null,
+    scopeStorageLoaded: false,
+    scopedOriginalStorageLoaded: false,
+    workflowSelectionRevision: 0,
+    runtimeProfileStatus: "not verified",
+    runtimeProfileRepairBusy: false,
+    profileVerificationPending: false,
+    profileVerificationRetryAtMs: 0,
+    runtimeProfileMismatchAbortSent: false,
+    armed: false,
+    phase: "idle", 
+    perfTiming: {},
+    statusTiming: emptyStatusTiming(STATUS_TIMING_ENABLED_DEFAULT),
+    lastMachineState: null,
+    lastSubstate: null,
+    lastPressure: 0,
+    lastMachineTelemetryValid: false,
+    lastFlow: 0,
+    lastWeightFlow: 0,
+    lastFrame: null,
+    lastPhysicalFrame: null,
+    lowFlowSamples: 0,
+    idleConfirmedAtMs: 0,
+    hardPressureSamples: 0,
+    rawBaseline: null,
+    lastRawWeight: null,
+    cumulativeOffset: 0,
+    cumulativeWeight: 0,
+    hasScaleSample: false,
+    dumpRequestedAtMs: 0,
+    dumpAcceptedAtMs: 0,
+    dumpReinforceSent: false,
+    lastMachineAtMs: 0,
+    dumpTimer: null,
+    dumpSettleTimer: null,
+    dumpFallbackTimer: null,
+    idlePollTimer: null,
+    soakTimer: null,
+    noScaleTimer: null,
+    maxRunTimer: null,
+    restartSkipTimer: null,
+    restartPollTimer: null,
+    restartTimeoutTimer: null,
+    ghcCountdownTimer: null,
+    ghcPromptStartedAtMs: 0,
+    ghcSecondsRemaining: 0,
+    soakCountdownTimer: null,
+    soakPromptStartedAtMs: 0,
+    soakSecondsRemaining: 0,
+    flowStripTimer: null,
+    armReinforceTimer: null,
+    armReinforceTimer2: null,
+    armRequestCount: 0,
+    lastArmRequestAtMs: 0,
+    commandBusy: false,
+    sequenceStartedAtMs: 0,
+    stage1DumpSent: false,
+    stage2SkipSent: false,
+    stage3StartedAtMs: 0,
+    stage3PlannedMs: 0,
+    finalStopSent: false,
+    completionTimer: null,
+    abortResetTimer: null,
+    liveTrim: null,
+    liveTrimTimer: null,
+    liveTrimDirty: false,
+    directStartTest: null,
+    directStartTestTimer: null,
+    directStartTestEnabledForRun: false,
+    scaleHandle: null,
+    scaleReconnectTimer: null,
+    scaleConnected: false,
+    latestRawWeight: null,
+    latestWeightFlow: 0,
+    latestScaleAtMs: 0,
+    latestScaleTimestamp: null,
+    latestRawDwDt: null,
+    lastTargetFlow: null,
+    lastTargetPressure: null,
+    lastMachineWeightFlow: null,
+    diagnosticCurrent: null,
+    diagnosticLast: null,
+    diagnosticLastSampleAtMs: 0,
+    diagnosticRunSeq: 0,
+    calibrationArmed: false,
+    calibrationMode: "low",    presets: [], pendingPreset: null, presetsLoaded: false, presetApplyTimer: null,
+    calibrationActive: false,
+    calibrationLast: null,
+    calibrationMap: null,
+    calibrationMapUsable: false,
+    calibrationMapStaleReason: "not calibrated",
+    lutBootstrapMode: false,
+    lutBootstrapFailures: 0,
+    calibrationPendingMultiplier: null,
+    calibrationFinalizeBusy: false,
+    calibrationHardPressureSamples: 0,
+    flowMultiplierCurrent: null,
+    flowMultiplierReadAtMs: 0,
+    scopedOriginalMultiplier: null,
+    scopedAppliedMultiplier: null,
+    globalPreviousMultiplier: null,
+    scopeMode: "hyperex",
+    scopeChangeBusy: false,
+    profileSyncStatus: "",
+    hyperExProfileId: null,
+    calibrationProfileIds: { low: null, full: null },
+    waterHandle: null,
+    waterReconnectTimer: null,
+    waterCurrentLevelMm: null,
+    waterRefillLevelMm: null,
+    waterLevelAtMs: 0,
+    waterLevelConnected: false,
+    calibrationWaterPreflightApprovedUntilMs: 0,
+    stage1StartupCorrection: null,
+    testOverrides: null,
+    adaptiveHistory: [],
+    legacyAdaptiveHistory: [],
+    persistentHistoryFile: null,
+    persistentHistoryLoaded: false,
+    storageProbeVerified: false,
+    pendingHistoryWrite: null,
+    historyWriteDirty: false,
+    historyWriteTimer: null,
+    historyVerifiedRunIds:[],historyLastReadbackAt:null,historyWriteBytes:0,historyRecoveryAttempts:0,historyRecoveryTimer:null,
+    persistentHistoryAvailable: null,
+    persistentHistoryStatus: "checking persistent history storage",
+    persistentHistoryCompatibleCount: 0,
+    storageProbeToken: "",
+    storageProbeTimer: null,
+    autoApplyNextShot: true,
+    autoApplyLastStatus: null,
+    learningStage: null,
+    learningContextLoaded: true,
+    uiLanguage:"zh",
+    uiLanguageEdited:false,
+    curveApplyBusy: false,
+    autoApplyTimer: null,
+    cupVerificationRunId: null,
+    pendingRefillSave: null
+  };
+
+  function n(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function b(value, fallback) {
+    if (typeof value === "boolean") return value;
+    if (value === "true") return true;
+    if (value === "false") return false;
+    return fallback;
+  }
+
+  function clampNumber(value, lo, hi, fallback) {
+    const v = Number(value);
+    const x = Number.isFinite(v) ? v : Number(fallback);
+    return Math.max(lo, Math.min(hi, x));
+  }
+
+  function clampCommandFlow(value) {
+    return clampNumber(value, LIMITS.commandFlowMin, LIMITS.commandFlowMax, LIMITS.commandFlowMin);
+  }
+
+  
+  
+  
+  
+  
+  
+  function toDriverStep(value) {
+    const v = Number(value);
+    return Number.isFinite(v) ? Math.round(v * 16) / 16 : null;
+  }
+
+  function snapCommandFlow(value) {
+    const step = toDriverStep(value);
+    if (step === null) return null;
+    const lo = Math.round(LIMITS.commandFlowMin * 16), hi = Math.round(LIMITS.commandFlowMax * 16);
+    return Math.max(lo, Math.min(hi, Math.round(step * 16))) / 16;
+  }
+
+  function formatCommandFlow(value) {
+    const q = snapCommandFlow(value);
+    return q === null ? snapCommandFlow(LIMITS.commandFlowMin).toFixed(3) : String(q);
+  }
+
+  
+  
+  
+  
+  
+  
+  function s3StepLimit(command, fraction, absolute) {
+    const c = Number(command);
+    const pct = Number.isFinite(c) ? Math.abs(c) * Math.abs(Number(fraction) || 0) : 0;
+    return Math.max(1 / 16, pct, Math.abs(Number(absolute) || 0));
+  }
+
+  
+  
+  
+  
+  
+  
+  const COMMAND_EQUAL_TOLERANCE = 1 / 32;
+  function sameCommandFlow(a, b) {
+    const x = snapCommandFlow(a), y = snapCommandFlow(b);
+    return x !== null && y !== null && Math.abs(x - y) < COMMAND_EQUAL_TOLERANCE;
+  }
+
+  
+  
+  
+  function normalizeReleaseMode(value) {
+    if (value === false) return "off";
+    
+    
+    
+    
+    if (value === true) return "auto";
+    const v = String(value == null ? "" : value).trim().toLowerCase();
+    if (v === "off" || v === "continuous" || v === "false") return "off";
+    if (v === "on" || v === "restart" || v === "release" || v === "true") return "on";
+    return "auto";
+  }
+  function releaseMode(config) {
+    if (!config) return "auto";
+    
+    
+    if (config.activeRelease === false) return "off";
+    if (config.releaseMode !== undefined && config.releaseMode !== null && config.releaseMode !== "") return normalizeReleaseMode(config.releaseMode);
+    
+    if (config.activeRelease === true) return "on";
+    return "auto";
+  }
+  function activeReleaseEnabled(config) { return releaseMode(config) !== "off"; }
+  function isAutoRelease(config) { return releaseMode(config) === "auto"; }
+  function isRestartRelease(config) { return releaseMode(config) === "on"; }
+  function releaseModeLabel(mode) {
+    return mode === "auto" ? "AUTO · 0 bar release / soak" : mode === "on" ? "ON · Idle / soak / GHC restart" : "OFF · Continuous S1 → S2 → S3";
+  }
+  
+  
+  
+  function profileLayoutForMode(mode) {
+    return normalizeReleaseMode(mode) === "auto"
+      ? { s1: 0, release: 1, s2: 2, s3: 3 }
+      : { s1: 0, release: null, s2: 1, s3: 2 };
+  }
+  function profileLayoutForProfile(profile) {
+    const steps = profile && Array.isArray(profile.steps) ? profile.steps : [];
+    const release = steps.length >= 4 && steps[1] && String(steps[1].pump || "") === "pressure" && Number(steps[1].pressure) === 0;
+    return release ? { s1: 0, release: 1, s2: 2, s3: 3 } : { s1: 0, release: null, s2: 1, s3: 2 };
+  }
+  function runProfileLayout(run) {
+    if (!run) return profileLayoutForMode(releaseMode(state.cfg));
+    if (run && run.config && run.config.profileLayout) {
+      const l = run.config.profileLayout;
+      return { s1: Number(l.s1) || 0, release: l.release === null || l.release === undefined ? null : Number(l.release), s2: Number(l.s2), s3: Number(l.s3) };
+    }
+    if (run && run.config) {
+      if (run.config.releaseMode !== undefined) return profileLayoutForMode(run.config.releaseMode);
+      if (run.config.activeRelease === false) return profileLayoutForMode("off");
+    }
+    return profileLayoutForMode(/\bauto$/i.test(String(run && run.profileTitle || "")) ? "auto" : "on");
+  }
+  function logicalFrameForPhysical(frame, layout) {
+    const f = finiteOrNull(frame);
+    if (f === null) return null;
+    const i = Math.floor(f);
+    if (i === 0) return 0;
+    if (layout && layout.release !== null) {
+      if (i === 1) return null; 
+      if (i === 2) return 1;
+      if (i >= 3) return 2 + (i - 3);
+    } else {
+      if (i === 1) return 1;
+      if (i >= 2) return 2 + (i - 2);
+    }
+    return null;
+  }
+  function physicalFrameForLogical(frame, layout) {
+    const f = finiteOrNull(frame);
+    if (f === null) return null;
+    const i = Math.floor(f);
+    if (i === 0) return 0;
+    if (layout && layout.release !== null) {
+      if (i === 1) return 2;
+      if (i >= 2) return 3 + (i - 2);
+    } else {
+      if (i === 1) return 1;
+      if (i >= 2) return 2 + (i - 2);
+    }
+    return null;
+  }
+  function runPhysicalStageFrame(run, stage) {
+    const l = runProfileLayout(run);
+    return stage === "s1" ? l.s1 : stage === "release" ? l.release : stage === "s2" ? l.s2 : stage === "s3" ? l.s3 : null;
+  }
+  function currentProfileLayout() { return profileLayoutForMode(releaseMode(state.cfg)); }
+  function currentLogicalFrame(frame) { return logicalFrameForPhysical(frame, currentProfileLayout()); }
+  function currentPhysicalFrame(frame) { return physicalFrameForLogical(frame, currentProfileLayout()); }
+  function liveFrameForLayout(frame) {
+    
+    
+    if (state.calibrationActive || isCalibrationProfileTitle(state.workflowTitle)) return finiteOrNull(frame);
+    return currentLogicalFrame(frame);
+  }
+  function baseProfileTitle() { return HYPEREX_TITLE_PREFIX + " Pulse Filter"; }
+  function autoProfileTitle(title) {
+    const t = String(title == null ? "" : title).trim();
+    return /\bauto$/i.test(t) ? t : t + " auto";
+  }
+  function profileTitleForMode() { return isAutoRelease(state.cfg) ? autoProfileTitle(baseProfileTitle()) : baseProfileTitle(); }
+  function isHyperExProfileTitle(title) {
+    if (!state.cfg || !title) return false;
+    const t = String(title);
+    return t.startsWith(HYPEREX_TITLE_PREFIX) && !isCalibrationProfileTitle(t);
+  }
+  
+  
+  
+  
+  
+  function normalizeAlgorithmIntervention(value) { return value === "off" ? "off" : value === "hec" ? "hec" : "full"; }
+  
+  
+  function hecTakeoverActive(run) {
+    return !!(run && run.config && run.config.algorithmIntervention === "hec" && run.config.hecTakeover);
+  }
+  function effectiveInterventionForRun(run) {
+    const mode = algorithmInterventionForRun(run);
+    return mode === "hec" && hecTakeoverActive(run) ? "full" : mode;
+  }
+  function hecHeartbeatFresh(now) {
+    return state.hecLastContactAtMs > 0 && now - state.hecLastContactAtMs <= HEC_HEARTBEAT_MS;
+  }
+  function hecTouchContact(client) {
+    state.hecLastContactAtMs = Date.now();
+    if (client && typeof client === "object") state.hecClient = { name: String(client.client || client.name || "HyperExControler").slice(0, 64), version: String(client.version || "").slice(0, 32) };
+  }
+  
+  
+  
+  function hecLatchTakeover(run, reason) {
+    if (!run || !run.config || run.config.algorithmIntervention !== "hec" || run.config.hecTakeover) return false;
+    run.config.hecTakeover = { reason, atMs: Date.now() };
+    if (state.liveTrim && state.liveTrim.run === run) {
+      const t = state.liveTrim;
+      t.algorithmIntervention = "full";
+      if (t.startup && (t.startup.status === "armed" || t.startup.status === "disabled") && state.phase === "stage2") {
+        const plan = stage2StartupPlan("full", run);
+        t.startup.plan = plan;
+        t.run.config.s2StartupPlan = plan;
+        t.report.s2StartupPlan = plan;
+        t.report.startupExecution = { status: plan.enabled ? "armed" : "not-planned", reason: plan.reason || "HEC takeover rebuilt S2 startup plan" };
+        if (plan.enabled) t.startup.status = "armed";
+      }
+      if (t.report.status === "hec-external") t.report.status = "monitoring";
+    }
+    diagnosticEvent("hec_takeover", { reason, runId: run.runId || null });
+    log("HEC takeover latched (" + reason + "); plugin controls the rest of this shot");
+    emitSkinChanged();
+    return true;
+  }
+  
+  
+  async function hecHeartbeatWatchdog(t) {
+    if (!t || !t.active || state.liveTrim !== t) return;
+    const run = t.run;
+    if (algorithmInterventionForRun(run) !== "hec" || hecTakeoverActive(run)) return;
+    if (state.phase !== "stage2" && state.phase !== "stage3") return;
+    
+    
+    
+    if (state.phase === "stage2" && t.startup && (t.startup.status === "armed" || (t.startup.status === "disabled" && state.hecLastContactAtMs === 0))) return;
+    if (hecHeartbeatFresh(Date.now())) return;
+    hecLatchTakeover(run, "hec-heartbeat-lost");
+    state.hecWatchdogs++;
+    const frame = finiteOrNull(state.lastFrame);
+    if (frame === null || !t.handle || t.pending || state.commandBusy) return;
+    const layout = runProfileLayout(run);
+    const physicalFrame = physicalFrameForLogical(frame, layout);
+    const step = t.profile.steps[physicalFrame];
+    if (!step || step.pump !== "flow" || step.exit) return;
+    const base = Math.floor(Number(step.flow) * 16 + 0.5) / 16;
+    const current = Number.isFinite(t.commands[frame]) ? t.commands[frame] : base;
+    if (Math.abs(current - base) < 1 / 32) return;
+    if (base < LIMITS.commandFlowMin || base > LIMITS.commandFlowMax) return;
+    if (t.report.writes >= t.report.maxWrites) return;
+    const payload = encodeLiveFlowFrame(step, physicalFrame, base);
+    const p = { frame, command: base, at: Date.now(), ack: false, targetSeen: false, flowAtWrite: finiteOrNull(state.lastFlow), slopeAtWrite: null, sourceStamp: null, hecWatchdog: true };
+    t.pending = p;
+    t.lastWriteAt = p.at;
+    t.commands[frame] = base;
+    t.report.writes++;
+    state.liveTrimDirty = true;
+    liveTrimRecord("write", { frame, commandMlS: base, previousMlS: current, retry: false, external: false, hecWatchdog: true, reason: "hec-heartbeat-lost-base-return", payload });
+    await host.transport.send(t.handle, { type: "text", data: JSON.stringify({ type: "request", operation: "write", characteristicUUID: "A010", payload }) });
+  }
+  function algorithmInterventionForRun(run) {
+    return normalizeAlgorithmIntervention(run && run.config && run.config.algorithmIntervention || state.algorithmIntervention);
+  }
+  function activeAlgorithmIntervention() {
+    const run = state.diagnosticCurrent;
+    if (run && run.config && run.config.algorithmIntervention) return normalizeAlgorithmIntervention(run.config.algorithmIntervention);
+    return normalizeAlgorithmIntervention(state.algorithmIntervention);
+  }
+  function overrideStorageKey() { return activeReleaseEnabled(state.cfg) ? STORAGE_TEST_OVERRIDES : "manualTestOverridesContinuousV3"; }
+  function liveTrimPhaseAllowed(t) {
+    return ["stage2","stage3"].includes(state.phase)||state.phase==="stage1"&&t&&t.run&&t.run.config.activeRelease===false;
+  }
+  async function beginContinuousStage2() {
+    if(activeReleaseEnabled(state.cfg)||state.phase!=="stage1"||state.stage1DumpSent)return;
+    state.stage1DumpSent=true;
+    const token=state.sequenceStartedAtMs;
+    diagnosticEvent("continuous_s1_weight_trigger",{cumulativeWeightG:round(state.cumulativeWeight,3)});
+    try {
+      await guardedSingleSkip(0,1,"continuous S1 -> S2",()=>state.phase==="stage1"&&state.sequenceStartedAtMs===token);
+      if(state.phase!=="stage1"||state.sequenceStartedAtMs!==token)return;
+      state.phase="stage2";
+      diagnosticEvent("stage2_start",{continuous:true,targetFlowMlS:state.cfg.stage2Flow});
+      diagnosticSample("stage2-start",true);emitSkinChanged();startFlowStripTicker();
+    }catch(error){if(state.sequenceStartedAtMs===token&&state.phase==="stage1")abortSequence(`Continuous S1 transition failed: ${error.message||error}`,true);}
+  }
+  
+  
+  function stage1LiveLearning(run) {
+    const c=run&&run.config||{},trace=run&&run.liveFlowTrim&&run.liveFlowTrim.trace||[];
+    const changed=c.activeRelease===false&&!!c.experimentalLiveTrim&&trace.some(x=>x.kind==="write"&&Number(x.frame)===0);
+    const report={applicable:changed,eligible:false,actuator:{eligible:false},basis:"S1 startup observed-target exposure local model",reason:"Original S1 startup evidence path"};
+    if(!changed)return report;
+    const admission=learningAdmission(run);
+    const m=stage1StartupMetrics(run),seed=finiteOrNull(c.stage1CommandMlS),target=finiteOrNull(c.stage1Flow),limit=finiteOrNull(c.stage1PressureLimit);
+    if(!m||m.confidence!=="MEDIUM"||!seed||!target||!limit){report.reason="S1 corrected startup quality insufficient";return report;}
+    const raw=phaseRawSamples(run,"stage1").filter(x=>Number(x.profileFrame)===0&&finiteOrNull(x.scaleTimestampSeconds)!==null&&rawTimeSecondsForSample(x)>=m.midStartScaleS&&rawTimeSecondsForSample(x)<=m.midEndScaleS);
+    const machine=(run.samples||[]).filter(x=>x.phase==="stage1"&&Number(x.profileFrame)===0).slice().sort((a,b)=>a.tMs-b.tMs);
+    const points=[],stamps=new Set();let mi=-1,previous=null,exposure=0;
+    for(const x of raw){
+      const stamp=Number(x.scaleTimestampSeconds);if(stamps.has(stamp))continue;stamps.add(stamp);
+      while(mi+1<machine.length&&machine[mi+1].tMs<=x.tMs)mi++;
+      const q=machine[mi],command=q&&finiteOrNull(q.targetFlowMlS),base=Math.round(seed*16)/16;
+      const known=command>0&&(Math.abs(command-base)<.02||trace.some(w=>w.kind==="write"&&Number(w.frame)===0&&w.tMs<=q.tMs&&Math.abs(w.commandMlS-command)<.02));
+      if(!q||q.machineTelemetryValid!==true||finiteOrNull(q.machineAgeMs)===null||q.machineAgeMs>600||x.tMs-q.tMs>600||!known||command<base*.8-.02||command>base*1.2+.02||finiteOrNull(q.pressureBar)===null||q.pressureBar<0||q.pressureBar>=limit*.95||finiteOrNull(q.machineFlowMlS)===null||q.machineFlowMlS<command*.7){report.reason="S1 corrected startup target or actuator coverage insufficient";return report;}
+      if(previous){const dt=stamp-previous.stamp;if(!(dt>0&&dt<=.6)){report.reason="S1 corrected startup source gap";return report;}exposure+=dt*(previous.command+command)/(2*(Math.round(seed*16)/16));}
+      points.push({x:exposure,y:Number(x.weightG)});previous={stamp,command};
+    }
+    if(points.length<admission.samples(8)||raw.length<admission.samples(8)||Number(raw[raw.length-1].scaleTimestampSeconds)-Number(raw[0].scaleTimestampSeconds)<admission.seconds(.9)){report.reason="S1 corrected startup needs eight unique samples over0.9s";return report;}
+    const fit=linearRegression(points);if(!fit||fit.r2<admission.r2(.90)||fit.slope<=0){report.reason="S1 corrected startup model fit insufficient";return report;}
+    report.eligible=true;report.actuator={eligible:true,samples:points.length};report.reason="S1 corrected startup admitted using observed target exposure";
+    report.evidence={runId:run.runId,targetGS:target,command:round(seed,3),measured:round(fit.slope,3),errorPct:round((fit.slope/target-1)*100,1),confidence:"MEDIUM",r2:round(Math.min(fit.r2,m.midR2),5),transitS:m.transit20to80S,activeSeconds:m.activeSeconds,firstRiseDelayS:m.firstRiseDelayS,measurementBasis:report.basis};
+    return report;
+  }
+
+
+  function loadConfig(settings) {
+    const hardPressureLimit = clampNumber(settings.HardPressureLimit, 1.0, LIMITS.pressureMax, 8.0);
+    const stage1Weight = clampNumber(settings.Stage1Weight, LIMITS.stage1WeightMin, LIMITS.stage1WeightMax, 4.0);
+    const releaseModeValue = normalizeReleaseMode(settings.ActiveRelease);
+    
+    const stage2Weight = clampNumber(settings.Stage2Weight, stage1Weight + 2.0, LIMITS.stage2WeightMax, Math.max(40.0, stage1Weight + 2.0));
+    const finalWeight = clampNumber(settings.FinalWeight, stage2Weight + 5.0, LIMITS.finalWeightMax, Math.max(100.0, stage2Weight + 5.0));
+    return {
+      enabled: b(settings.Enabled, true),
+      activeRelease: releaseModeValue !== "off",
+      releaseMode: releaseModeValue,
+      adaptiveLearningLevel:normalizeLearningLevel(settings.AdaptiveLearningLevel),
+      basketContext: "empty", 
+      temperature: clampNumber(settings.Temperature, LIMITS.temperatureMin, LIMITS.temperatureMax, 92.0),
+      stage1Flow: clampNumber(settings.Stage1Flow, LIMITS.desiredRealFlowMin, LIMITS.desiredRealFlowMax, 2.0),
+      stage1Weight,
+      stage1PressureLimit: clampNumber(settings.Stage1PressureLimit, LIMITS.pressureMin, hardPressureLimit, Math.min(3.0, hardPressureLimit)),
+      dumpFlowThreshold: clampNumber(settings.DumpFlowThreshold, 0, 2.0, 0.4),
+      dumpFlowStableSamples: Math.max(1, Math.min(20, Math.round(n(settings.DumpFlowStableSamples, 2)))),
+      dumpMinSettleSeconds: clampNumber(settings.DumpMinSettleSeconds, 0, 10, 0.8),
+      dumpFallbackSeconds: clampNumber(settings.DumpFallbackSeconds, 0.2, 15, 1.5),
+      dumpTimeoutSeconds: clampNumber(settings.DumpTimeoutSeconds, 1, 30, 5.0),
+      soakSeconds: clampNumber(settings.SoakSeconds, 0, 60, 10.0),
+      s2StartupAssist: settings.S2StartupAssist !== false,
+      stage2Flow: clampNumber(settings.Stage2Flow, LIMITS.desiredRealFlowMin, LIMITS.desiredRealFlowMax, 5.0),
+      stage2Weight,
+      stage2PressureLimit: clampNumber(settings.Stage2PressureLimit, LIMITS.pressureMin, hardPressureLimit, Math.min(6.0, hardPressureLimit)),
+      stage3Flow: clampNumber(settings.Stage3Flow, LIMITS.desiredRealFlowMin, LIMITS.desiredRealFlowMax, 1.5),
+      finalWeight,
+      stage3PressureLimit: clampNumber(settings.Stage3PressureLimit, LIMITS.pressureMin, hardPressureLimit, Math.min(3.0, hardPressureLimit)),
+      hardPressureLimit,
+      scaleResetThreshold: clampNumber(settings.ScaleResetThreshold, 0.5, 20, 2.0),
+      noScaleTimeoutSeconds: clampNumber(settings.NoScaleTimeoutSeconds, 1, 30, 5.0),
+      liveFlowTrimTest: b(settings.LiveFlowTrimTest, true),
+      liveFlowTrimLevel: [1,2,3,4].includes(Number(settings.LiveFlowTrimLevel)) ? Number(settings.LiveFlowTrimLevel) : 3,
+      liveTrimDecisionModel: b(settings.LiveTrimDecisionModel, true),
+      s3DriftModel: b(settings.S3DriftModel, true),
+      s2RefillBoundedModel: b(settings.S2RefillBoundedModel, true),
+      directDriverStartTest: b(settings.DirectDriverStartTest, false),
+      ghcConfirmTimeoutSeconds: clampNumber(settings.GHCConfirmTimeoutSeconds, 1, 60, 20.0),
+      autoArmRetry1Seconds: clampNumber(settings.AutoArmRetry1Seconds, 0, 30, 3.0),
+      autoArmRetry2Seconds: clampNumber(settings.AutoArmRetry2Seconds, 0, 60, 7.0),
+      diagnosticEnabled: b(settings.DiagnosticEnabled, true),
+      idleDashboardShortcut: b(settings.IdleDashboardShortcut, true),
+      diagnosticSampleIntervalMs: Math.round(clampNumber(settings.DiagnosticSampleIntervalMs, 50, 1000, 100)),
+      maxRunSeconds: clampNumber(settings.MaxRunSeconds, 30, 600, 180.0),
+      useCalibrationLut: b(settings.UseCalibrationLut, true),
+      flowMultiplierScope: String(settings.FlowMultiplierScope || "HyperEx only"),
+      calibrationMode: normalizeCalibrationMode(settings.CalibrationMode || "Low Water"),
+      calibrationStepSeconds: clampNumber(settings.CalibrationStepSeconds, 7, 20, 10.0),
+      calibrationSettleSeconds: clampNumber(settings.CalibrationSettleSeconds, 1.5, 10, 4.0),
+      calibrationWindowSeconds: clampNumber(settings.CalibrationWindowSeconds, 2, 8, 3.5),
+      calibrationAutoSync: b(settings.CalibrationAutoSync, true),
+      autoApplyNextShot: b(settings.AutoApplyNextShot, true)
+    };
+  }
+
+  function advancedSettingsFromCfg(cfg) {
+    const c = cfg || state.cfg || loadConfig({});
+    return {
+      activeRelease: activeReleaseEnabled(c),
+      releaseMode: releaseMode(c),
+      adaptiveLearningLevel:c.adaptiveLearningLevel,
+      liveFlowTrimTest: !!c.liveFlowTrimTest,
+      liveFlowTrimLevel: c.liveFlowTrimLevel,
+      directDriverStartTest: !!c.directDriverStartTest,
+      temperature: round(c.temperature, 2),
+      stage1Flow: round(c.stage1Flow, 3), stage1PressureLimit: round(c.stage1PressureLimit, 2),
+      dumpFlowThreshold: round(c.dumpFlowThreshold, 3), dumpFlowStableSamples: Math.round(c.dumpFlowStableSamples),
+      dumpFallbackSeconds: round(c.dumpFallbackSeconds, 2), dumpTimeoutSeconds: round(c.dumpTimeoutSeconds, 2),
+      stage2Flow: round(c.stage2Flow, 3), stage2PressureLimit: round(c.stage2PressureLimit, 2),
+      stage3Flow: round(c.stage3Flow, 3), stage3PressureLimit: round(c.stage3PressureLimit, 2),
+      hardPressureLimit: round(c.hardPressureLimit, 2), scaleResetThreshold: round(c.scaleResetThreshold, 2),
+      noScaleTimeoutSeconds: round(c.noScaleTimeoutSeconds, 2), autoArmRetry1Seconds: round(c.autoArmRetry1Seconds, 2),
+      autoArmRetry2Seconds: round(c.autoArmRetry2Seconds, 2), diagnosticSampleIntervalMs: Math.round(c.diagnosticSampleIntervalMs),
+      maxRunSeconds: round(c.maxRunSeconds, 1)
+    };
+  }
+
+  function advancedSettingsPayload() {
+    return {
+      settings: advancedSettingsFromCfg(),
+      canEdit:state.phase==="idle"&&!state.calibrationActive&&!state.curveApplyBusy&&(!state.autoApplyLastStatus||state.autoApplyLastStatus.status!=="applying"),
+      liveFlowTrimTest: liveTrimPayload(),
+      directStartTest: directStartTestPayload(),
+      basicCurve: state.cfg ? {
+        stage1WeightG: round(state.cfg.stage1Weight,2),
+        releaseSettleSeconds: round(state.cfg.dumpMinSettleSeconds,2),
+        soakSeconds: round(state.cfg.soakSeconds,2),
+        stage2WeightG: round(state.cfg.stage2Weight,2),
+        finalWeightG: round(state.cfg.finalWeight,2),
+        ghcConfirmTimeoutSeconds: round(state.cfg.ghcConfirmTimeoutSeconds,2)
+      } : null,
+      note: "Single source of truth: values are loaded from Plugins → HyperEx Pulse Filter settings."
+    };
+  }
+
+  function log(message) {
+    host.log(`[HyperEx] ${message}`);
+  }
+
+  function round(value, digits) {
+    if (value === null || value === undefined || value === "") return null;
+    const v = Number(value);
+    if (!Number.isFinite(v)) return null;
+    const f = Math.pow(10, digits === undefined ? 3 : digits);
+    return Math.round(v * f) / f;
+  }
+
+  function finiteOrNull(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const v = Number(value);
+    return Number.isFinite(v) ? v : null;
+  }
+
+  function normalizeScope(value) {
+    const v = String(value || "").trim().toLowerCase();
+    if (v === "off") return "off";
+    if (v === "global") return "global";
+    return "hyperex";
+  }
+
+  function scopeLabel(value) {
+    return value === "off" ? "Off" : value === "global" ? "Global" : "HyperEx only";
+  }
+
+  function parseStoredJson(value) {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value === "object") return value;
+    try { return JSON.parse(String(value)); } catch (_) { return null; }
+  }
+
+  function storageRead(key) {
+    if(key===STORAGE_TEST_OVERRIDES)key=overrideStorageKey();
+    try { host.storage({ type: "read", key, namespace: ID }); return true; }
+    catch (error) { log(`Storage read '${key}' failed: ${error.message || error}`); return false; }
+  }
+
+  function storageWrite(key, value) {
+    if(key===STORAGE_TEST_OVERRIDES)key=overrideStorageKey();
+    try {
+      const data = typeof value === "string" ? value : JSON.stringify(value);
+      host.storage({ type: "write", key, namespace: ID, data });
+      return true;
+    } catch (error) {
+      log(`Storage write '${key}' failed: ${error.message || error}`);
+      return false;
+    }
+  }
+
+  function desiredRealFlowForPhase(phase) {
+    if (!state.cfg) return null;
+    if (phase === "stage1") return state.cfg.stage1Flow;
+    if (phase === "stage2") return state.cfg.stage2Flow;
+    if (phase === "stage3") return state.cfg.stage3Flow;
+    return null;
+  }
+
+  function calibrationBaseMultiplier() {
+    const m = state.calibrationMap && Number(state.calibrationMap.baseFlowMultiplier);
+    return Number.isFinite(m) ? m : null;
+  }
+
+  function calibrationPoints() {
+    const points = state.calibrationMap && Array.isArray(state.calibrationMap.points)
+      ? state.calibrationMap.points.filter(p => Number.isFinite(Number(p.commandFlow)) && Number.isFinite(Number(p.actualFlow)) && Number(p.actualFlow) > 0)
+      : [];
+    return points.slice().sort((a, b) => Number(a.actualFlow) - Number(b.actualFlow));
+  }
+
+  function multiplierClose(a, b) {
+    const x = finiteOrNull(a), y = finiteOrNull(b);
+    return x !== null && y !== null && Math.abs(x - y) <= 0.015;
+  }
+
+  function recomputeCalibrationUsability() {
+    refreshLutBootstrapMode();
+    state.calibrationMapUsable = false;
+    state.calibrationMapStaleReason = "not calibrated";
+    if (!state.cfg || !state.cfg.useCalibrationLut) {
+      state.calibrationMapStaleReason = "LUT disabled";
+      return;
+    }
+    const map = state.calibrationMap;
+    const pts = calibrationPoints();
+    
+    if (!map || map.valid !== true || pts.length < 2) {
+      state.calibrationMapStaleReason = "no valid calibration map";
+      return;
+    }
+    if (Number(map.schema || 0) < 3) {
+      state.calibrationMapStaleReason = "legacy calibration map; rerun v0.1.27+ Flow Cal";
+      return;
+    }
+    if (state.cfg && pts.length) {
+      const lo = Number(pts[0].actualFlow), hi = Number(pts[pts.length - 1].actualFlow);
+      const allTargets = [Number(state.cfg.stage1Flow), Number(state.cfg.stage2Flow), Number(state.cfg.stage3Flow)].filter(Number.isFinite);
+      
+      const targets = pts.length >= 3 ? allTargets : allTargets.slice(1);
+      const outside = targets.find(t => t < lo * 0.92 || t > hi * 1.08);
+      if (outside !== undefined) {
+        state.calibrationMapStaleReason = `target ${round(outside,3)} g/s outside calibrated range ${round(lo,3)}..${round(hi,3)}; rerun Flow Cal`;
+        return;
+      }
+    }
+    const base = calibrationBaseMultiplier();
+    if (!Number.isFinite(base)) {
+      state.calibrationMapStaleReason = "calibration multiplier missing";
+      return;
+    }
+    if (state.scopeMode === "hyperex") {
+      state.calibrationMapUsable = true;
+      state.calibrationMapStaleReason = "";
+      return;
+    }
+    if (finiteOrNull(state.flowMultiplierCurrent) === null) {
+      state.calibrationMapStaleReason = "current DE1 multiplier unknown";
+      return;
+    }
+    if (!multiplierClose(state.flowMultiplierCurrent, base)) {
+      state.calibrationMapStaleReason = `DE1 multiplier ${round(state.flowMultiplierCurrent,3)} != calibration ${round(base,3)}`;
+      return;
+    }
+    state.calibrationMapUsable = true;
+    state.calibrationMapStaleReason = "";
+  }
+
+  function mappedCommandForReal(realFlow) {
+    const target = Number(realFlow);
+    if (!state.calibrationMapUsable || !Number.isFinite(target) || target <= 0) return null;
+    const pts = calibrationPoints();
+    if (pts.length < 2) return null;
+    const lo = Number(pts[0].actualFlow), hi = Number(pts[pts.length - 1].actualFlow);
+    
+    if (target < lo * 0.92 || target > hi * 1.08) return null;
+    if (target <= lo) return Number(pts[0].commandFlow);
+    if (target >= hi) return Number(pts[pts.length - 1].commandFlow);
+    for (let i = 1; i < pts.length; i += 1) {
+      const a = pts[i - 1], b = pts[i];
+      const ya = Number(a.actualFlow), yb = Number(b.actualFlow);
+      if (target <= yb && yb > ya) {
+        const f = (target - ya) / (yb - ya);
+        return Number(a.commandFlow) + f * (Number(b.commandFlow) - Number(a.commandFlow));
+      }
+    }
+    return null;
+  }
+
+  function stage1StartupFactor() {
+    const x = state.stage1StartupCorrection;
+    if (!x || typeof x !== "object") return 1.0;
+    const factor = Number(x.factor), target = Number(x.targetRealFlow), weight = Number(x.stage1Weight);
+    if (!Number.isFinite(factor) || factor < 0.70 || factor > 1.60) return 1.0;
+    if (!state.cfg || Math.abs(target - Number(state.cfg.stage1Flow)) > 0.001 || Math.abs(weight - Number(state.cfg.stage1Weight)) > 0.001) return 1.0;
+    const mapCreatedAt = state.calibrationMap && state.calibrationMap.createdAt ? String(state.calibrationMap.createdAt) : "";
+    if (String(x.mapCreatedAt || "") !== mapCreatedAt) return 1.0;
+    return factor;
+  }
+
+  function testOverrideBinding() {
+    const mapCreatedAt = state.calibrationMap && state.calibrationMap.createdAt ? String(state.calibrationMap.createdAt) : "";
+    return {
+      mapCreatedAt,
+      activeRelease:activeReleaseEnabled(state.cfg),
+      basketContext: state.cfg ? state.cfg.basketContext : "unknown",
+      targets: state.cfg ? {
+        stage1: round(state.cfg.stage1Flow, 4),
+        stage2: round(state.cfg.stage2Flow, 4),
+        stage3: round(state.cfg.stage3Flow, 4)
+      } : null
+    };
+  }
+
+
+  function testOverrideStatus() {
+    const x = state.testOverrides;
+    const schema = Number(x && x.schema || 0);
+    if (!x || typeof x !== "object" || ![1,2,3].includes(schema)) return { valid: false, reason: "none", activeStages: [], s3ShapeActive: false };
+    
+    
+    
+    if (schema === 3 && x.adaptiveSource && !String(x.writerVersion || "").trim()) {
+      return { valid: false, reason: "legacy v0.1.37 adaptive override ignored; run a new validation shot and apply again", activeStages: [], s3ShapeActive: false };
+    }
+    if (!state.cfg) return { valid: false, reason: "configuration unavailable", activeStages: [], s3ShapeActive: false };
+    const binding = testOverrideBinding();
+    if(activeReleaseEnabled(x)!==activeReleaseEnabled(state.cfg))return {valid:false,reason:"Brew mode differs; separate command history is used",activeStages:[],s3ShapeActive:false};
+    const overrideContext = x.basketContext || "unknown";
+    const baselinePrior = binding.basketContext === "coffee" && ["empty","unknown"].includes(overrideContext);
+    if (overrideContext !== binding.basketContext && !baselinePrior && !(binding.basketContext === "empty" && overrideContext === "unknown")) {
+      return { valid:false, reason:"basket context changed; previous overrides ignored; using LUT baseline", activeStages:[], s3ShapeActive:false };
+    }
+    if (String(x.mapCreatedAt || "") !== String(binding.mapCreatedAt || "")) return { valid: false, reason: "calibration LUT changed; manual test override ignored", activeStages: [], s3ShapeActive: false };
+    
+    
+    
+    
+    const xt = x.targets && typeof x.targets === "object" ? x.targets : {};
+    const targetScale = {};
+    for (const stage of ["stage1","stage2","stage3"]) {
+      const before = Number(xt[stage]), now = Number(binding.targets[stage]);
+      if (!(before > 0.1) || !(now > 0.1) || !(now / before >= .5 && now / before <= 2)) {
+        return { valid: false, reason: "real-flow targets changed beyond the one-step transition; manual test override ignored", activeStages: [], s3ShapeActive: false };
+      }
+      targetScale[stage] = now / before;
+    }
+    const activeStages = [];
+    for (const stage of ["stage1","stage2","stage3"]) {
+      const q = x.stages && x.stages[stage];
+      if (q && String(q.mode) === "manual" && Number.isFinite(Number(q.command))) activeStages.push(stage);
+    }
+    const sq = schema >= 2 && x.s3Shape && typeof x.s3Shape === "object" ? x.s3Shape : null;
+    const s3ShapeActive = !!(sq && sq.enabled === true);
+    if (s3ShapeActive) activeStages.push("stage3-shape");
+    const adaptiveSource = x.adaptiveSource && typeof x.adaptiveSource === "object" ? x.adaptiveSource : null;
+    let reason = "all stages ORIGINAL / LUT";
+    if (activeStages.length) {
+      if (adaptiveSource && String(adaptiveSource.mode || "").toLowerCase() === "auto") reason = "adaptive auto applied";
+      else if (adaptiveSource) reason = "adaptive manual applied";
+      else reason = "manual test active";
+    }
+    if (baselinePrior && activeStages.length) reason = "empty/pre-upgrade baseline seed; normal coffee learning";
+    return { valid: true, reason, activeStages, s3ShapeActive, adaptiveSource:baselinePrior?null:adaptiveSource, baselinePrior, sourceBasketContext:overrideContext, targetScale,
+      targetTransition:["stage1","stage2","stage3"].some(stage=>Math.abs(targetScale[stage]-1)>0.001) };
+  }
+
+  function s3ShapeStatus() {
+    const os = testOverrideStatus();
+    const out = { enabled: false, model: "legacy", reason: os.valid ? "flat S3" : os.reason, earlyCommand: null, earlySeconds: null, midCommand: null, midSeconds: null, lateCommand: null, earlyFactor: null, drift: null, manual: false, manualTilt: null };
+    if (!os.valid || !os.s3ShapeActive) return out;
+    const q = state.testOverrides && state.testOverrides.s3Shape;
+    if (!q || typeof q !== "object") return out;
+    if (String(q.model || "") === "drift") {
+      const scale = Number(os.targetScale && os.targetScale.stage3);
+      const mid = Number(q.midCommand) * (Number.isFinite(scale) && scale > 0 ? scale : 1), earlyFactor = Number(q.earlyFactor), drift = Number(q.drift);
+      const earlySeconds = Number(q.earlySeconds), midSeconds = Number(q.midSeconds);
+      if (![mid, earlyFactor, drift, earlySeconds, midSeconds].every(Number.isFinite)) return { ...out, reason: "stored S3 drift shape rejected: non-finite value" };
+      const early = mid * earlyFactor, late = mid * drift;
+      const manual = q.manual === true, manualTilt = Number(q.manualTilt);
+      if (manual && (!Number.isFinite(manualTilt) || manualTilt < -1 || manualTilt > 1)) return { ...out, reason: "stored S3 manual tilt outside -1…+1" };
+      if (earlyFactor < 0.50 || earlyFactor > 2.00 || drift < 0.50 || drift > 2.00) return { ...out, reason: "stored S3 drift shape rejected: factor outside 0.50–2.00" };
+      if (![early, mid, late].every(v => v >= LIMITS.commandFlowMin && v <= LIMITS.commandFlowMax)) return { ...out, reason: "stored S3 drift shape rejected: command outside hard limits" };
+      if (earlySeconds < 3 || earlySeconds > 30 || midSeconds < 3 || midSeconds > 30) return { ...out, reason: "stored S3 drift shape rejected: timing outside 3–30 s" };
+      
+      
+      
+      
+      if (late > Math.max(mid + 0.25, mid * 1.35) + 0.001) return { ...out, reason: "stored S3 shape rejected: adjacent rise exceeds test bound" };
+      return {
+        enabled: true, model: "drift", reason: "DRIFT MODEL",
+        earlyCommand: round(early, 3), earlyFactor: round(earlyFactor, 4), earlySeconds: round(earlySeconds, 1),
+        midCommand: round(mid, 3), midSeconds: round(midSeconds, 1),
+        lateCommand: round(late, 3), drift: round(drift, 4),
+        manual, manualTilt: manual && Number.isFinite(manualTilt) ? round(manualTilt, 3) : null
+      };
+    }
+    const scale = Number(os.targetScale && os.targetScale.stage3);
+    const scaleCommand = v => Number(v) * (Number.isFinite(scale) && scale > 0 ? scale : 1);
+    const early = scaleCommand(q.earlyCommand), mid = scaleCommand(q.midCommand), late = scaleCommand(q.lateCommand);
+    const earlySeconds = Number(q.earlySeconds), midSeconds = Number(q.midSeconds);
+    if (![early,mid,late,earlySeconds,midSeconds].every(Number.isFinite)) return { ...out, reason: "stored S3 shape rejected: non-finite value" };
+    if (early < LIMITS.commandFlowMin || early > LIMITS.commandFlowMax ||
+        mid < LIMITS.commandFlowMin || mid > LIMITS.commandFlowMax ||
+        late < LIMITS.commandFlowMin || late > LIMITS.commandFlowMax) {
+      return { ...out, reason: "stored S3 shape rejected: command outside hard limits" };
+    }
+    if (earlySeconds < 3 || earlySeconds > 30 || midSeconds < 3 || midSeconds > 30) {
+      return { ...out, reason: "stored S3 shape rejected: timing outside 3–30 s" };
+    }
+    const boundedRise = (a,b) => b <= Math.max(a + 0.25, a * 1.35) + 1e-9;
+    if (!boundedRise(early,mid) || !boundedRise(mid,late)) {
+      return { ...out, reason: "stored S3 shape rejected: adjacent rise exceeds test bound" };
+    }
+    return {
+      enabled: true, model: "legacy", reason: "DECAY COMP TEST",
+      earlyCommand: round(early,3),
+      earlySeconds: round(earlySeconds,1),
+      midCommand: round(mid,3),
+      midSeconds: round(midSeconds,1),
+      lateCommand: round(late,3), earlyFactor:null, drift:null, manual:false, manualTilt:null
+    };
+  }
+
+  function manualS3ShapeLocked() {
+    const q=state.testOverrides&&state.testOverrides.s3Shape;
+    return !!(q&&q.enabled===true&&q.model==="drift"&&q.manual===true);
+  }
+  function manualTestCommand(stage) {
+    const status = testOverrideStatus();
+    if (!status.valid) return null;
+    const q = state.testOverrides && state.testOverrides.stages ? state.testOverrides.stages[stage] : null;
+    if (!q || String(q.mode) !== "manual") return null;
+    const scale = Number(status.targetScale && status.targetScale[stage]);
+    const v = Number(q.command) * (Number.isFinite(scale) && scale > 0 ? scale : 1);
+    return Number.isFinite(v) ? clampCommandFlow(v) : null;
+  }
+
+  function baseStageCommandFlow(realFlow, stage) {
+    const mapped = mappedCommandForReal(realFlow);
+    if (Number.isFinite(mapped)) return clampCommandFlow(mapped);
+    
+    if (state.lutBootstrapMode) {
+      const seed = bootstrapSeedCommandForReal(realFlow, stage);
+      if (Number.isFinite(seed)) return seed;
+    }
+    return clampCommandFlow(realFlow);
+  }
+  
+  function lutCommandForReal(realFlow) {
+    const mapped = mappedCommandForReal(realFlow);
+    return Number.isFinite(mapped) ? clampCommandFlow(mapped) : null;
+  }
+  
+  
+  
+  const LUT_BOOTSTRAP_SEED_R = { stage1: 1.3, stage2: 1.3, stage3: 1.9 };
+  const LUT_BOOTSTRAP_SEED_R_REF_MULT = 0.95;
+  function bootstrapSeedCommandForReal(realFlow, stage) {
+    const target = Number(realFlow);
+    if (!(target > 0)) return null;
+    const def = Number(LUT_BOOTSTRAP_SEED_R[stage] || LUT_BOOTSTRAP_SEED_R.stage2);
+    const m = finiteOrNull(state.flowMultiplierCurrent);
+    const r = m === null ? def : def * (m / LUT_BOOTSTRAP_SEED_R_REF_MULT);
+    if (!(r > 0)) return null;
+    return snapCommandFlow(clampCommandFlow(target / r));
+  }
+  
+  function refreshLutBootstrapMode() {
+    state.lutBootstrapMode = !!(state.cfg && state.cfg.useCalibrationLut !== false && !state.calibrationActive &&
+      isHyperExProfileTitle(state.workflowTitle) && (!state.calibrationMap || state.calibrationMap.valid !== true));
+  }
+  function lutOriginOf(map) {
+    if (!map || map.valid !== true) return null;
+    if (map.lutOrigin === "coffee" || String(map.algorithm || "") === "coffee-bootstrap-v1") return "coffee";
+    return "empty";
+  }
+
+  function resolvedStageCommandFlow(stage, realFlow) {
+    
+    
+    
+    
+    const manual = manualTestCommand(stage);
+    return snapCommandFlow(manual === null ? baseStageCommandFlow(realFlow, stage) : manual);
+  }
+
+
+  
+  function normalizeLearningLevel(v) {
+    const aliases={conservative:"保守",gentle:"温和",normal:"正常",aggressive:"激进"};
+    return ["保守","温和","正常","激进"].includes(v)?v:aliases[String(v||"").toLowerCase()]||"正常";
+  }
+  function learningPolicy(v) {
+    const name=normalizeLearningLevel(v===undefined&&state.cfg?state.cfg.adaptiveLearningLevel:v),rank=["保守","温和","正常","激进"].indexOf(name);
+    const rows=[
+      {deadband:8,gain:.18,single:false,largeSingle:false,s1:[.04,.04],s2:[.05,.10],s3:[.04,.04]},
+      {deadband:8,gain:.25,single:false,largeSingle:true,s1:[.05,.04],s2:[.08,.20],s3:[.05,.05]},
+      {deadband:8,gain:.35,single:true,largeSingle:true,s1:[.10,.08],s2:[.12,.35],s3:[.08,.075]},
+      {deadband:5,gain:.55,single:true,largeSingle:true,s1:[.15,.12],s2:[.20,.60],s3:[.12,.125]}
+    ];return {name,rank,qualityWidth:rank===3?1.3:1,...rows[rank]};
+  }
+  function learningAdmission(run) {
+    const factor=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel).qualityWidth;
+    return {factor,r2:base=>round(1-(1-base)*factor,6),seconds:base=>base/factor,samples:base=>Math.ceil(base/factor),spread:base=>base*factor};
+  }
+  function emptyGainMemory() {
+    return {schema:GAIN_MEMORY_SCHEMA,buckets:[],viBuckets:[],seq:0,lastBucketId:null,updatedAt:null};
+  }
+  function normalizeGainMemory(raw) {
+    const out=emptyGainMemory();
+    out.dropped=[];
+    if(!raw||typeof raw!=="object")return out;
+    const seen=new Set();
+    for(const row of Array.isArray(raw.buckets)?raw.buckets:[]){
+      if(!row||typeof row!=="object")continue;
+      const center=Number(row.center),radius=Number(row.radius);
+      if(!Number.isFinite(center)||center<=0)continue;
+      const id=String(row.id||"");if(!id||seen.has(id))continue;
+      const samples=(Array.isArray(row.samples)?row.samples:[]).map(Number).filter(x=>Number.isFinite(x)&&x>0).slice(-GAIN_MEMORY_SIGNATURE_SAMPLES);
+      const stages={};
+      for(const key of ["s2","s3"]){
+        const x=row.stages&&row.stages[key];
+        const r=Number(x&&x.r);
+        if(!Number.isFinite(r))continue;
+        if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX)){
+          out.dropped.push({bucketId:id,stage:key,r:round(r,4),reason:"r outside ["+GAIN_R_MIN+","+GAIN_R_MAX+"]"});
+          continue;
+        }
+        stages[key]={r:round(r,4),n:Math.max(1,Math.floor(Number(x.n)||1)),
+          lastDeviation:finiteOrNull(x.lastDeviation)!==null?round(Number(x.lastDeviation),4):null,
+          lastObservedR:finiteOrNull(x.lastObservedR)!==null?round(Number(x.lastObservedR),4):null,
+          lastLocalR:finiteOrNull(x.lastLocalR)!==null?round(Number(x.lastLocalR),4):null,
+          damped:!!x.damped,
+          drift:finiteOrNull(x.drift)!==null?round(Number(x.drift),4):null,
+          commandMlS:finiteOrNull(x.commandMlS)!==null?round(Number(x.commandMlS),4):null,
+          commandBand:typeof x.commandBand==="string"?x.commandBand:null,
+          bands:(function(){const b={};for(const k of Object.keys(x.bands&&typeof x.bands==="object"?x.bands:{})){const v=x.bands[k],br=Number(v&&v.r);if(!(br>=GAIN_R_MIN&&br<=GAIN_R_MAX))continue;b[k]={r:round(br,4),n:Math.max(1,Math.floor(Number(v.n)||1)),lastObservedR:finiteOrNull(v.lastObservedR)!==null?round(Number(v.lastObservedR),4):null,updatedAt:v.updatedAt||null,steadyN:v.steadyN==null?null:(Number.isFinite(Number(v.steadyN))?Math.max(0,Math.floor(Number(v.steadyN))):null),provisional:v.provisional===true};}return Object.keys(b).length?b:null;})(),
+          lastRunId:x.lastRunId==null?null:String(x.lastRunId),updatedAt:x.updatedAt||null};
+      }
+      
+      
+      
+      if(!Object.keys(stages).length)continue;
+      seen.add(id);
+      out.buckets.push({id,center:round(center,4),radius:Number.isFinite(radius)&&radius>0?round(radius,4):GAIN_MEMORY_BUCKET_RADIUS,
+        samples:samples.length?samples:[round(center,4)],stages,createdAt:row.createdAt||null,updatedAt:row.updatedAt||null});
+    }
+    out.buckets=out.buckets.slice(0,GAIN_MEMORY_MAX_BUCKETS);
+    out.dropped=out.dropped.slice(-20);
+    out.seq=Math.max(Number(raw.seq)||0,out.buckets.length);
+    out.lastBucketId=out.buckets.some(x=>x.id===raw.lastBucketId)?String(raw.lastBucketId):null;
+    
+    
+    out.viBuckets=[];
+    const vseen=new Set();
+    for(const v of Array.isArray(raw.viBuckets)?raw.viBuckets:[]){
+      if(!v||typeof v!=="object")continue;
+      const lo=Number(v.bandLo),hi=Number(v.bandHi);
+      if(!Number.isFinite(lo)||!Number.isFinite(hi)||!(lo>=S2_REFILL_VI_RATIO_MIN&&hi<=S2_REFILL_VI_RATIO_MAX&&lo<hi))continue;
+      const bk=lo+"-"+hi;if(vseen.has(bk))continue;
+      const vv=Number(v.vi);
+      if(!(Number.isFinite(vv)&&vv>=S2_VI_LEARN_STORAGE_MIN&&vv<=S2_VI_LEARN_STORAGE_MAX)){
+        if(Number.isFinite(vv))out.dropped.push({band:bk,stage:"vi",vi:round(vv,2),reason:"vi outside ["+S2_VI_LEARN_STORAGE_MIN+","+S2_VI_LEARN_STORAGE_MAX+"]"});
+        continue;
+      }
+      vseen.add(bk);
+      out.viBuckets.push({bandLo:round(lo,4),bandHi:round(hi,4),vi:round(vv,2),n:Math.max(1,Math.floor(Number(v.n)||1)),
+        lastDeviation:finiteOrNull(v.lastDeviation)!==null?round(Number(v.lastDeviation),4):null,
+        lastObservedVi:finiteOrNull(v.lastObservedVi)!==null?round(Number(v.lastObservedVi),2):null,
+        lastLocalVi:finiteOrNull(v.lastLocalVi)!==null?round(Number(v.lastLocalVi),2):null,
+        damped:!!v.damped,censored:!!v.censored,
+        censoredN:Math.max(0,Math.floor(Number(v.censoredN)||0)),
+        lastRunId:v.lastRunId==null?null:String(v.lastRunId),updatedAt:v.updatedAt||null,
+        fpKey:typeof v.fpKey==="string"?v.fpKey:null,
+        floodMode:typeof v.floodMode==="string"?v.floodMode:null});
+    }
+    out.viBuckets.sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")));
+    out.viBuckets=out.viBuckets.slice(0,S2_VI_BANDS.length);
+    out.updatedAt=raw.updatedAt||null;
+    return out;
+  }
+  function gainMemoryState(create) {
+    if(!state.persistentHistoryFile&&create){
+      state.persistentHistoryFile={schema:2,kind:"HyperExAdaptiveHistory",writerVersion:PLUGIN_VERSION,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),shots:[]};
+    }
+    const file=state.persistentHistoryFile;
+    if(!file||typeof file!=="object")return null;
+    if(!file.gainMemory&&!create)return null;
+    const normalized=normalizeGainMemory(file.gainMemory);
+    file.gainMemory=normalized;
+    return normalized;
+  }
+  function gainConfidence(stageState) {
+    if(!stageState||!(Number(stageState.r)>0))return "LOW";
+    const n=Number(stageState.n)||1,deviation=Number(stageState.lastDeviation);
+    
+    
+    if(stageState.reduced)return n>=2?"MEDIUM":"LOW";
+    if(n>=3&&(!Number.isFinite(deviation)||deviation<=GAIN_MEMORY_DEVIATION))return "HIGH";
+    if(n>=2)return "MEDIUM";
+    return "LOW";
+  }
+  function gainBackfillAlpha(run,deviation,stage) {
+    let alpha=GAIN_MEMORY_ALPHA;
+    const trim=run&&run.liveFlowTrim,trace=trim&&Array.isArray(trim.trace)?trim.trace:[];
+    const wantsFrame=stage==="s2"?f=>Number(f)===1:stage==="s3"?f=>Number(f)>=2:null;
+    let rescue=null,normal=null;
+    if(wantsFrame&&trace.length){
+      rescue=0;normal=0;
+      for(const w of trace){if(w&&w.kind==="write"&&wantsFrame(w.frame)){if(w.rescue)rescue++;else normal++;}}
+    }
+    if(rescue!==null){
+      if(rescue>0)alpha=.5;
+      else if(normal>0)alpha=.12;
+    }else if(trim){
+      
+      
+      if(Number(trim.rescueWrites)>0)alpha=.5;
+      else if(Number(trim.normalWrites)>0)alpha=.12;
+    }
+    
+    
+    
+    
+    
+    
+    const dev=Number(deviation);
+    if(dev>0&&dev<=GAIN_MEMORY_DEVIATION)alpha=Math.max(alpha,GAIN_MEMORY_ALPHA*dev/GAIN_MEMORY_DEVIATION);
+    if(Number(deviation)>GAIN_MEMORY_DEVIATION)alpha=Math.max(alpha,GAIN_MEMORY_DEVIATION_ALPHA);
+    return alpha;
+  }
+  
+  
+  
+  
+  function s1OutflowHint(run) {
+    const rows=((run&&run.rawScaleSamples)||[]).filter(x=>x&&x.phase==="stage1"&&Number.isFinite(Number(x.decaidWeightFlowGS)));
+    if(rows.length<8)return null;
+    const t0=Number(rows[0].tMs),t1=Number(rows[rows.length-1].tMs);
+    if(!(Number.isFinite(t0)&&Number.isFinite(t1)&&t1>t0))return null;
+    const first=rows.find(x=>Number(x.decaidWeightFlowGS)>=.5);
+    const firstOutflowS=first?round((Number(first.tMs)-t0)/1000,2):null;
+    const s1DurationS=round((t1-t0)/1000,2);
+    const high=(firstOutflowS!==null&&firstOutflowS>=6.3)||s1DurationS>=8;
+    return {candidate:high?"high":"low",firstOutflowS,s1DurationS,thresholdS:6.3,durationThresholdS:8,basis:"S1 first 0.5 g/s and S1 duration",confidence:"LOW"};
+  }
+  function gainRegimeForRun(run) {
+    const rows=((run&&run.samples)||[]).filter(x=>x&&x.phase==="stage2").sort((a,b)=>Number(a.tMs)-Number(b.tMs));
+    if(rows.length<GAIN_MEMORY_MIN_SAMPLES)return null;
+    
+    
+    
+    
+    const trace=(run&&run.liveFlowTrim&&Array.isArray(run.liveFlowTrim.trace))?run.liveFlowTrim.trace:[];
+    const ret=trace.find(x=>x&&x.kind==="write"&&x.startupAction==="return"&&Number(x.frame)===1);
+    const late=rows.slice(Math.floor(rows.length*.4));
+    let windowRows=late,basis="S2 late 60% pressure / machine flow";
+    if(ret&&Number.isFinite(Number(ret.tMs))){
+      const start=Number(ret.tMs)+2000,end=Number(ret.tMs)+4000;
+      const early=rows.filter(x=>{const t=Number(x.tMs);return Number.isFinite(t)&&t>=start&&t<=end;});
+      if(early.length>=GAIN_MEMORY_MIN_SAMPLES){windowRows=early;basis="S2 refill return +2–4 s pressure / machine flow";}
+    }
+    const collect=list=>{const values=[];for(const x of list){
+      const pressure=Number(x.pressureBar),flow=Number(x.machineFlowMlS);
+      if(!Number.isFinite(pressure)||!Number.isFinite(flow)||Math.abs(flow)<.15)continue;
+      if(x.machineTelemetryValid===false)continue;
+      if(Number.isFinite(Number(x.machineAgeMs))&&Number(x.machineAgeMs)>600)continue;
+      const ratio=pressure/flow;
+      if(Number.isFinite(ratio)&&ratio>0.05&&ratio<=5)values.push({pressure,flow,ratio});
+    }return values;};
+    let values=collect(windowRows);
+    if(values.length<GAIN_MEMORY_MIN_SAMPLES&&windowRows!==late){
+      windowRows=late;basis="S2 late 60% pressure / machine flow";values=collect(windowRows);
+    }
+    if(values.length<GAIN_MEMORY_MIN_SAMPLES)return null;
+    const signature=median(values.map(x=>x.ratio));
+    if(!(signature>0.05))return null;
+    return {signature:round(signature,4),samples:values.length,
+      pressureBar:round(median(values.map(x=>x.pressure)),3),
+      machineFlowMlS:round(median(values.map(x=>x.flow)),3),
+      basis};
+  }
+  
+  
+  
+  function gainBucketLimit(bucket,buckets) {
+    const radius=Number(bucket&&bucket.radius)>0?Number(bucket.radius):GAIN_MEMORY_BUCKET_RADIUS;
+    let gap=Infinity;
+    for(const other of buckets||[]){
+      if(!other||other===bucket)continue;
+      const distance=Math.abs(Number(other.center)-Number(bucket.center));
+      if(Number.isFinite(distance)&&distance>0&&distance<gap)gap=distance;
+    }
+    return Math.min(radius*GAIN_MEMORY_HYSTERESIS,gap/2);
+  }
+  
+  function gainBucketRadius(samples) {
+    if(!Array.isArray(samples)||samples.length<3)return GAIN_MEMORY_BUCKET_RADIUS;
+    const center=median(samples),mad=median(samples.map(x=>Math.abs(x-center)));
+    return Math.max(GAIN_MEMORY_BUCKET_MIN_RADIUS,Math.min(GAIN_MEMORY_BUCKET_MAX_RADIUS,2.6*mad));
+  }
+  function selectGainBucket(memory,signature) {
+    const buckets=memory&&Array.isArray(memory.buckets)?memory.buckets:[];
+    let best=null,bestDistance=Infinity;
+    for(const bucket of buckets){
+      const distance=Math.abs(signature-Number(bucket.center));
+      if(distance<bestDistance){best=bucket;bestDistance=distance;}
+    }
+    if(!best)return {bucket:null,absorb:null,distance:Infinity,limit:0};
+    const limit=gainBucketLimit(best,buckets);
+    if(bestDistance<=limit)return {bucket:best,absorb:null,distance:bestDistance,limit};
+    
+    
+    if(bestDistance<=Number(best.radius))return {bucket:null,absorb:best,distance:bestDistance,limit};
+    return {bucket:null,absorb:null,distance:bestDistance,limit};
+  }
+  function createGainBucket(memory,signature) {
+    const id="g"+String(Math.max(1,Number(memory.seq)||0)+1);
+    memory.seq=Number(id.slice(1))||memory.buckets.length+1;
+    const bucket={id,center:round(signature,4),radius:GAIN_MEMORY_BUCKET_RADIUS,samples:[],stages:{},createdAt:new Date().toISOString(),updatedAt:null};
+    memory.buckets.push(bucket);
+    
+    while(memory.buckets.length>GAIN_MEMORY_MAX_BUCKETS){
+      const candidates=memory.buckets.filter(x=>x.id!==bucket.id&&x.id!==memory.lastBucketId);
+      if(!candidates.length)break;
+      candidates.sort((a,b)=>String(a.updatedAt||a.createdAt||"").localeCompare(String(b.updatedAt||b.createdAt||"")));
+      memory.buckets.splice(memory.buckets.indexOf(candidates[0]),1);
+    }
+    return bucket;
+  }
+  
+  
+  function commandBandOf(value) {
+    const v=Number(value);
+    if(!(v>0))return null;
+    if(v<1)return "<1.0";
+    if(v<2)return "1.0-2.0";
+    if(v<3)return "2.0-3.0";
+    if(v<4)return "3.0-4.0";
+    if(v<5)return "4.0-5.0";
+    return ">=5.0";
+  }
+
+  
+  
+  
+  
+  
+  
+  let tickCache = null;
+  
+  
+  const s2OnsetCache = new WeakMap();
+  function stage2EffectiveCommand(run) {
+    if (tickCache && run) {
+      const rss = run.rawScaleSamples || [], ss = run.samples || [], tr = (run.liveFlowTrim && run.liveFlowTrim.trace) || [];
+      const key = rss.length + ":" + (rss.length ? Number(rss[rss.length - 1].tMs) : "") + ":" + ss.length + ":" + (ss.length ? Number(ss[ss.length - 1].tMs) : "") + ":" + tr.length;
+      const c = tickCache.eff.get(run);
+      if (c && c.key === key) return c.value;
+      const v = stage2EffectiveCommandUncached(run);
+      tickCache.eff.set(run, { key, value: v });
+      return v;
+    }
+    return stage2EffectiveCommandUncached(run);
+  }
+  function stage2EffectiveCommandUncached(run) {
+    const win=s2LearningWindow(run);
+    if(win.refill&&!win.confirmed)return null; 
+    const plateau=stage2PlateauStartMs(run);
+    const cutoffMs=plateau!==null?plateau:(Number.isFinite(win.startMs)?win.startMs:null);
+    const rows0=(run&&Array.isArray(run.samples)?run.samples:[]).filter(x=>x&&x.phase==="stage2"&&x.machineTelemetryValid===true&&Number.isFinite(Number(x.targetFlowMlS))&&Number(x.targetFlowMlS)>0);
+    const raw0=phaseRawSamples(run,"stage2");
+    const rows=cutoffMs===null?rows0:rows0.filter(x=>Number(x.tMs)>=cutoffMs),raw=cutoffMs===null?raw0:raw0.filter(x=>Number(x.tMs)>=cutoffMs);
+    if(rows.length<6||raw.length<6)return null;
+    const t0=Number(raw[0].tMs),t1=Number(raw[raw.length-1].tMs);
+    if(!Number.isFinite(t0)||!Number.isFinite(t1)||t1<=t0)return null;
+    
+    
+    
+    const tail=cutoffMs===null?rows.filter(x=>Number(x.tMs)>=t0+(t1-t0)*0.4).map(x=>Number(x.targetFlowMlS)):rows.filter(x=>Number(x.tMs)>=cutoffMs).map(x=>Number(x.targetFlowMlS));
+    if(tail.length<4)return null;
+    return median(tail);
+  }
+
+  
+  
+  
+  
+  
+  function stage2PlateauStartMs(run) {
+    const win=s2LearningWindow(run);
+    if(win.refill&&!win.confirmed)return null;
+    const base=Number.isFinite(win.startMs)?win.startMs:null;
+    const raw=phaseRawSamples(run,"stage2");
+    if(!raw.length)return null;
+    let peak=-Infinity;
+    for(const x of raw){const v=Number(x.decaidWeightFlowGS);if(Number.isFinite(v)&&v>peak)peak=v;}
+    if(!Number.isFinite(peak))return null;
+    const peakRow=raw.find(x=>Number(x.decaidWeightFlowGS)>=peak*.95);
+    if(!peakRow)return null;
+    const peakAt=Number(peakRow.tMs);
+    const afterPeak=Number.isFinite(peakAt)?peakAt+1500:null;
+    const start=base===null?afterPeak:Math.max(base,afterPeak);
+    
+    
+    
+    
+    const lastAt=Number(raw[raw.length-1].tMs);
+    if(Number.isFinite(lastAt)&&Number.isFinite(start)&&start>lastAt-1200){
+      const floor=base===null?lastAt-1200:Math.max(base,lastAt-1200);
+      return floor;
+    }
+    return start;
+  }
+
+  function gainStageObservation(run,evidence,stage) {
+    const cfg=run&&run.config||{};
+    if(stage==="s2"){
+      if(String(cfg.stage2CommandOrigin||"")==="manual")return null;
+      
+      
+      const quality=controlOutputQuality(run,"stage2");
+      if(!quality||quality.available!==true||!(Number(quality.tailMeanGS)>0))return null;
+      const ripple=Number(quality.tailRippleCVPct);
+      if(ripple>25)return null;
+      const measured=Number(quality.tailMeanGS);
+      
+      
+      const effective=stage2EffectiveCommand(run);
+      if(!Number.isFinite(effective)||effective<=0)return null;
+      const command=effective;
+      const r=measured/command;
+      if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
+      const saturated=!!(evidence&&evidence.liveTrimChain&&evidence.liveTrimChain.usable===false);
+      
+      
+      
+      
+      
+      
+      const baseCommand=Number(cfg.stage2CommandMlS);
+      const routeCommand=Number.isFinite(baseCommand)&&baseCommand>0?baseCommand:command;
+      return {r,command,measured,reduced:!!quality.reducedWindow,source:saturated?"S2 tail local (actuator saturated)":"S2 steady tail",
+        local:saturated,damped:ripple>=12,alphaOverride:saturated?.55:null,
+        baseCommand:routeCommand,commandBand:commandBandOf(routeCommand),window:{startPct:40,endPct:100}};
+    }
+    if(stage==="s3"){
+      if(String(cfg.stage3CommandOrigin||"")==="manual")return null;
+      if(!evidence||evidence.stallQualitative||!Array.isArray(evidence.source)||evidence.source.length!==3)return null;
+      const mid=evidence.source[1],late=evidence.source[2];
+      const command=Number(mid&&mid.command),measured=Number(mid&&mid.measured);
+      if(!(command>0&&measured>0))return null;
+      const r=measured/command;
+      if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
+      const drift=Number(late&&late.measured)>0?Number(late.measured)/measured:null;
+      return {r,drift:Number.isFinite(drift)&&drift>0&&drift<=3?drift:null,command,measured,source:"S3 MID",commandBand:commandBandOf(command)};
+    }
+    return null;
+  }
+  function gainMemoryQualityGuard(run,phase) {
+    const cfg=run&&run.config||{};
+    if(cfg.basketContext!=="coffee")return {eligible:true,reason:"Empty/legacy context",relaxed:true};
+    const limit=finiteOrNull(cfg[phase+"PressureLimit"]);
+    const onset=phase==="stage2"?stage2CupOnset(run):null;
+    const all=(run.samples||[]).filter(x=>x.phase===phase&&finiteOrNull(x.tMs)!==null&&(!onset||onset.detected&&Number(x.tMs)>=onset.startMs));
+    if(!all.length||limit===null||limit<=0)return {eligible:false,reason:"Gain-memory quality evidence missing"};
+    const start=Math.min(...all.map(x=>Number(x.tMs))),rows=all.filter(x=>Number(x.tMs)-start>=1000);
+    let usable=0,nearLimit=0,underCommand=0;
+    for(const row of rows){
+      const pressure=finiteOrNull(row.pressureBar),flow=finiteOrNull(row.machineFlowMlS);
+      
+      let command=phase==="stage2"?finiteOrNull(stage2EffectiveCommand(run)):finiteOrNull(row.targetFlowMlS);
+      if(phase==="stage3"&&cfg.stage3Shape&&cfg.stage3Shape.enabled){
+        const frame=finiteOrNull(row.profileFrame);
+        command=frame===2?finiteOrNull(cfg.stage3Shape.earlyCommand):frame===3?finiteOrNull(cfg.stage3Shape.midCommand):frame===4?finiteOrNull(cfg.stage3Shape.lateCommand):null;
+      }
+      if(row.machineTelemetryValid!==true||finiteOrNull(row.machineAgeMs)===null||Number(row.machineAgeMs)>1000||pressure===null||pressure<0||flow===null||flow<0||command===null||command<=0)continue;
+      usable++;
+      if(pressure>=limit*.95)nearLimit++;
+      if(flow<command*.70)underCommand++;
+    }
+    const coverage=rows.length?usable/rows.length:0,pressureFraction=usable?nearLimit/usable:1,underFraction=usable?underCommand/usable:1;
+    const eligible=usable>=4&&coverage>=.60&&pressureFraction<.35&&underFraction<.40;
+    return {eligible,relaxed:true,samples:usable,expectedSamples:rows.length,coverage:round(coverage,3),pressureLimitedFraction:round(pressureFraction,3),underCommandFraction:round(underFraction,3),
+      reason:!eligible?"Gain-memory quality evidence below relaxed floor": "Gain-memory quality evidence passed relaxed floor"};
+  }
+  function updateGainMemoryFromRun(run,evidence) {
+    if(!run||!evidence)return null;
+    const regime=gainRegimeForRun(run);
+    if(!regime)return {status:"no-regime",reason:"S2 late pressure/machine-flow signature unavailable"};
+    const memory=gainMemoryState(true);
+    if(!memory)return null;
+    const selected=selectGainBucket(memory,regime.signature);
+    const scratch=!selected.bucket&&!selected.absorb;
+    const bucket=selected.bucket||selected.absorb||createGainBucket(memory,regime.signature);
+    const now=new Date().toISOString(),out={status:"updated",bucketId:bucket.id,bucketCreated:scratch,absorbed:!!selected.absorb,hysteresis:false,center:bucket.center,radius:bucket.radius,signature:regime.signature,signatureSamples:(Array.isArray(bucket.samples)?bucket.samples:[]).length,regime,stages:{},updatedAt:now};
+    
+    
+    
+    const observations={};
+    for(const stage of ["s2","s3"]) observations[stage]=gainStageObservation(run,stage==="s3"&&evidence.s3?evidence.s3:evidence,stage);
+    if(!observations.s2&&!observations.s3){
+      if(scratch)memory.buckets=memory.buckets.filter(x=>x.id!==bucket.id);
+      out.stages={s2:{status:"no-observation"},s3:{status:"no-observation"}};
+      return {...out,status:"no-observation"};
+    }
+    
+    
+    
+    bucket.samples=(Array.isArray(bucket.samples)?bucket.samples.slice(-(GAIN_MEMORY_SIGNATURE_SAMPLES-1)):[]).concat([round(regime.signature,4)]);
+    bucket.center=round(median(bucket.samples),4);
+    bucket.radius=round(gainBucketRadius(bucket.samples),4);
+    out.center=bucket.center;out.radius=bucket.radius;out.signatureSamples=bucket.samples.length;
+    for(const stage of ["s2","s3"]){
+      const observation=observations[stage];
+      if(!observation){out.stages[stage]={status:"no-observation"};continue;}
+      let current=bucket.stages[stage],deviation=null,alpha=null;
+      if(!current||!(Number(current.r)>0)){
+        current=bucket.stages[stage]={r:round(observation.r,4),n:1,lastDeviation:null,lastObservedR:round(observation.r,4),drift:observation.drift==null?null:round(observation.drift,4),commandMlS:round(observation.command,4),commandBand:observation.commandBand||commandBandOf(observation.command),reduced:!!observation.reduced,lastRunId:run.runId,updatedAt:now};
+      }else{
+        deviation=Math.abs(observation.r-current.r)/current.r;
+        alpha=gainBackfillAlpha(run,deviation,stage);
+        if(observation.damped)alpha=alpha*.5;
+        if(Number(observation.alphaOverride)>0)alpha=Number(observation.alphaOverride);
+        current.damped=!!observation.damped;
+        if(deviation>GAIN_MEMORY_DEVIATION||observation.local)current.lastLocalR=round(observation.r,4);
+        current.r=round(current.r+alpha*(observation.r-current.r),4);
+        current.n=(Number(current.n)||1)+1;
+        current.lastDeviation=round(deviation,4);
+        current.lastObservedR=round(observation.r,4);
+        if(Number(observation.drift)>0)current.drift=round(Number(current.drift)>0?current.drift+alpha*(observation.drift-current.drift):observation.drift,4);
+        current.commandMlS=round(observation.command,4);current.commandBand=observation.commandBand||commandBandOf(observation.command);current.reduced=!!observation.reduced;
+        current.lastRunId=run.runId;current.updatedAt=now;
+      }
+      
+      
+      
+      
+      const obsBand=observation.commandBand||commandBandOf(observation.command);
+      if(obsBand){
+        const bands=current.bands&&typeof current.bands==="object"?current.bands:{};
+        const row=bands[obsBand]&&Number(bands[obsBand].r)>0?bands[obsBand]:null;
+        
+        
+        
+        
+        
+        
+        const steadyObs=!observation.local;
+        if(row){
+          const bandAlpha=Number(alpha)>0?Number(alpha):GAIN_MEMORY_ALPHA;
+          row.r=round(row.r+bandAlpha*(observation.r-row.r),4);
+          row.n=(Number(row.n)||1)+1;row.lastObservedR=round(observation.r,4);row.updatedAt=now;
+          if(row.steadyN==null||!Number.isFinite(Number(row.steadyN)))row.steadyN=2;
+          if(steadyObs)row.steadyN=Number(row.steadyN)+1;
+          row.provisional=Number(row.steadyN)<2;
+        }else bands[obsBand]={r:round(observation.r,4),n:1,lastObservedR:round(observation.r,4),updatedAt:now,steadyN:steadyObs?1:0,provisional:true};
+        current.bands=bands;current.band=obsBand;
+      }
+      out.stages[stage]={status:"updated",r:current.r,n:current.n,observedR:current.lastObservedR,
+        deviationPct:current.lastDeviation==null?null:round(current.lastDeviation*100,1),alpha,
+        confidence:gainConfidence(current),reduced:!!current.reduced,source:observation.source,drift:current.drift==null?null:round(current.drift,4),
+        commandBand:current.commandBand||null,window:observation.window||null};
+    }
+    memory.lastBucketId=bucket.id;memory.updatedAt=now;bucket.updatedAt=now;run.gainMemoryBucketId=bucket.id;
+    return out;
+  }
+  function gainMemorySuggestion(run,stage) {
+    const memory=gainMemoryState(false);
+    if(!memory)return null;
+    const regime=gainRegimeForRun(run);
+    const hint=s1OutflowHint(run);
+    let bucket=null,fallback=false,hintBucket=null;
+    if(regime){
+      bucket=run&&run.gainMemoryBucketId?memory.buckets.find(x=>x.id===run.gainMemoryBucketId):null;
+      if(!bucket)bucket=selectGainBucket(memory,regime.signature).bucket;
+    }else{
+      
+      
+      
+      
+      if(hint&&hint.candidate==="high")hintBucket=memory.buckets.slice().sort((a,b)=>Number(b.center)-Number(a.center))[0]||null;
+      bucket=hintBucket||(memory.lastBucketId?memory.buckets.find(x=>x.id===memory.lastBucketId):null);
+    }
+    if(!bucket)return null;
+    const activeBucket=bucket;
+    let stateRow=bucket.stages&&bucket.stages[stage],sourceBucket=bucket;
+    if(!stateRow||!(Number(stateRow.r)>0)){
+      
+      
+      
+      const rows=memory.buckets.filter(x=>x!==bucket&&x.stages&&Number(x.stages[stage]&&x.stages[stage].r)>0);
+      if(!rows.length)return null;
+      rows.sort((a,b)=>(Number(b.stages[stage].n)||0)-(Number(a.stages[stage].n)||0)
+        ||Math.abs(a.center-bucket.center)-Math.abs(b.center-bucket.center));
+      sourceBucket=rows[0];stateRow=rows[0].stages[stage];fallback=true;
+    }
+    const cfg=run&&run.config||{};
+    const target=stage==="s2"?Number(cfg.stage2Flow):Number(cfg.stage3Flow);
+    const lut=stage==="s2"?Number(cfg.stage2LutCommandMlS):Number(cfg.stage3LutCommandMlS);
+    if(!(target>0))return null;
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    const baseBand=stage==="s2"?commandBandOf(Number(cfg.stage2CommandMlS)):null;
+    const effectiveBand=stage==="s2"?commandBandOf(stage2EffectiveCommand(run)):null;
+    const band=baseBand||stateRow.commandBand||commandBandOf(stateRow.commandMlS);
+    const bandRowRaw=band&&stateRow.bands&&stateRow.bands[band]&&Number(stateRow.bands[band].r)>0?stateRow.bands[band]:null;
+    
+    
+    const bandRow=bandRowRaw&&bandRowRaw.provisional!==true?bandRowRaw:null;
+    const bandR=bandRow?Number(bandRow.r):null;
+    const bandN=bandRow?Math.max(1,Math.floor(Number(bandRow.n)||1)):0;
+    const localR=Number(stateRow.lastLocalR);
+    const local=Number.isFinite(localR)&&localR>0&&Number(stateRow.lastDeviation)>GAIN_MEMORY_DEVIATION;
+    const r=local?localR:(bandR||Number(stateRow.r));
+    if(!(r>=GAIN_R_MIN&&r<=GAIN_R_MAX))return null;
+    const ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
+    const command=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(ceiling,target/r)));
+    
+    
+    
+    
+    const crossBand=!!(stateRow.commandBand&&(stateRow.commandBand!==commandBandOf(command)||(baseBand&&stateRow.commandBand!==baseBand)));
+    return {stage,bucketId:sourceBucket.id,activeBucketId:activeBucket.id,center:sourceBucket.center,radius:sourceBucket.radius,bucketSamples:stateRow.n,
+      stale:!regime||fallback,fallback:fallback?"cross-bucket":null,r:round(r,4),smoothedR:round(stateRow.r,4),observedR:stateRow.lastObservedR,
+      band:band||null,effectiveBand:effectiveBand||null,bandR:bandR?round(bandR,4):null,bandN,bandMatched:!!bandRow,
+      deviationPct:stateRow.lastDeviation==null?null:round(stateRow.lastDeviation*100,1),local,
+      confidence:local?"LOW":(hintBucket?"LOW":gainConfidence(stateRow)),targetGS:round(target,3),lutCommandMlS:Number.isFinite(lut)?round(lut,3):null,
+      commandMlS:command,drift:stateRow.drift==null?null:round(stateRow.drift,4),
+      commandBand:stateRow.commandBand||null,currentBand:commandBandOf(command),
+      crossBand,bandProvisional:!!(bandRowRaw&&bandRowRaw.provisional===true),baseBand:baseBand||null,
+      sourceRunId:stateRow.lastRunId||null,s1Hint:hint||null,hintApplied:!!hintBucket,applied:false};
+  }
+  
+  function viConfidence(v) {
+    if(!v||!(Number(v.vi)>0))return "LOW";
+    const n=Number(v.n)||1,dev=Number(v.lastDeviation);
+    if(v.censored)return n>=2?"MEDIUM":"LOW";
+    if(n>=3&&(!Number.isFinite(dev)||dev<=GAIN_MEMORY_DEVIATION))return "HIGH";
+    if(n>=2)return "MEDIUM";
+    return "LOW";
+  }
+  
+  function viBandFor(ratio) {
+    if(!(ratio>=S2_REFILL_VI_RATIO_MIN&&ratio<=S2_REFILL_VI_RATIO_MAX))return null;
+    for(let i=0;i<S2_VI_BANDS.length;i++){const b=S2_VI_BANDS[i];
+      if(ratio>=b[0]&&(ratio<b[1]||(i===S2_VI_BANDS.length-1&&ratio<=b[1])))return b;}
+    return null;
+  }
+  
+  
+  
+  
+  function viMemorySuggestion(run) {
+    const memory=gainMemoryState(false);
+    if(!memory||!Array.isArray(memory.viBuckets))return null;
+    const obs=soakWettingObservation(run);
+    if(!obs||obs.available!==true)return null;
+    const band=viBandFor(Number(obs.soakP2sRatio));
+    if(!band)return null;
+    const row=memory.viBuckets.find(x=>x.bandLo===band[0]&&x.bandHi===band[1]);
+    if(!row||!(Number(row.vi)>0))return null;
+    const fpKey=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    const fpMatch=!!fpKey&&row.fpKey===fpKey;
+    let confidence=viConfidence(row);
+    if(!fpMatch)confidence="LOW";
+    return {bandLo:band[0],bandHi:band[1],routedBy:"ratio-band",vi:round(Number(row.vi),2),n:Number(row.n)||1,confidence,
+      fpKeyMatch:fpMatch,deviationPct:row.lastDeviation==null?null:round(row.lastDeviation*100,1),
+      censored:!!row.censored,censoredN:Number(row.censoredN)||0,lastRunId:row.lastRunId||null,stale:false};
+  }
+  
+  
+  
+  
+  function viObservation(run) {
+    const cfg=run&&run.config||{};
+    const fail=reason=>({ok:false,reason});
+    if(cfg.basketContext!=="coffee")return fail("basket-not-coffee");
+    if(!learningRunAllowed(run))return fail("learning-not-allowed");
+    const obs=soakWettingObservation(run);
+    if(!obs||obs.available!==true)return fail("soak:"+(obs&&obs.reason||"unavailable"));
+    const ratio=Number(obs.soakP2sRatio);
+    if(!(ratio>=S2_REFILL_VI_RATIO_MIN&&ratio<=S2_REFILL_VI_RATIO_MAX))return fail("vi-extrapolated");
+    const trace=(run.liveFlowTrim&&Array.isArray(run.liveFlowTrim.trace))?run.liveFlowTrim.trace:[];
+    const boost=trace.find(x=>x&&x.kind==="write"&&x.startupAction==="boost");
+    if(!boost||!(Number(boost.commandMlS)>0)||!Number.isFinite(Number(boost.tMs)))return fail("no-boost-write");
+    const flood=Number(boost.commandMlS);
+    const raw=(run.rawScaleSamples||[]).filter(x=>x&&x.phase==="stage2");
+    let prevStamp=null;
+    for(const x of raw){const st=finiteOrNull(x.scaleTimestampSeconds);if(st===null)continue;
+      if(prevStamp!==null&&st-prevStamp>S2_VI_LEARN_BRIDGE_GAP_S)return fail("bridge-gap");
+      prevStamp=st;}
+    const onset=stage2CupOnset(run);
+    if(!onset.detected)return fail("onset-not-detected");
+    const wetLatS=(Number(onset.startMs)-Number(boost.tMs))/1000;
+    if(!(wetLatS>=S2_VI_LEARN_WETLAT_MIN_S&&wetLatS<=S2_VI_LEARN_WETLAT_MAX_S))return fail("wetlat-band");
+    
+    const platform=Number(cfg.stage2CommandMlS)>0?Number(cfg.stage2CommandMlS):0;
+    const fc=S2_REFILL_FC_FACTOR*platform;
+    const viObs=wetLatS*Math.max(0.2,flood-fc);
+    if(!(viObs>=S2_VI_LEARN_STORAGE_MIN&&viObs<=S2_VI_LEARN_STORAGE_MAX))return fail("vi-band");
+    
+    
+    let neg=0,dt0=0,cluster=0,lastStamp=null,lastW=null;
+    for(const x of run.rawScaleSamples||[]){
+      const st=finiteOrNull(x.scaleTimestampSeconds),w=finiteOrNull(x.weightG);
+      if(st!==null&&lastStamp!==null&&st===lastStamp)dt0++;
+      if(st!==null&&lastStamp!==null&&st>lastStamp&&st-lastStamp<0.06)cluster++;
+      if(w!==null&&lastW!==null&&w<lastW-0.001)neg++;
+      if(st!==null)lastStamp=st;
+      if(w!==null)lastW=w;
+    }
+    if(neg>S2_VI_LEARN_NEG_MAX)return fail("scale-noise-neg");
+    if(dt0>S2_VI_LEARN_DT0_MAX)return fail("scale-noise-dt0");
+    
+    
+    if(cluster>S2_VI_LEARN_CLUSTER_MAX)return fail("scale-noise-cluster");
+    const bleed=trace.find(x=>x&&x.kind==="write"&&x.startupAction==="bleed");
+    const complete=trace.find(x=>x&&x.kind==="startup-complete"&&Number(x.frame)===1);
+    const closeMs=bleed&&Number.isFinite(Number(bleed.tMs))?Number(bleed.tMs):(complete&&Number.isFinite(Number(complete.tMs))?Number(complete.tMs):null);
+    const censored=closeMs!==null&&Number(onset.startMs)>closeMs;
+    const plan=cfg.s2StartupPlan||{};
+    return {ok:true,viObs:round(viObs,2),wetLatS:round(wetLatS,3),floodMlS:flood,ratio,censored,
+      neg,dt0,cluster,damped:neg>0||dt0>0,onsetStartMs:Number(onset.startMs),boostTMs:Number(boost.tMs),
+      floodMode:String(plan.floodMode||"adaptive")};
+  }
+  
+  
+  
+  
+  
+  function updateViMemoryFromRun(run,evidence) {
+    const o=viObservation(run);
+    if(!o.ok)return {status:"rejected",reason:o.reason};
+    const band=viBandFor(o.ratio);
+    if(!band)return {status:"rejected",reason:"vi-extrapolated"};
+    const memory=gainMemoryState(true);
+    if(!memory)return null;
+    if(!Array.isArray(memory.viBuckets))memory.viBuckets=[];
+    const now=new Date().toISOString();
+    const fpKey=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    let row=memory.viBuckets.find(x=>x.bandLo===band[0]&&x.bandHi===band[1]);
+    const fpChanged=!!(row&&row.fpKey&&fpKey&&row.fpKey!==fpKey);
+    let alpha=null,deviation=null,seeded=false;
+    if(!row||!(Number(row.vi)>0)||fpChanged){
+      const fresh={bandLo:band[0],bandHi:band[1],vi:o.viObs,n:1,lastDeviation:null,lastObservedVi:o.viObs,lastLocalVi:null,
+        damped:o.damped,censored:o.censored,censoredN:o.censored?1:0,
+        lastRunId:run.runId,updatedAt:now,fpKey,floodMode:o.floodMode};
+      if(row){Object.assign(row,fresh);}else{memory.viBuckets.push(fresh);row=fresh;}
+      seeded=true;
+    }else{
+      deviation=Math.abs(o.viObs-row.vi)/row.vi;
+      const up=o.viObs>row.vi;
+      alpha=up?S2_VI_LEARN_ALPHA_UP:S2_VI_LEARN_ALPHA_DOWN;
+      if(deviation>GAIN_MEMORY_DEVIATION){alpha=up?S2_VI_LEARN_DEV_ALPHA_UP:S2_VI_LEARN_DEV_ALPHA_DOWN;row.lastLocalVi=o.viObs;}
+      if(o.damped)alpha=alpha*0.5;
+      if(o.censored)alpha=alpha*0.5;
+      row.vi=round(row.vi+alpha*(o.viObs-row.vi),2);
+      row.n=(Number(row.n)||1)+1;
+      row.lastDeviation=round(deviation,4);
+      row.lastObservedVi=o.viObs;
+      row.damped=o.damped;
+      row.censored=o.censored;
+      row.censoredN=(Number(row.censoredN)||0)+(o.censored?1:0);
+      row.lastRunId=run.runId;row.updatedAt=now;row.fpKey=fpKey;row.floodMode=o.floodMode;
+    }
+    memory.viBuckets.sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")));
+    if(memory.viBuckets.length>S2_VI_BANDS.length)memory.viBuckets=memory.viBuckets.slice(0,S2_VI_BANDS.length);
+    memory.updatedAt=now;
+    return {status:seeded?"seeded":"updated",bandLo:band[0],bandHi:band[1],
+      vi:row.vi,n:row.n,observedVi:o.viObs,wetLatS:o.wetLatS,floodMlS:o.floodMlS,
+      deviationPct:row.lastDeviation==null?null:round(row.lastDeviation*100,1),alpha,
+      confidence:viConfidence(row),censored:o.censored,censoredN:row.censoredN,damped:o.damped,
+      fpKeyReset:fpChanged,floodMode:o.floodMode,lastRunId:row.lastRunId};
+  }
+  function scalarLearningSuggestion(label,key,current,previous,policy,steadyLarge) {
+    const opt={deadbandPct:policy.deadband,maxVariability:policy.rank===0?(key==="s1"?.18:.15):.25,gain:policy.gain,maxFraction:policy[key][0],maxAbs:policy[key][1],
+      rule:`${policy.name}: ±${policy.deadband}% band; ${key.toUpperCase()} step ≤${round(policy[key][0]*100,1)}% / ${policy[key][1]} ml/s`};
+    if(!current)return scalarConsensusSuggestion(label,current,previous,opt);
+    const target=Number(current.targetGS),command=Number(current.command),measured=Number(current.measured),ratio=measured/target;
+    if(!(target>0&&command>=.1&&command<=8&&Number.isFinite(measured)&&ratio>=.2&&ratio<=3))return {usable:false,action:"LIMITED / HOLD",confidence:"INSUFFICIENT",reason:"Response outside numeric learning envelope; inspect output and execution",maxStepRule:opt.rule};
+    const error=(ratio-1)*100,maySingle=policy.single||policy.largeSingle&&steadyLarge;
+    if(!maySingle){const out={...scalarConsensusSuggestion(label,current,previous,opt),learningLevel:policy.name};if(!previous)out.reason="Selected learning policy requires another clean observation; changed commands remain eligible historical references";return out;}
+    if(Math.abs(error)<=policy.deadband)return {usable:true,action:"HOLD",confidence:"MEDIUM",targetGS:target,currentCommandMlS:command,measuredGS:measured,suggestedCommandMlS:command,repeatCount:previous?2:1,maxStepRule:opt.rule,learningLevel:policy.name,reason:"Current clean output is inside the learning band; retain this command"};
+    const prev=previous&&Number(previous.measured)>0?Number(previous.measured):null;
+    const variability=prev===null?null:Math.abs(measured-prev)/((measured+prev)/2);
+    const agreement=prev!==null&&Math.sign(prev-target)===Math.sign(measured-target)&&variability<=.35*policy.qualityWidth;
+    const modeled=agreement?measured*.8+prev*.2:measured,damping=prev!==null&&!agreement?.5:1;
+    const delta=command*Math.max(-opt.maxFraction,Math.min(opt.maxFraction,(target/modeled-1)*policy.gain*damping));
+    const value=snapCommandFlow(clampCommandFlow(command+Math.max(-opt.maxAbs,Math.min(opt.maxAbs,delta))));
+    const out={usable:true,action:sameCommandFlow(value,command)?"HOLD":"ADJUST",confidence:prev!==null&&!agreement?"LOW":"MEDIUM",targetGS:target,currentCommandMlS:command,measuredGS:round(modeled,3),currentGS:measured,
+      previousGS:prev,variabilityPct:variability===null?null:round(variability*100,1),suggestedCommandMlS:value,repeatCount:prev===null?1:2,errorPct:round(error,1),maxStepRule:opt.rule,learningLevel:policy.name,
+      reason:prev!==null&&!agreement?"Current clean shot requests a bounded correction; differing history reduces the step instead of blocking learning":"Current clean shot requests a bounded next-shot correction; comparable history is a reference, not a mandatory identical-command repeat"};
+    if(previous&&previous.comparisonModel){out.comparisonModel=previous.comparisonModel;out.previousCommandMlS=previous.originalCommandMlS;out.previousActualGS=previous.originalMeasuredGS;}
+    return out;
+  }
+  function stage3ReferenceEvidence(current,previous) {
+    if(!current||!previous||!Array.isArray(current.source)||!Array.isArray(previous.source)||current.source.length!==3||previous.source.length!==3||previous.stall||previous.stallQualitative)return null;
+    const source=[];
+    for(let i=0;i<3;i++){
+      const a=current.source[i],b=previous.source[i],ratio=Number(a.command)/Number(b.command);
+      if(!(ratio>=.5&&ratio<=2&&Number(b.measured)>0&&Number(b.r2)>=1-.1*learningPolicy().qualityWidth&&Number(b.seconds)>=1.2/learningPolicy().qualityWidth))return null;
+      source.push({...b,command:Number(a.command),measured:round(Number(b.measured)*ratio,3),originalCommandMlS:b.command,originalMeasuredGS:b.measured,seconds:Number(a.seconds)||b.seconds});
+    }
+    const total=source.reduce((n,x)=>n+x.seconds,0),overall=source.reduce((n,x)=>n+x.measured*x.seconds,0)/total;
+    return {...previous,targetGS:current.targetGS,source,overallGS:overall,lateToEarlyRatio:source[2].measured/source[0].measured,
+      earlySeconds:current.earlySeconds,midSeconds:current.midSeconds,measurementBasis:current.measurementBasis,
+      comparisonModel:stage3ShapeFamily(current)!==stage3ShapeFamily(previous)?"cross-window historical reference":"per-frame command and timing reference model"};
+  }
+  function projectS3Commands(values,old,policy,weights) {
+    
+    
+    
+    
+    const [fraction,absolute]=policy.s3;
+    const lo=old.map((v,i)=>Math.max(LIMITS.commandFlowMin,v-s3StepLimit(v,fraction,absolute)));
+    const hi=old.map((v,i)=>Math.min(LIMITS.commandFlowMax,v+s3StepLimit(v,fraction,absolute)));
+    const out=[];
+    for(let i=0;i<3;i++)out[i]=Math.max(lo[i],Math.min(hi[i],Number(values[i])));
+    for(let i=1;i<3;i++){
+      const cap=Math.max(out[i-1]+.25,out[i-1]*1.35);
+      if(out[i]>cap)out[i]=Math.max(lo[i],cap);
+    }
+    const rounded=out.map(x=>round(x,3));
+    return rounded.every((x,i)=>Number.isFinite(x)&&x>=lo[i]-.001&&x<=hi[i]+.001&&(i===0||x<=Math.max(rounded[i-1]+.25,rounded[i-1]*1.35)+.001))?rounded:old.slice();
+  }
+  function stage3SingleSuggestion(current,previous,policy) {
+    if(!current||current.stall||current.stallQualitative||!Array.isArray(current.source)||current.source.length!==3)return null;
+    const target=Number(current.targetGS),source=current.source;
+    if(!(target>0)||!source.every(x=>Number(x.measured)/target>=.2&&Number(x.measured)/target<=3&&Number(x.command)>=.1&&Number(x.command)<=8&&Number(x.r2)>=1-.1*policy.qualityWidth&&Number(x.seconds)>=1.2/policy.qualityWidth))return null;
+    const large=source.some(x=>Math.abs(Number(x.measured)/target-1)>=.2),maySingle=policy.single||policy.largeSingle&&large;
+    if(!maySingle)return null;
+    const [fraction,absolute]=policy.s3,old=source.map(x=>Number(x.command));
+    const raw=source.map((x,i)=>{
+      const measured=Number(x.measured),prior=previous&&previous.source&&previous.source[i],p=prior&&Number(prior.measured);
+      const agrees=p>0&&Math.sign(p-target)===Math.sign(measured-target)&&Math.abs(p-measured)/((p+measured)/2)<=.35*policy.qualityWidth;
+      const response=agrees?measured*.8+p*.2:measured,damping=p>0&&!agrees?.5:1;
+      
+      
+      
+      
+      
+      
+      const ideal=(target/response-1)*old[i]*.9*damping;
+      if(Math.abs(ideal)<1/32)return old[i];
+      const lim=s3StepLimit(old[i],fraction,absolute);
+      const delta=Math.max(-lim,Math.min(lim,ideal));
+      return round(clampCommandFlow(old[i]+delta),3);
+    });
+    const rawProposedCommands=raw.slice(),projected=projectS3Commands(raw,old,policy,source.map(x=>x.seconds));raw.splice(0,3,...projected);
+    if(raw.some((v,i)=>v<LIMITS.commandFlowMin||v>LIMITS.commandFlowMax||Math.abs(v-old[i])>s3StepLimit(old[i],fraction,absolute)+.001))return null;
+    const changed=raw.some((v,i)=>Math.abs(v-old[i])>=.005),out={usable:true,action:changed?"LEVEL + SHAPE":"HOLD",confidence:previous&&source.some((x,i)=>{const p=previous.source&&previous.source[i]&&Number(previous.source[i].measured);return p>0&&(Math.sign(p-target)!==Math.sign(Number(x.measured)-target)||Math.abs(p-Number(x.measured))/((p+Number(x.measured))/2)>.35*policy.qualityWidth);})?"LOW":"MEDIUM",learningLevel:policy.name,targetGS:target,overallGS:current.overallGS,status:current.status,
+      lateToEarlyRatio:current.lateToEarlyRatio,repeatCount:previous?2:1,sourceFrames:source.map(x=>({name:x.name,commandMlS:x.command,measuredGS:x.measured,r2:x.r2,windowS:x.seconds})),
+      reason:changed?"Current clean S3 frame responses request a bounded next-shot level and shape correction; history adjusts confidence and damping":"Current S3 frame responses are inside the learning band; retain the shape",
+      maxStepRule:`${policy.name}: S3 step ≤ max(${round(fraction*100,1)}%, ${absolute} ml/s, one 1/16 step) per frame; adjacent-rise bound retained`};
+    out.rawProposedCommands=rawProposedCommands;
+    if(changed)out.suggestedShape={earlyCommand:round(raw[0],3),earlySeconds:current.earlySeconds,midCommand:round(raw[1],3),midSeconds:current.midSeconds,lateCommand:round(raw[2],3)};
+    return out;
+  }
+  function driftShapeSuggestion(run,current,previous,policy) {
+    if(!run||!run.config||run.config.s3DriftModel!==true)return null;
+    if(!current||current.stall||current.stallQualitative||!Array.isArray(current.source)||current.source.length!==3)return null;
+    if(policy.rank<2&&!previous)return null;
+    const target=Number(current.targetGS);
+    if(!(target>0))return null;
+    const gains=current.source.map(x=>{const c=Number(x.command),m=Number(x.measured);return c>0&&m>0?m/c:null;});
+    if(!gains.every(v=>Number(v)>0.05))return null;
+    const midNow=Number(current.source[1].command);
+    if(!(midNow>0))return null;
+    
+    
+    
+    
+    const s3Memory=gainMemorySuggestion(run,"s3");
+    const s3MemoryMid=s3Memory&&Number.isFinite(Number(s3Memory.commandMlS))&&Number(s3Memory.commandMlS)>0?Number(s3Memory.commandMlS):null;
+    let regimeJump=false;
+    let midTarget=target/gains[1],earlyFactor=gains[1]/gains[0],drift=gains[1]/gains[2];
+    if(s3MemoryMid!==null&&Math.abs(s3MemoryMid-midNow)>midNow*.15){
+      const pull=s3Memory.confidence==="HIGH"?1:.5;
+      const sameDirection=Math.sign(s3MemoryMid-midNow)===Math.sign(midTarget-midNow);
+      
+      
+      
+      
+      if(!sameDirection)midTarget=midNow+(s3MemoryMid-midNow)*pull;
+      regimeJump=true;
+    }
+    if(previous&&Array.isArray(previous.source)&&previous.source.length===3){
+      const priorGains=previous.source.map(x=>{const c=Number(x.command),m=Number(x.measured);return c>0&&m>0?m/c:null;});
+      if(priorGains.every(v=>Number(v)>0.05)){
+        if(!regimeJump)midTarget=(midTarget+target/priorGains[1])/2;
+        earlyFactor=(earlyFactor+priorGains[1]/priorGains[0])/2;
+        drift=(drift+priorGains[1]/priorGains[2])/2;
+      }
+    }
+    const currentEarlyFactor=Number(current.source[0].command)/midNow,currentDrift=Number(current.source[2].command)/midNow;
+    earlyFactor=Math.max(currentEarlyFactor*.80,Math.min(currentEarlyFactor*1.20,earlyFactor));
+    drift=Math.max(currentDrift*.80,Math.min(currentDrift*1.20,drift));
+    earlyFactor=Math.max(.50,Math.min(2.00,earlyFactor));drift=Math.max(.50,Math.min(2.00,drift));
+    const [fraction,absolute]=policy.s3;
+    const lut=Number(run.config.stage3LutCommandMlS),ceiling=Math.min(LIMITS.commandFlowMax,Number.isFinite(lut)&&lut>0?lut*2:LIMITS.commandFlowMax);
+    
+    
+    
+    
+    
+    const clampShape=v=>{const s=snapCommandFlow(v);if(s===null)return null;return s>ceiling+1e-9?Math.floor((ceiling+1e-9)*16)/16:s;};
+    let midLimit=s3StepLimit(midNow,fraction,absolute);
+    if(regimeJump)midLimit=Math.max(midLimit,Math.abs(midTarget-midNow));
+    const midCommand=clampShape(Math.max(midNow-midLimit,Math.min(midNow+midLimit,midTarget)));
+    
+    
+    
+    const lateLimit=Math.max(midCommand+.25,midCommand*1.35);
+    const latePlanned=snapCommandFlow(midCommand*drift);
+    const late=clampShape(latePlanned>lateLimit+1e-9?Math.floor((lateLimit+1e-9)*16)/16:latePlanned);
+    const early=clampShape(midCommand*earlyFactor);
+    if(![midCommand,early,late].every(v=>Number.isFinite(v)&&v>=LIMITS.commandFlowMin&&v<=ceiling+1e-9))return null;
+    
+    
+    earlyFactor=round(early/midCommand,4);drift=round(late/midCommand,4);
+    const currentCommands=current.source.map(x=>Number(x.command));
+    const changed=[midCommand,early,late].some((v,i)=>!sameCommandFlow(v,currentCommands[i]));
+    if(!changed)return null;
+    return {
+      model:"drift", midCommand, earlyFactor:round(earlyFactor,4), drift:round(drift,4),
+      earlyCommand:early, lateCommand:late,
+      earlySeconds:current.earlySeconds, midSeconds:current.midSeconds,
+      confidence:previous?"MEDIUM":"LOW", targetGS:round(target,3),
+      maxStepRule:policy.name+": MID ≤"+(fraction*100).toFixed(1)+"% / "+absolute+" ml/s, at least one 1/16 step; earlyFactor/drift ≤20% per shot",
+      reason:"S3 MID level and per-frame gain ratios solved as MID × earlyFactor / MID / MID × drift"
+    };
+  }
+
+
+  function stageCommandOrigin(stage, shape) {
+    const os=testOverrideStatus(),x=state.testOverrides;
+    if(!os.valid||!x)return "original";
+    const q=shape?x.s3Shape:x.stages&&x.stages[stage];
+    if(!q||(shape?q.enabled!==true:q.mode!=="manual"))return "original";
+    if(["original","adaptive","manual","retained"].includes(q.origin))return q.origin;
+    if(x.adaptiveSource)return "adaptive"; 
+    if(x.manualCurveSource&&x.manualCurveSource.mode!=="lut-reset")return "manual";
+    return "retained"; 
+  }
+  function s2NearbyEvidence(current,previous,key) {
+    if(!current||!previous||!(Number(current.targetGS)/Number(previous.targetGS)>=.5&&Number(current.targetGS)/Number(previous.targetGS)<=2))return null;
+    const a=Number(current.command),b=Number(previous.command),ratio=a/b;
+    if(!(a>0&&b>0&&ratio>=.5&&ratio<=2&&Number(previous.measured)>0&&Number(previous.r2)>=1-.1*learningPolicy().qualityWidth&&Number(key==="s1"?previous.transitS:previous.seconds)>=(key==="s1"?.9:1.2)/learningPolicy().qualityWidth))return null;
+    return {...previous,command:a,measured:round(Number(previous.measured)*ratio,3),
+      originalCommandMlS:b,originalMeasuredGS:Number(previous.measured),comparisonModel:"nearby-command local proportional model"};
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  function s2ReverseEstimate(run,current,chain,memory,effectiveOverride) {
+    const target=Number(run&&run.config&&run.config.stage2Flow);
+    if(!(target>0))return null;
+    const quality=chain?null:controlOutputQuality(run,"stage2");
+    const measured=Number(chain?chain.endGS:(quality&&quality.available?quality.tailMeanGS:current&&current.measured));
+    const rawEnd=Number(chain&&chain.commandMlS);
+    const effective=Number.isFinite(Number(effectiveOverride))&&Number(effectiveOverride)>0?Number(effectiveOverride):stage2EffectiveCommand(run);
+    const startCommand=Number(chain&&chain.startCommandMlS),startGS=Number(chain&&chain.startGS);
+    const withinChain=!!(chain&&Number.isFinite(effective)&&effective>=startCommand*.98&&effective<=rawEnd*1.02);
+    const configCommand=Number(run&&run.config&&run.config.stage2CommandMlS);
+    const base=chain?(withinChain?effective:rawEnd):(Number.isFinite(effective)&&effective>0?effective:configCommand);
+    if(!(base>0)||!(measured>0))return null;
+    const rObs=measured/base;
+    if(!(rObs>=GAIN_R_MIN&&rObs<=GAIN_R_MAX))return null;
+    const band=commandBandOf(base);
+    const sameBand=!!(memory&&memory.bandMatched&&memory.band===band&&Number(memory.bandR)>0);
+    const priorWeight=sameBand?Math.min(.25,.15*Math.max(1,Number(memory.bandN)||1)):0;
+    const r=sameBand?rObs*(1-priorWeight)+Number(memory.bandR)*priorWeight:rObs;
+    const ratioNeed=target/r;
+    let affine=null,affineNeed=null,affineRejected=null;
+    if(chain&&startCommand>0&&startGS>0&&base>startCommand+1/64){
+      const slope=(measured-startGS)/(base-startCommand);
+      if(slope>0.2&&slope<=3){
+        const intercept=startGS-slope*startCommand,share=Math.abs(intercept)/target;
+        affine={slope:round(slope,4),intercept:round(intercept,4),interceptSharePct:round(share*100,1),needMlS:round((target-intercept)/slope,3)};
+        if(share>=.10){
+          if(slope>=.75*rObs)affineNeed=(target-intercept)/slope;
+          else affineRejected="chord slope "+round(slope,3)+" g/s per ml/s is "+round(slope/rObs*100,0)+"% of the steady ratio "+round(rObs,3)+"; the last write had not settled";
+        }else affineRejected="intercept below 10% of target; the through-origin ratio applies";
+      }
+    }
+    let need=ratioNeed;
+    if(affineNeed!==null){
+      const gap=Math.abs(affineNeed-ratioNeed)/((affineNeed+ratioNeed)/2);
+      if(gap<=.12)need=(affineNeed+ratioNeed)/2;
+      else affineRejected="affine "+round(affineNeed,3)+" and ratio "+round(ratioNeed,3)+" differ by "+round(gap*100,1)+"%";
+    }
+    const policy=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel),[fraction,absolute]=policy.s2;
+    const span=Math.max(base*fraction,absolute);
+    const bounded=Math.max(base-span,Math.min(base+span,base+(need-base)*.9));
+    const suggested=snapCommandFlow(clampCommandFlow(bounded));
+    if(!Number.isFinite(suggested))return null;
+    return {targetGS:round(target,3),model:"same-window ratio"+(affine?" + affine test":""),effectiveCommandMlS:Number.isFinite(effective)?round(effective,3):null,
+      baseCommandMlS:round(base,3),measuredGS:round(measured,3),rObserved:round(rObs,4),commandBand:band,
+      memoryBand:sameBand?band:memory&&memory.band||null,memoryBandR:sameBand?round(Number(memory.bandR),4):null,memoryBandN:sameBand?Number(memory.bandN)||1:0,memoryWeight:priorWeight,
+      ratioR:round(r,4),ratioNeedMlS:round(ratioNeed,3),affine,affineNeedMlS:affineNeed===null?null:round(affineNeed,3),affineRejected,
+      needMlS:round(need,3),spanMlS:round(span,3),suggestedCommandMlS:suggested,
+      maxStepRule:policy.name+" S2 step ≤"+round(fraction*100,1)+"% / "+absolute+" ml/s around the effective command",
+      source:sameBand?"ratio + same-band memory prior":"same-shot ratio"};
+  }
+
+  function s2AdaptiveSuggestion(run,current,previous) {
+    const chain=current&&current.liveTrimChain;
+    if(chain){
+      const target=Number(run&&run.config&&run.config.stage2Flow);
+      if(!chain.usable)return {usable:false,action:"SATURATED / HOLD",confidence:"LOW",targetGS:round(target,3),reason:chain.reason+"; hold the next-shot S2 command",maxStepRule:"single-shot chain: command rose but cup flow did not; do not learn a LUT offset"};
+      const memory=gainMemorySuggestion(run,"s2");
+      const rev=s2ReverseEstimate(run,current,chain,memory);
+      if(rev){
+        return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:round(target,3),
+          currentCommandMlS:rev.baseCommandMlS,measuredGS:rev.measuredGS,suggestedCommandMlS:rev.suggestedCommandMlS,
+          errorPct:round((chain.endGS/target-1)*100,1),maxStepRule:rev.maxStepRule,reverseModel:rev,
+          reason:chain.reason+"; chain "+chain.startCommandMlS+"->"+chain.commandMlS+" ml/s moved cup flow "+chain.startGS+"->"+chain.endGS+" g/s (gain "+round(chain.gain,2)+"); base "+formatCommandFlow(rev.baseCommandMlS)+" ml/s, r="+rev.rObserved+"; next shot "+formatCommandFlow(rev.suggestedCommandMlS)+" ml/s"+(rev.affineRejected?"; affine not applied: "+rev.affineRejected:"")};
+      }
+    }
+    const tail=current&&current.tailGain;
+    if(tail&&!previous){
+      const memory=gainMemorySuggestion(run,"s2");
+      const rev=s2ReverseEstimate(run,current,null,memory);
+      if(rev){
+        return {usable:true,action:"LUT COMPENSATE",confidence:"MEDIUM",targetGS:rev.targetGS,currentCommandMlS:rev.baseCommandMlS,
+          measuredGS:rev.measuredGS,suggestedCommandMlS:rev.suggestedCommandMlS,errorPct:tail.tailErrorPct,tailGain:tail,
+          maxStepRule:rev.maxStepRule,reverseModel:rev,
+          reason:"steady tail "+tail.tailMeanGS+" g/s at "+formatCommandFlow(rev.baseCommandMlS)+" ml/s (r="+rev.rObserved+"); next shot "+formatCommandFlow(rev.suggestedCommandMlS)+" ml/s"};
+      }
+    }
+    const policy=learningPolicy(run&&run.config&&run.config.adaptiveLearningLevel),q=controlOutputQuality(run,"stage2"),err=current&&current.targetGS>0?(Number(current.measured)/Number(current.targetGS)-1)*100:0;
+    const large=!!(current&&q.available&&q.windows>=2&&q.tailRippleCVPct<=12&&Math.abs(err)>=20&&Math.abs(q.tailErrorPct)>=15&&Math.sign(err)===Math.sign(q.tailErrorPct));
+    return {...scalarLearningSuggestion("S2","s2",current,previous,policy,large),outputQuality:q};
+  }
+
+  function utf8ByteLength(v) {let bytes=0;for(let i=0;i<v.length;i++){const c=v.charCodeAt(i);if(c<128)bytes++;else if(c<2048)bytes+=2;else if(c>=0xd800&&c<=0xdbff&&i+1<v.length&&v.charCodeAt(i+1)>=0xdc00&&v.charCodeAt(i+1)<=0xdfff){bytes+=4;i++;}else bytes+=3;}return bytes;}
+  function historyPersistenceAudit(runId) {
+    const rows=state.persistentHistoryFile&&state.persistentHistoryFile.shots||[],saved=rows.find(x=>x.runId===runId);
+    const verified=(state.historyVerifiedRunIds||[]).includes(runId);
+    return {storageKey:STORAGE_HISTORY_FILE,loaded:!!state.persistentHistoryLoaded,probeVerified:!!state.storageProbeVerified,
+      storageVerified:state.persistentHistoryAvailable===true,savePending:!!(state.pendingHistoryWrite||state.historyWriteDirty),records:rows.length,
+      runId:runId||null,currentRecordPresent:!!saved,currentS2EvidencePresent:!!(saved&&saved.evidence&&saved.evidence.s2),
+      currentRunReadbackVerified:verified&&state.persistentHistoryAvailable===true,lastReadbackAt:state.historyLastReadbackAt||null,
+      status:state.persistentHistoryAvailable===false?"History session only; persistent save not verified":verified?"Current shot history readback verified":saved?"Current shot history awaiting readback":"Current shot history not saved yet",
+      detail:state.persistentHistoryStatus||"",bytes:state.historyWriteBytes||0};
+  }
+  function compactLiveHistory(report) {
+    if(!report)return null;
+    const reasons={};for(const x of report.trace||[])if(x.kind==="check"){const k=x.reason||x.decision||"unknown";reasons[k]=(reasons[k]||0)+1;}
+    
+    
+    return {...report,trace:(report.trace||[]).filter(x=>x.kind!=="check"),checkReasons:reasons,historyTraceFormat:"actions-plus-check-counts-v1"};
+  }
+
+
+  function trimHistoryFullRecords(file) {
+    const shots=file&&Array.isArray(file.shots)?file.shots:[];
+    for(let i=0;i<shots.length;i++){
+      const rec=shots[i],age=shots.length-1-i;
+      if(!rec||!rec.fullRecord)continue;
+      if(age<HISTORY_FULL_SHOTS)continue;
+      rec.fullRecord.samples=null;rec.fullRecord.rawScaleSamples=null;
+      if(age>=HISTORY_TRACE_SHOTS){if(rec.fullRecord.liveFlowTrim)rec.fullRecord.liveFlowTrim.trace=[];rec.fullRecord.events=null;}
+    }
+    return file;
+  }
+
+  function fullShotRecord(run) {
+    if (!run) return null;
+    return {
+      samples: run.samples || null,
+      rawScaleSamples: run.rawScaleSamples || null,
+      events: run.events || null,
+      liveFlowTrim: run.liveFlowTrim && typeof run.liveFlowTrim === "object"
+        ? { ...run.liveFlowTrim, trace: (run.liveFlowTrim.trace || []).map(x => ({ ...x })) }
+        : null
+    };
+  }
+
+  function historyExportPayload() {
+    const file = state.persistentHistoryFile || null;
+    const shots = file && Array.isArray(file.shots) ? file.shots : [];
+    return { kind: "HyperExHistoryExport", schema: 1, pluginVersion: PLUGIN_VERSION, exportedAt: new Date().toISOString(), writerVersion: file && file.writerVersion || null, gainMemory: gainMemoryState(false), count: shots.length, shots: shots.slice() };
+  }
+
+  function commandFlowSummary() {
+    if (!state.cfg) return {};
+    const rows = {};
+    for (const [stage, real] of [["stage1",state.cfg.stage1Flow],["stage2",state.cfg.stage2Flow],["stage3",state.cfg.stage3Flow]]) {
+      const base = baseStageCommandFlow(real, stage);
+      const manual = manualTestCommand(stage);
+      rows[stage] = { desired: round(real,3), lut: round(lutCommandForReal(real),3), effective: round(manual === null ? base : manual,3), mode: manual === null ? "auto" : "manual",origin:stageCommandOrigin(stage,false) };
+    }
+    const os = testOverrideStatus();
+    const shape = s3ShapeStatus();
+    const adaptiveSource = os.valid && !os.baselinePrior && state.testOverrides && state.testOverrides.adaptiveSource && typeof state.testOverrides.adaptiveSource === "object"
+      ? {
+          runId: String(state.testOverrides.adaptiveSource.runId || ""),
+          appliedAt: String(state.testOverrides.adaptiveSource.appliedAt || ""),
+          mode: String(state.testOverrides.adaptiveSource.mode || "")
+        }
+      : null;
+    const appliedProfile = {
+      stage1: { desiredGS: rows.stage1.desired, lutCommandMlS: rows.stage1.lut, commandMlS: rows.stage1.effective, mode: rows.stage1.mode,origin:rows.stage1.origin },
+      stage2: { desiredGS: rows.stage2.desired, lutCommandMlS: rows.stage2.lut, commandMlS: rows.stage2.effective, mode: rows.stage2.mode,origin:rows.stage2.origin },
+      stage3: shape.enabled
+        ? { desiredGS: rows.stage3.desired, lutCommandMlS: rows.stage3.lut, mode: "shape",origin:stageCommandOrigin("stage3",true), flatCommandMlS: rows.stage3.effective, shape: { ...shape } }
+        : { desiredGS: rows.stage3.desired, lutCommandMlS: rows.stage3.lut, mode: rows.stage3.mode,origin:rows.stage3.origin, flatCommandMlS: rows.stage3.effective, shape: { enabled:false, reason:shape.reason } }
+    };
+    return {
+      stage1DesiredGS: rows.stage1.desired, stage1LutCommandMlS: rows.stage1.lut, stage1CommandMlS: rows.stage1.effective, stage1Mode: rows.stage1.mode,stage1Origin:rows.stage1.origin,
+      stage2DesiredGS: rows.stage2.desired, stage2LutCommandMlS: rows.stage2.lut, stage2CommandMlS: rows.stage2.effective, stage2Mode: rows.stage2.mode,stage2Origin:rows.stage2.origin,
+      stage3DesiredGS: rows.stage3.desired, stage3LutCommandMlS: rows.stage3.lut,
+      stage3FlatCommandMlS: rows.stage3.effective,
+      stage3CommandMlS: shape.enabled ? shape.midCommand : rows.stage3.effective,
+      stage3Mode: shape.enabled ? "shape" : rows.stage3.mode,stage3Origin:stageCommandOrigin("stage3",shape.enabled),
+      s3Shape: shape,
+      appliedProfile,
+      adaptiveSource,
+      manualCurveSource: os.valid&&!os.baselinePrior&&state.testOverrides?state.testOverrides.manualCurveSource||null:null,
+      manualTestActiveStages: os.activeStages || [], manualTestStatus: os.reason || "none"
+    };
+  }
+
+  async function refreshFlowMultiplier(force, strict) {
+    const now = Date.now();
+    if (!force && finiteOrNull(state.flowMultiplierCurrent) !== null && now - state.flowMultiplierReadAtMs < 3000) {
+      return finiteOrNull(state.flowMultiplierCurrent);
+    }
+    try {
+      const r = await api('/machine/calibration', { method: 'GET' });
+      const j = await r.json();
+      const v = Number(j && j.flowMultiplier);
+      if (Number.isFinite(v)) {
+        noteMultiplierChange(v);
+        state.flowMultiplierCurrent = v;
+        state.flowMultiplierReadAtMs = now;
+        recomputeCalibrationUsability();
+        return v;
+      }
+    } catch (error) {
+      log(`Could not read DE1 flowMultiplier: ${error.message || error}`);
+      if (strict) throw error;
+    }
+    if (strict) throw new Error('Fresh DE1 flowMultiplier readback unavailable');
+    return finiteOrNull(state.flowMultiplierCurrent) !== null ? finiteOrNull(state.flowMultiplierCurrent) : null;
+  }
+
+  async function writeFlowMultiplier(value, reason) {
+    const v = Math.max(0.13, Math.min(2.0, Number(value)));
+    if (!Number.isFinite(v)) throw new Error('invalid flowMultiplier');
+    if (multiplierClose(state.flowMultiplierCurrent, v)) return v;
+    await api('/machine/calibration', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flowMultiplier: v })
+    });
+    noteMultiplierChange(v);
+    state.flowMultiplierCurrent = v;
+    state.flowMultiplierReadAtMs = Date.now();
+    recomputeCalibrationUsability();
+    log(`DE1 flowMultiplier -> ${v.toFixed(3)}${reason ? ` (${reason})` : ''}.`);
+    return v;
+  }
+
+  function inHyperExScope(title) {
+    return !!state.cfg && (isHyperExProfileTitle(title) || isCalibrationProfileTitle(title));
+  }
+
+  async function enterHyperExScopedMultiplier(reason, expectedRevision) {
+    if (state.scopeMode !== "hyperex") return;
+    const mapBase = calibrationBaseMultiplier();
+    const target = state.calibrationArmed && finiteOrNull(state.calibrationPendingMultiplier) !== null
+      ? finiteOrNull(state.calibrationPendingMultiplier) : mapBase;
+    if (!Number.isFinite(target)) return;
+    if (state.scopeChangeBusy) return;
+    state.scopeChangeBusy = true;
+    try {
+      const current = await refreshFlowMultiplier(true, expectedRevision !== undefined);
+      if (expectedRevision !== undefined) checkProfileSelection(expectedRevision);
+      if (!Number.isFinite(current)) return;
+      if (finiteOrNull(state.scopedOriginalMultiplier) === null) { state.scopedOriginalMultiplier = current; storageWrite(STORAGE_SCOPED_ORIGINAL, String(current)); }
+      await writeFlowMultiplier(target, reason || "HyperEx scoped");
+      state.scopedAppliedMultiplier = target;
+    } finally {
+      state.scopeChangeBusy = false;
+      if (!inHyperExScope(state.workflowTitle) && finiteOrNull(state.scopedOriginalMultiplier) !== null) {
+        await restoreHyperExScopedMultiplier('selection left scope during multiplier update');
+      }
+    }
+  }
+
+  async function restoreHyperExScopedMultiplier(reason) {
+    if (finiteOrNull(state.scopedOriginalMultiplier) === null) return;
+    if (state.scopeChangeBusy) return;
+    state.scopeChangeBusy = true;
+    const original = finiteOrNull(state.scopedOriginalMultiplier);
+    let restored = false;
+    try {
+      await writeFlowMultiplier(original, reason || "restore previous");
+      restored = true;
+    } catch (error) {
+      log(`Could not restore previous flowMultiplier ${original}: ${error.message || error}`);
+    } finally {
+      if (restored) {
+        state.scopedOriginalMultiplier = null;
+        state.scopedAppliedMultiplier = null;
+        storageWrite(STORAGE_SCOPED_ORIGINAL, '');
+      }
+      state.scopeChangeBusy = false;
+    }
+  }
+
+  function diagnosticEvent(name, data) {
+    const run = state.diagnosticCurrent;
+    if (!run) return;
+    if(name==="learning_fault"){if(!Array.isArray(run.learningExecutionFaults))run.learningExecutionFaults=[];run.learningExecutionFaults.push({phase:state.phase,reason:data&&data.reason||"execution fault"});}
+    if(name==="command_accepted"&&data&&data.machineState==="skipStep")run.learningSkipCount=(run.learningSkipCount||0)+1;
+    run.events.push({
+      tMs: Math.max(0, Date.now() - run.startedAtMs),
+      name: String(name || "event"),
+      phase: state.phase,
+      data: data && typeof data === "object" ? data : (data === undefined ? {} : { value: data })
+    });
+    if (run.events.length > 300) run.events.shift();
+  }
+
+  function startDiagnostics(kind) {
+    if (!state.cfg || (!state.cfg.diagnosticEnabled && !state.cfg.liveFlowTrimTest && kind !== "calibration")) {
+      state.diagnosticCurrent = null;
+      return;
+    }
+    state.diagnosticRunSeq += 1;
+    const now = Date.now();
+    const intervention = kind === "calibration" ? "full" : normalizeAlgorithmIntervention(state.algorithmIntervention);
+    
+    
+    state.hecExternalWrites = 0; state.hecExternalRejects = 0; state.hecWatchdogs = 0;
+    state.diagnosticCurrent = {
+      schema: 3,
+      kind: String(kind || "hyperex"),
+      pluginVersion: PLUGIN_VERSION,
+      runId: `${now}-${state.diagnosticRunSeq}`,
+      profileTitle: state.workflowTitle || (state.cfg ? profileTitleForMode() : ""),
+      startedAt: new Date(now).toISOString(),
+      startedAtMs: now,
+      endedAt: null,
+      result: null,
+      observationOnly: intervention === "off",
+      config: {
+        hecTakeover: null,
+        activeRelease:activeReleaseEnabled(state.cfg),releaseMode:releaseMode(state.cfg),
+        profileLayout:profileLayoutForMode(releaseMode(state.cfg)),adaptiveLearningLevel:state.cfg.adaptiveLearningLevel,
+        algorithmIntervention:intervention,
+        basketContext: kind === "calibration" ? "empty" : state.cfg.basketContext,
+        baselinePrior: baselineFeedForwardPayload(),
+        stage1PressureLimit: state.cfg.stage1PressureLimit,
+        stage2PressureLimit: state.cfg.stage2PressureLimit,
+        stage3PressureLimit: state.cfg.stage3PressureLimit,
+        stage1Flow: state.cfg.stage1Flow,
+        stage1LutCommandMlS: lutCommandForReal(state.cfg.stage1Flow),
+        stage1CommandMlS: resolvedStageCommandFlow("stage1", state.cfg.stage1Flow),
+        stage1CommandOrigin:stageCommandOrigin("stage1",false),
+        stage1CommandMode: manualTestCommand("stage1") === null ? "auto" : "manual",
+        stage1Weight: state.cfg.stage1Weight,
+        soakSeconds: state.cfg.soakSeconds,
+        s2StartupPlan: kind === "calibration" ? null : stage2StartupPlan(intervention),
+        stage2Flow: state.cfg.stage2Flow,
+        stage2LutCommandMlS: lutCommandForReal(state.cfg.stage2Flow),
+        stage2CommandMlS: resolvedStageCommandFlow("stage2", state.cfg.stage2Flow),
+        stage2CommandOrigin:stageCommandOrigin("stage2",false),
+        stage2CommandMode: manualTestCommand("stage2") === null ? "auto" : "manual",
+        stage2Weight: state.cfg.stage2Weight,
+        stage3Flow: state.cfg.stage3Flow,
+        stage3LutCommandMlS: lutCommandForReal(state.cfg.stage3Flow),
+        stage3CommandMlS: s3ShapeStatus().enabled ? s3ShapeStatus().midCommand : resolvedStageCommandFlow("stage3", state.cfg.stage3Flow),
+        stage3CommandOrigin:stageCommandOrigin("stage3",s3ShapeStatus().enabled),
+        stage3CommandMode: s3ShapeStatus().enabled ? "shape" : (manualTestCommand("stage3") === null ? "auto" : "manual"),
+        stage3Shape: s3ShapeStatus(),
+        
+        
+        
+        s3DriftModel: state.cfg.s3DriftModel === true,
+        finalWeight: state.cfg.finalWeight,
+        sampleIntervalMs: state.cfg.diagnosticSampleIntervalMs,
+        flowMultiplier: state.flowMultiplierCurrent,
+        profileTruthVerified: !!state.runtimeProfileVerified,
+        profileTruthSchema: 3,
+        adaptiveFingerprint: adaptiveHistoryFingerprint(),
+        profileReadbackAt: state.profileReadbackAt,
+        machineProfileUploadAcknowledged: !!state.machineProfileAckKey,
+        workflowProfileCommands: profileCommandSummaryFromProfile(state.workflowProfile),
+        workflowProfileExecution: normalizedProfileExecution(state.workflowProfile),
+        calibrationMode: state.calibrationMode,
+        calibrationCommands: calibrationCommands(),
+        calibrationProgram: calibrationProgram(),
+        calibrationStepSeconds: calibrationModeConfig().stepSeconds,
+        calibrationSettleSeconds: calibrationModeConfig().settleSeconds,
+        calibrationWindowSeconds: calibrationModeConfig().windowSeconds,
+        calibrationHardStopG: calibrationModeConfig().hardStopG
+      },
+      samples: [],
+      rawScaleSamples: [],
+      events: []
+    };
+    state.diagnosticLastSampleAtMs = 0;
+    state.latestRawDwDt = null;
+    diagnosticEvent(kind === "calibration" ? "calibration_start" : "sequence_start", {
+      rawWeight: round(state.latestRawWeight, 3),
+      flowMultiplier: round(state.flowMultiplierCurrent, 4)
+    });
+    log(`${kind === "calibration" ? "Flow calibration" : "Diagnostic"} capture started (${state.cfg.diagnosticSampleIntervalMs} ms target cadence).`);
+  }
+
+  function diagnosticSample(source, force) {
+    const run = state.diagnosticCurrent;
+    if (!run || !state.cfg || (!state.cfg.diagnosticEnabled && !state.cfg.liveFlowTrimTest)) return;
+    const now = Date.now();
+    if (!force && state.diagnosticLastSampleAtMs && now - state.diagnosticLastSampleAtMs < state.cfg.diagnosticSampleIntervalMs) return;
+    state.diagnosticLastSampleAtMs = now;
+    const scaleAgeMs = state.latestScaleAtMs ? now - state.latestScaleAtMs : null;
+    const machineFlow = Number(state.lastFlow);
+    const scaleFlow = Number(state.latestWeightFlow);
+    const ratio = Number.isFinite(machineFlow) && Math.abs(machineFlow) >= 0.15 && Number.isFinite(scaleFlow)
+      ? scaleFlow / machineFlow : null;
+    run.samples.push({
+      tMs: Math.max(0, now - run.startedAtMs),
+      source: String(source || "sample"),
+      phase: state.phase,
+      machineState: state.lastMachineState,
+      substate: state.lastSubstate,
+      profileFrame: state.lastFrame,
+      physicalProfileFrame: state.lastPhysicalFrame,
+      targetFlowMlS: round(state.lastTargetFlow, 3),
+      desiredRealFlowGS: round(desiredRealFlowForPhase(state.phase), 3),
+      targetPressureBar: round(state.lastTargetPressure, 3),
+      machineFlowMlS: round(state.lastFlow, 3),
+      machineTelemetryValid: state.lastMachineTelemetryValid,
+      machineAgeMs: state.lastMachineAtMs ? Math.max(0,now-state.lastMachineAtMs) : null,
+      pressureBar: round(state.lastPressure, 3),
+      machineWeightFlowGS: round(state.lastMachineWeightFlow, 3),
+      rawScaleWeightG: round(state.latestRawWeight, 3),
+      rawScaleDwDtGS: round(state.latestRawDwDt, 3),
+      decaidWeightFlowGS: round(state.latestWeightFlow, 3),
+      
+      scaleWeightG: round(state.latestRawWeight, 3),
+      scaleFlowGS: round(state.latestWeightFlow, 3),
+      cumulativeWeightG: round(state.cumulativeWeight, 3),
+      scaleAgeMs: Number.isFinite(scaleAgeMs) ? Math.max(0, Math.round(scaleAgeMs)) : null,
+      gflowToMachineFlow: round(ratio, 4)
+    });
+    if (run.samples.length > 3000) run.samples.shift();
+  }
+
+  function median(values) {
+    const a = values.filter(Number.isFinite).sort((x, y) => x - y);
+    if (!a.length) return null;
+    const i = Math.floor(a.length / 2);
+    return a.length % 2 ? a[i] : (a[i - 1] + a[i]) / 2;
+  }
+
+  function average(values) {
+    const a = values.filter(Number.isFinite);
+    return a.length ? a.reduce((sum, v) => sum + v, 0) / a.length : null;
+  }
+
+  function diagnosticRawRegression(run, phase) {
+    if (!run || !Array.isArray(run.rawScaleSamples)) return null;
+    let raw = phaseRawSamples(run, phase);
+    if (raw.length < 4) return null;
+
+    const firstTMs = Number(raw[0].tMs);
+    const settleSeconds = phase === "stage1" ? 0.25 : phase === "stage2" ? 0 : 2.0;
+    let use = raw.filter(s => Number(s.tMs) - firstTMs >= settleSeconds * 1000);
+    
+    
+    
+    if (use.length < 5) use = raw.filter(s => Number(s.tMs) - firstTMs >= 100);
+    if (use.length < 4) use = raw;
+
+    const points = use.map(s => ({ x: rawTimeSecondsForSample(s), y: Number(s.weightG) }));
+    const reg = linearRegression(points);
+    if (!reg) return null;
+    const times = points.map(p => p.x).filter(Number.isFinite);
+    const span = times.length ? Math.max(...times) - Math.min(...times) : 0;
+    return {
+      slope: round(reg.slope, 3),
+      r2: round(reg.r2, 5),
+      samples: reg.n,
+      seconds: round(span, 2),
+      settleSeconds: round(settleSeconds, 2)
+    };
+  }
+
+  function rawTimeSecondsForSample(s) {
+    const ts = Number(s && s.scaleTimestampSeconds);
+    return Number.isFinite(ts) ? ts : Number(s && s.tMs) / 1000;
+  }
+
+  function phaseRawSamplesUntrimmed(run, phase) {
+    if (!run || !Array.isArray(run.rawScaleSamples)) return [];
+    let raw = run.rawScaleSamples
+      .filter(s => s.phase === phase && Number.isFinite(Number(s.weightG)))
+      .slice()
+      .sort((a, b) => Number(a.tMs) - Number(b.tMs));
+    if (!raw.length) return raw;
+    let lastReset = -1;
+    for (let i = 0; i < raw.length; i++) if (raw[i].tareReset) lastReset = i;
+    if (lastReset >= 0) raw = raw.slice(lastReset + 1);
+    return raw;
+  }
+
+  
+  
+  function stage2CupOnset(run,source) {
+    if(run&&s2OnsetCache.has(run))return s2OnsetCache.get(run);
+    const raw=source||phaseRawSamplesUntrimmed(run,"stage2"),target=Number(run&&run.config&&run.config.stage2Flow)||5;
+    const threshold=Math.max(.05,target*.01),seen=new Set(),window=[];
+    for(const row of raw){
+      const stamp=finiteOrNull(row.scaleTimestampSeconds),weight=finiteOrNull(row.weightG),at=finiteOrNull(row.tMs);
+      if(stamp===null||weight===null||at===null||seen.has(stamp))continue;
+      if(window.length&&(stamp<=window[window.length-1].x||stamp-window[window.length-1].x>.6||weight<window[window.length-1].y-.2))window.length=0;
+      seen.add(stamp);window.push({x:stamp,y:weight,at});while(window.length&&stamp-window[0].x>2.05+1e-9)window.shift();
+      if(window.length<4||stamp-window[0].x<.39||weight-window[0].y<.2-1e-9)continue;
+      const fit=linearRegression(window);if(!fit||fit.r2<.85||fit.slope<threshold)continue;
+      const rise=window.findIndex(p=>p.y-window[0].y>=.05-1e-9);let onsetIndex=Math.max(0,rise-1);while(onsetIndex>0&&window[onsetIndex].y>window[onsetIndex-1].y+1e-9)onsetIndex--;const start=window[onsetIndex];
+      const event=(run.events||[]).find(x=>x.name==="stage2_start"),phaseStart=event&&Number.isFinite(Number(event.tMs))?Number(event.tMs):Number(raw[0].tMs);
+      const onsetResult={detected:true,startMs:start.at,delayS:round(Math.max(0,start.at-phaseStart)/1000,3),confirmedAtMs:at,thresholdGS:threshold,basis:"sustained RAW weight rise"};
+      if(run)s2OnsetCache.set(run,onsetResult);
+      return onsetResult;
+    }
+    return {detected:false,startMs:null,confirmedAtMs:null,thresholdGS:threshold,basis:"waiting for sustained RAW weight rise"};
+  }
+  function phaseRawSamples(run,phase) {
+    const raw=phaseRawSamplesUntrimmed(run,phase);if(phase!=="stage2")return raw;
+    const onset=stage2CupOnset(run,raw);return onset.detected?raw.filter(s=>Number(s.tMs)>=onset.startMs):[];
+  }
+  
+  
+  function s2RefillTimeline(run) {
+    const tr=run&&run.liveFlowTrim&&run.liveFlowTrim.trace||[],plan=run&&run.config&&run.config.s2StartupPlan||null;
+    const start=(run&&run.events||[]).find(x=>x.name==="stage2_start");
+    const onset=stage2CupOnset(run);
+    const boost=tr.find(x=>x.kind==="write"&&x.startupAction==="boost");
+    const returns=tr.filter(x=>x.kind==="startup-boost-ended"),ret=returns[0];
+    const complete=tr.find(x=>x.kind==="startup-complete"&&Number(x.frame)===1);
+    const origin=start&&Number.isFinite(Number(start.tMs))?Number(start.tMs):null;
+    const rel=v=>origin!==null&&v!==undefined&&v!==null&&Number.isFinite(Number(v))?round((Number(v)-origin)/1000,2):null;
+    const cutoff=run&&run.liveFlowTrim&&run.liveFlowTrim.startupExecution&&run.liveFlowTrim.startupExecution.cutoff||null;
+    const overlapStart=onset.detected&&origin!==null?Math.max(Number(onset.startMs),origin):null;
+    const overlapEnd=ret&&Number.isFinite(Number(ret.tMs))?Number(ret.tMs):null;
+    return {stage2StartMs:origin,onsetMs:onset.detected?Number(onset.startMs):null,onsetConfirmedMs:onset.confirmedAtMs||null,
+      boostMs:boost?Number(boost.tMs):null,cutoffAtMs:cutoff&&Number.isFinite(Number(cutoff.atMs))?Number(cutoff.atMs):null,
+      returnMs:overlapEnd,returnCount:returns.length,completeMs:complete?Number(complete.tMs):null,
+      relative:{onsetS:rel(onset.startMs),boostS:rel(boost&&boost.tMs),cutoffS:rel(cutoff&&cutoff.atMs),returnS:rel(overlapEnd),completeS:rel(complete&&complete.tMs)},
+      overlap:overlapStart!==null&&overlapEnd!==null&&overlapEnd>=overlapStart?{fromMs:overlapStart,toMs:overlapEnd,seconds:round((overlapEnd-overlapStart)/1000,2)}:null,
+      cutoff,plan,learning:s2LearningWindow(run)};
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  function s2LearningWindow(run,consumer){
+    const settleMs=consumer==="chain"?S2_REFILL_CHAIN_SETTLE_MS:S2_REFILL_SETTLE_MS;
+    const out={refill:false,confirmed:false,startMs:null,settleMs,chainSettleMs:S2_REFILL_CHAIN_SETTLE_MS,reason:null};
+    const cfg=run&&run.config||{},trace=run&&run.liveFlowTrim&&run.liveFlowTrim.trace||[];
+    const plan=cfg.s2StartupPlan||{};
+    const boost=trace.find(x=>x.kind==="write"&&x.startupAction==="boost");
+    if(plan.strategy!=="refill-85"||!boost)return out;
+    out.refill=true;
+    const complete=trace.find(x=>x.kind==="startup-complete"&&Number(x.frame)===1);
+    if(!complete){out.reason="refill-return-unconfirmed";return out;}
+    out.confirmed=true;
+    out.startMs=Number(complete.tMs)+settleMs;
+    return out;
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  function scaleSampleGate(samples){
+    if(!Array.isArray(samples))return samples;
+    const minGapS=(SCALE_SAMPLE_GATE.minGapMs||60)/1000;
+    const monotonic=SCALE_SAMPLE_GATE.monotonic===true;
+    const out=[];let lastStamp=null,lastWeight=null;
+    for(const x of samples){
+      if(x&&x.tareReset){lastStamp=null;lastWeight=null;}
+      const stamp=finiteOrNull(x&&x.scaleTimestampSeconds);
+      const weight=finiteOrNull(x&&x.weightG);
+      if(stamp!==null&&lastStamp!==null&&stamp-lastStamp<minGapS)continue;
+      if(monotonic&&weight!==null&&lastWeight!==null&&weight<lastWeight)continue;
+      out.push(x);
+      if(stamp!==null)lastStamp=stamp;
+      if(weight!==null)lastWeight=weight;
+    }
+    return out;
+  }
+  function regressionForRawSamples(samples) {
+    if (!Array.isArray(samples) || samples.length < 4) return null;
+    const points = samples.map(s => ({ x: rawTimeSecondsForSample(s), y: Number(s.weightG) }));
+    const reg = linearRegression(points);
+    if (!reg) return null;
+    const xs = points.map(p => p.x).filter(Number.isFinite);
+    const span = xs.length ? Math.max(...xs) - Math.min(...xs) : 0;
+    return {
+      slope: round(reg.slope, 3),
+      r2: round(reg.r2, 5),
+      samples: reg.n,
+      seconds: round(span, 2)
+    };
+  }
+
+  function stage1StartupMetrics(run) {
+    const admission=learningAdmission(run),gainMin=admission.seconds(2.5),transitMin=admission.seconds(.90),sampleMin=admission.samples(8),activeMin=admission.seconds(1.25),r2Min=admission.r2(.90);
+    
+    
+    
+    const fastTransitMin=admission.seconds(.55),fastSampleMin=admission.samples(5),fastActiveMin=admission.seconds(1.05);
+    const raw = phaseRawSamples(run, "stage1");
+    if (raw.length < 6) return null;
+    const pts = raw.map(s => ({ ...s, x: rawTimeSecondsForSample(s), y: Number(s.weightG) }))
+      .filter(s => Number.isFinite(s.x) && Number.isFinite(s.y));
+    if (pts.length < 6) return null;
+    const head = pts.slice(0, Math.min(4, pts.length)).map(p => p.y);
+    const tail = pts.slice(Math.max(0, pts.length - 4)).map(p => p.y);
+    const baseline = median(head);
+    const finalWeight = median(tail);
+    const gain = Number(finalWeight) - Number(baseline);
+    if (!Number.isFinite(gain) || gain < 1.0) return null;
+
+    const crossing = threshold => {
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i];
+        if (a.y < threshold && b.y >= threshold && b.x > a.x) {
+          const f = Math.max(0, Math.min(1, (threshold - a.y) / Math.max(1e-9, b.y - a.y)));
+          return a.x + (b.x - a.x) * f;
+        }
+      }
+      const exact = pts.find(p => p.y >= threshold);
+      return exact ? exact.x : null;
+    };
+
+    const firstRiseThreshold = baseline + Math.min(0.20, Math.max(0.08, gain * 0.05));
+    const tRise = crossing(firstRiseThreshold);
+    const t20 = crossing(baseline + gain * 0.20);
+    const t80 = crossing(baseline + gain * 0.80);
+    const t0 = pts[0].x;
+    const tEnd = pts[pts.length - 1].x;
+    const midSamples = Number.isFinite(t20) && Number.isFinite(t80)
+      ? pts.filter(p => p.x >= t20 && p.x <= t80) : [];
+    const midReg = regressionForRawSamples(midSamples);
+    const transit = Number.isFinite(t20) && Number.isFinite(t80) && t80 > t20 ? t80 - t20 : null;
+    const midFlow = Number.isFinite(transit) && transit > 0 ? (gain * 0.60) / transit : null;
+    const activeSeconds = Number.isFinite(tRise) && tEnd > tRise ? tEnd - tRise : null;
+    const activeGain = Number.isFinite(tRise) ? Math.max(0, finalWeight - firstRiseThreshold) : null;
+    const activeFlow = Number.isFinite(activeSeconds) && activeSeconds > 0 ? activeGain / activeSeconds : null;
+    const target = desiredRealForRunPhase(run, "stage1");
+    const errorPct = Number.isFinite(target) && target > 0 && Number.isFinite(midFlow)
+      ? (midFlow - target) / target * 100 : null;
+    let confidence = "INSUFFICIENT";
+    const rejectionReasons = [];
+    const fullGates=gain>=gainMin&&Number.isFinite(transit)&&transit>=transitMin&&midSamples.length>=sampleMin&&Number.isFinite(activeSeconds)&&activeSeconds>=activeMin;
+    const fastGates=!fullGates&&gain>=gainMin&&Number.isFinite(transit)&&transit>=fastTransitMin&&midSamples.length>=fastSampleMin&&Number.isFinite(activeSeconds)&&activeSeconds>=fastActiveMin;
+    if (gain < gainMin) rejectionReasons.push(`collected gain < ${round(gainMin,2)} g`);
+    if (!fullGates&&!fastGates&&(!Number.isFinite(transit) || transit < transitMin)) rejectionReasons.push(`20–80% transit < ${round(transitMin,2)} s`);
+    if (!fullGates&&!fastGates&&midSamples.length < sampleMin) rejectionReasons.push(`20–80% samples < ${sampleMin}`);
+    if (!fullGates&&!fastGates&&(!Number.isFinite(activeSeconds) || activeSeconds < activeMin)) rejectionReasons.push(`active duration < ${round(activeMin,2)} s`);
+    if (!midReg || !Number.isFinite(Number(midReg.r2)) || Number(midReg.r2) < r2Min) rejectionReasons.push(`20–80% regression R² < ${r2Min}`);
+    if (fullGates||fastGates) {
+      confidence = midReg && Number(midReg.r2) >= r2Min ? "MEDIUM" : "LOW";
+      if(fastGates&&confidence==="MEDIUM")rejectionReasons.push("fast 20–80% transit accepted (reduced evidence)");
+    }
+    return {
+      midStartScaleS:t20,midEndScaleS:t80,
+      admission:{factor:admission.factor,minGainG:gainMin,minTransitS:transitMin,minSamples:sampleMin,minActiveS:activeMin,minR2:r2Min},
+      gainG: round(gain, 3),
+      firstRiseDelayS: Number.isFinite(tRise) ? round(Math.max(0, tRise - t0), 2) : null,
+      transit20to80S: Number.isFinite(transit) ? round(transit, 2) : null,
+      midFlowGS: Number.isFinite(midFlow) ? round(midFlow, 3) : null,
+      midR2: midReg ? midReg.r2 : null,
+      activeFlowGS: Number.isFinite(activeFlow) ? round(activeFlow, 3) : null,
+      activeSeconds: Number.isFinite(activeSeconds) ? round(activeSeconds, 2) : null,
+      targetGS: round(target, 3),
+      errorPct: Number.isFinite(errorPct) ? round(errorPct, 1) : null,
+      confidence,fastTrajectory:!!(fastGates&&!fullGates&&confidence==="MEDIUM"),
+      midSampleCount: midSamples.length, rejectionReasons,
+      qualityReason: rejectionReasons.length ? rejectionReasons.join("; ") : "Startup quality gates passed"
+    };
+  }
+
+  function stage1StartupAdvisory(run) {
+    const m = stage1StartupMetrics(run);
+    const cfg = run && run.config ? run.config : {};
+    let current = Number(cfg.stage1CommandMlS);
+    if (!Number.isFinite(current)) current = null;
+    if (!m || !Number.isFinite(Number(m.midFlowGS)) || !Number.isFinite(Number(m.targetGS)) || Number(m.targetGS) <= 0) {
+      return { phase: "stage1", basis: "20–80% startup trajectory", confidence: "INSUFFICIENT", action: "REPEAT", message: "S1 startup trajectory is not long/clean enough for a numeric test range. Keep the current command and repeat.", referenceCommandMlS: null, referenceRangeMlS: null, currentCommandMlS: current === null ? null : round(current,3) };
+    }
+    const err = Number(m.errorPct);
+    if (m.confidence === "INSUFFICIENT" || !Number.isFinite(err) || current === null) {
+      return { phase: "stage1", basis: "20–80% startup trajectory", confidence: m.confidence || "INSUFFICIENT", action: "REPEAT", message: "S1 whole-phase regression is startup-sensitive; the 20–80% trajectory is still insufficient for a numeric adjustment.", referenceCommandMlS: null, referenceRangeMlS: null, currentCommandMlS: current === null ? null : round(current,3), startupMetrics: m };
+    }
+    if (Math.abs(err) <= 8) {
+      return { phase: "stage1", basis: "20–80% startup trajectory", confidence: m.confidence, action: "HOLD", message: `S1 20–80% trajectory is within ${Math.abs(err).toFixed(1)}% of target. Keep the current command; startup delay is reported separately.`, referenceCommandMlS: round(current,3), referenceRangeMlS: [round(current,3),round(current,3)], currentCommandMlS: round(current,3), ratio: round(Number(m.targetGS)/Number(m.midFlowGS),3), errorPct: round(err,1), startupMetrics: m };
+    }
+    const ratio = Number(m.targetGS) / Number(m.midFlowGS);
+    const delta = ratio - 1;
+    const fractions = m.confidence === "MEDIUM" ? [0.20, 0.35] : [0.10, 0.20];
+    const factorA = Math.max(0.85, Math.min(1.15, 1 + delta * fractions[0]));
+    const factorB = Math.max(0.85, Math.min(1.15, 1 + delta * fractions[1]));
+    const cmdA = clampCommandFlow(current * factorA), cmdB = clampCommandFlow(current * factorB);
+    const range = [round(Math.min(cmdA,cmdB),3), round(Math.max(cmdA,cmdB),3)];
+    const midpoint = round((range[0]+range[1])/2,3);
+    return {
+      phase: "stage1", basis: "20–80% startup trajectory", confidence: m.confidence, action: "REFERENCE RANGE",
+      message: `${err < 0 ? "Higher" : "Lower"} S1 command is indicated by the startup 20–80% trajectory. This range is intentionally small; first-rise delay is not treated as flow error.`,
+      currentCommandMlS: round(current,3), referenceCommandMlS: midpoint, referenceRangeMlS: range,
+      ratio: round(ratio,3), errorPct: round(err,1), startupMetrics: m
+    };
+  }
+
+  function stage3StabilityDiagnostics(run) {
+    let raw = phaseRawSamples(run, "stage3");
+    if (raw.length < 10) return null;
+    const firstMs = Number(raw[0].tMs);
+    raw = raw.filter(s => Number(s.tMs) - firstMs >= 2000);
+    if (raw.length < 10) return null;
+    const timed = raw.map(s => ({ ...s, x: rawTimeSecondsForSample(s) })).filter(s => Number.isFinite(s.x));
+    if (timed.length < 10) return null;
+    const t0 = timed[0].x, t1 = timed[timed.length - 1].x, span = t1 - t0;
+    if (!(span > 6)) return null;
+    const q1 = t0 + span * 0.25, q3 = t0 + span * 0.75;
+    const seg = (name, lo, hi, includeHi) => {
+      const a = timed.filter(s => s.x >= lo && (includeHi ? s.x <= hi : s.x < hi));
+      const r = regressionForRawSamples(a);
+      return { name, ...(r || { slope: null, r2: null, samples: a.length, seconds: null }) };
+    };
+    const early = seg("EARLY", t0, q1, false);
+    const mid = seg("MID", q1, q3, false);
+    const late = seg("LATE", q3, t1, true);
+    const target = desiredRealForRunPhase(run, "stage3");
+    const ratioLateEarly = Number.isFinite(Number(early.slope)) && Number(early.slope) > 0 && Number.isFinite(Number(late.slope))
+      ? Number(late.slope) / Number(early.slope) : null;
+
+    const stallWindowSeconds = 6.0;
+    const rawThreshold = Math.max(0.20, Number.isFinite(Number(target)) ? Number(target) * 0.15 : 0.20);
+    const machineThreshold = 0.40;
+    let stall = null;
+    for (let i = 0; i < timed.length; i++) {
+      const end = timed[i].x;
+      const start = end - stallWindowSeconds;
+      if (start < t0) continue;
+      const w = timed.filter(s => s.x >= start && s.x <= end);
+      if (w.length < 8) continue;
+      const reg = regressionForRawSamples(w);
+      if (!reg || !Number.isFinite(Number(reg.slope))) continue;
+      const machine = average(w.map(s => Number(s.machineFlowMlS)));
+      const activeFraction = w.filter(s => Number(s.machineFlowMlS) >= machineThreshold).length / w.length;
+      if (Number.isFinite(machine) && machine >= machineThreshold && activeFraction >= 0.70 && Number(reg.slope) <= rawThreshold) {
+        stall = {
+          suspected: true,
+          startS: round(start - t0, 1),
+          endS: round(end - t0, 1),
+          rawSlopeGS: reg.slope,
+          rawR2: reg.r2,
+          machineFlowMlS: round(machine, 3),
+          thresholdGS: round(rawThreshold, 3),
+          windowS: stallWindowSeconds
+        };
+        break;
+      }
+    }
+    let shapeFrames = null;
+    const shapeCfg = run && run.config && run.config.stage3Shape && run.config.stage3Shape.enabled ? run.config.stage3Shape : null;
+    if (shapeCfg) {
+      const frameSpec = [
+        { frame: 2, name: "S3 EARLY", commandMlS: Number(shapeCfg.earlyCommand), plannedSeconds: Number(shapeCfg.earlySeconds) },
+        { frame: 3, name: "S3 MID", commandMlS: Number(shapeCfg.midCommand), plannedSeconds: Number(shapeCfg.midSeconds) },
+        { frame: 4, name: "S3 LATE", commandMlS: Number(shapeCfg.lateCommand), plannedSeconds: null }
+      ];
+      shapeFrames = frameSpec.map(spec => {
+        const allFrame = timed.filter(x => Number(x.profileFrame) === spec.frame);
+        if (!allFrame.length) return { ...spec, slope: null, r2: null, seconds: null, samples: 0 };
+        const f0 = allFrame[0].x;
+        const duration = Number(allFrame[allFrame.length - 1].x) - f0;
+        const settle = run.config.s3DriftModel === true && String(shapeCfg.model || "") === "drift" && spec.frame === 2
+          
+          
+          
+          ? Math.max(0.75, Math.min(5.0, Math.max(0.75, duration - 3.0)))
+          : 0.75;
+        const useFrame = allFrame.filter(x => x.x - f0 >= settle);
+        const use = useFrame.length >= 6 ? useFrame : allFrame;
+        const reg = regressionForRawSamples(use);
+        return {
+          ...spec,
+          commandMlS: Number.isFinite(spec.commandMlS) ? round(spec.commandMlS,3) : null,
+          plannedSeconds: Number.isFinite(spec.plannedSeconds) ? round(spec.plannedSeconds,1) : null,
+          ...(reg || { slope: null, r2: null, seconds: null, samples: use.length })
+        };
+      });
+    }
+    const decayQuality = [early, mid, late].every(x => Number.isFinite(Number(x.r2)) && Number(x.r2) >= 0.90 && Number.isFinite(Number(x.slope)) && Number(x.slope) > 0);
+    const decay = decayQuality && Number.isFinite(ratioLateEarly) && ratioLateEarly < 0.75;
+    return {
+      spanS: round(span,2), early, mid, late, shapeFrames,
+      lateToEarlyRatio: Number.isFinite(ratioLateEarly) ? round(ratioLateEarly,3) : null,
+      lateDecay: !!decay,
+      stall: stall || { suspected: false, thresholdGS: round(rawThreshold,3), machineThresholdMlS: machineThreshold, windowS: stallWindowSeconds },
+      status: stall ? "STALL SUSPECTED" : decay ? "LATE DECAY" : "STABLE"
+    };
+  }
+
+  function desiredRealForRunPhase(run, phase) {
+    const cfg = run && run.config || {};
+    if (phase === "stage1") return finiteOrNull(cfg.stage1Flow);
+    if (phase === "stage2") return finiteOrNull(cfg.stage2Flow);
+    if (phase === "stage3") return finiteOrNull(cfg.stage3Flow);
+    return null;
+  }
+
+  function diagnosticPhaseSummary(run, phase) {
+    if (!run || !Array.isArray(run.samples)) return null;
+    const onset=phase==="stage2"?stage2CupOnset(run):null;
+    const all = run.samples.filter(s => s.phase === phase&&(!onset||onset.detected&&Number(s.tMs)>=onset.startMs));
+    if (!all.length) return null;
+    const firstT = all[0].tMs;
+    const settleMs = phase === "stage1" ? 250 : phase === "stage2" ? 0 : 2000;
+    const steady = all.filter(s => s.tMs - firstT >= settleMs && Number.isFinite(s.machineFlowMlS) && Math.abs(s.machineFlowMlS) >= 0.15 && Number.isFinite(s.scaleFlowGS));
+    const use = steady.length >= 5 ? steady : all.filter(s => Number.isFinite(s.machineFlowMlS) && Math.abs(s.machineFlowMlS) >= 0.15 && Number.isFinite(s.scaleFlowGS));
+    const reg = diagnosticRawRegression(run, phase);
+    const desired = desiredRealForRunPhase(run, phase);
+    const raw = reg && Number.isFinite(Number(reg.slope)) ? Number(reg.slope) : null;
+    const errorPct = desired !== null && desired > 0 && raw !== null ? (raw - desired) / desired * 100 : null;
+    let validationStatus = "NO DATA";
+    if (raw !== null && desired !== null) {
+      if (phase === "stage1") {
+        const sm = stage1StartupMetrics(run);
+        if (!sm || sm.confidence === "INSUFFICIENT" || (reg && Number(reg.seconds) < 1.5)) validationStatus = "STARTUP / REPEAT";
+        else if (Math.abs(errorPct) <= 8) validationStatus = "HIT";
+        else if (Math.abs(errorPct) <= 25) validationStatus = "NEAR";
+        else validationStatus = "STARTUP / REPEAT";
+      } else if (Math.abs(errorPct) <= 8) validationStatus = "HIT";
+      else if (Math.abs(errorPct) <= 25) validationStatus = "NEAR";
+      else validationStatus = "MISS";
+    }
+    return {
+      samples: use.length,
+      cupFlowOnset: onset,
+      measurementBasis:phase==="stage2"?"RAW cup flow after sustained outflow onset":"RAW phase weight regression",
+      desiredRealFlowGS: round(desired, 3),
+      commandFlowAvg: round(average(use.map(s => s.targetFlowMlS)), 3),
+      machineFlowAvg: round(average(use.map(s => s.machineFlowMlS)), 3),
+      gflowAvg: round(average(use.map(s => s.scaleFlowGS)), 3),
+      
+      
+      rawDwDtAvg: round(average(use.map(s => s.rawScaleDwDtGS)), 3),
+      rawRegressionGS: raw === null ? null : round(raw, 3),
+      rawRegressionR2: reg ? reg.r2 : null,
+      rawRegressionSeconds: reg ? reg.seconds : null,
+      rawRegressionSamples: reg ? reg.samples : 0,
+      rawErrorPct: errorPct === null ? null : round(errorPct, 1),
+      validationStatus,
+      pressureAvg: round(average(use.map(s => s.pressureBar)), 3),
+      ratioMedian: round(median(use.map(s => s.gflowToMachineFlow)), 4),
+      ratioAvg: round(average(use.map(s => s.gflowToMachineFlow)), 4)
+    };
+  }
+
+  function referenceAdvisory(run, phase) {
+    if (phase === "stage1") return stage1StartupAdvisory(run);
+    const p = diagnosticPhaseSummary(run, phase);
+    if (!p || !Number.isFinite(Number(p.desiredRealFlowGS)) || !Number.isFinite(Number(p.rawRegressionGS)) || Number(p.rawRegressionGS) <= 0) {
+      return { phase, confidence: "INSUFFICIENT", action: "REPEAT", message: "Not enough usable RAW weight-regression data; keep the current command and repeat an empty-basket validation.", referenceCommandMlS: null, referenceRangeMlS: null, currentCommandMlS: null };
+    }
+    const target = Number(p.desiredRealFlowGS);
+    const measured = Number(p.rawRegressionGS);
+    const err = Number(p.rawErrorPct);
+    const r2 = Number(p.rawRegressionR2);
+    const seconds = Number(p.rawRegressionSeconds);
+    const cfg = run && run.config ? run.config : {};
+    const key = phase === "stage1" ? "stage1CommandMlS" : phase === "stage2" ? "stage2CommandMlS" : "stage3CommandMlS";
+    let current = Number(cfg[key]);
+    if (!Number.isFinite(current)) current = Number(p.commandFlowAvg);
+    if (!Number.isFinite(current)) current = null;
+
+    let confidence = "LOW";
+    if (phase === "stage1") {
+      if (r2 >= 0.88 && seconds >= 2.0) confidence = "MEDIUM";
+      else if (r2 >= 0.72 && seconds >= 1.5) confidence = "LOW";
+      else confidence = "INSUFFICIENT";
+    } else {
+      if (r2 >= 0.97 && seconds >= (phase === "stage2" ? 4.0 : 5.0)) confidence = "HIGH";
+      else if (r2 >= 0.93 && seconds >= 3.0) confidence = "MEDIUM";
+      else if (r2 >= 0.85 && seconds >= 2.0) confidence = "LOW";
+      else confidence = "INSUFFICIENT";
+    }
+
+    if (!Number.isFinite(err)) {
+      return { phase, confidence: "INSUFFICIENT", action: "REPEAT", message: "Regression exists but target error could not be evaluated.", referenceCommandMlS: null, referenceRangeMlS: null, currentCommandMlS: current };
+    }
+    if (phase === "stage3") {
+      const stability = stage3StabilityDiagnostics(run);
+      if (stability && stability.stall && stability.stall.suspected && current !== null) {
+        const lo = clampCommandFlow(current * 1.10), hi = clampCommandFlow(current * 1.20);
+        return { phase, confidence: "MEDIUM", action: "STALL CHECK", message: `LOW-FLOW STALL SUSPECTED: machine flow stayed active while a ${stability.stall.windowS}s RAW-weight window fell to ${stability.stall.rawSlopeGS} g/s. Try a modestly higher static S3 command and repeat; do not rewrite the LUT from one stall run.`, currentCommandMlS: round(current,3), referenceCommandMlS: round((lo+hi)/2,3), referenceRangeMlS: [round(lo,3),round(hi,3)], ratio: round(target/measured,3), errorPct: round(err,1), stability };
+      }
+      if (stability && stability.lateDecay && current !== null) {
+        const segR2 = [stability.early, stability.mid, stability.late].map(x => Number(x && x.r2)).filter(Number.isFinite);
+        const segConfidence = segR2.length === 3 && Math.min(...segR2) >= 0.97 ? "HIGH" : "MEDIUM";
+        return { phase, confidence: segConfidence, action: "SHAPE ADVISED", message: `S3 whole-phase average can hide late decay: LATE/EARLY=${stability.lateToEarlyRatio}. Prefer the NEXT SHOT adaptive-shape suggestion over a flat static correction.`, currentCommandMlS: round(current,3), referenceCommandMlS: round(current,3), referenceRangeMlS: [round(current,3),round(current,3)], ratio: round(target/measured,3), errorPct: round(err,1), stability };
+      }
+    }
+    if (confidence === "INSUFFICIENT") {
+      return { phase, confidence, action: "REPEAT", message: "Regression quality/window is insufficient; keep the current LUT command and repeat the empty-basket validation.", referenceCommandMlS: null, referenceRangeMlS: null, currentCommandMlS: current === null ? null : round(current,3) };
+    }
+    if (Math.abs(err) <= 8) {
+      const suffix = confidence === "LOW" ? " Data confidence is low, so repeat once before treating this as confirmed." : "";
+      return { phase, confidence, action: "HOLD", message: `Within ${Math.abs(err).toFixed(1)}% of target; keep the current command.${suffix}`, referenceCommandMlS: current === null ? null : round(current,3), referenceRangeMlS: current === null ? null : [round(current,3),round(current,3)], currentCommandMlS: current === null ? null : round(current,3) };
+    }
+    if (current === null) {
+      return { phase, confidence, action: "REPEAT", message: "A regression exists, but the command used by this shot is unavailable. Repeat before changing anything.", referenceCommandMlS: null, referenceRangeMlS: null, currentCommandMlS: null };
+    }
+
+    
+    
+    
+    const rawRatio = target / measured;
+    const delta = rawRatio - 1.0;
+    let fractions = confidence === "HIGH" ? [0.60,0.85] : confidence === "MEDIUM" ? [0.40,0.65] : [0.25,0.40];
+    if (phase === "stage1") fractions = confidence === "MEDIUM" ? [0.25,0.40] : [0.15,0.25];
+    const factorA = 1.0 + delta * fractions[0];
+    const factorB = 1.0 + delta * fractions[1];
+    const factorLoCap = phase === "stage1" ? 0.80 : 0.70;
+    const factorHiCap = phase === "stage1" ? 1.20 : 1.35;
+    const boundedA = Math.max(factorLoCap, Math.min(factorHiCap, factorA));
+    const boundedB = Math.max(factorLoCap, Math.min(factorHiCap, factorB));
+    const cmdA = clampCommandFlow(current * boundedA);
+    const cmdB = clampCommandFlow(current * boundedB);
+    const range = [round(Math.min(cmdA,cmdB),3), round(Math.max(cmdA,cmdB),3)];
+    const midpoint = round((range[0] + range[1]) / 2,3);
+    const direction = err < 0 ? "higher" : "lower";
+    const qualityText = confidence === "LOW" ? "LOW confidence · manual test only; repeat the empty-basket run before treating the result as calibration." : `${confidence} confidence · still a manual test range, not an automatic correction.`;
+    const caveat = phase === "stage1" ? " S1 is startup-transient, so its range is intentionally narrower." : "";
+    return {
+      phase, confidence, action: "REFERENCE RANGE",
+      message: `A ${direction} command is indicated. ${qualityText}${caveat}`,
+      currentCommandMlS: round(current,3),
+      referenceCommandMlS: midpoint,
+      referenceRangeMlS: range,
+      ratio: round(rawRatio,3), errorPct: round(err,1)
+    };
+  }
+
+
+  function stageActuatorEvidence(run, phase) {
+    {
+      const controlled=controlLearningAssessment(run,phase);
+      if(controlled.applicable)return {...(controlled.actuator||{}),eligible:!!(controlled.actuator&&controlled.actuator.eligible),reason:controlled.actuator&&controlled.actuator.eligible?"Actual observed target/pressure quality passed":controlled.reason};
+    }
+    const cfg=run && run.config || {};
+    if (cfg.basketContext !== "coffee") return {eligible:true,reason:"Empty/legacy engineering context"};
+    const limit=finiteOrNull(cfg[phase+"PressureLimit"]);
+    const onset=phase==="stage2"?stage2CupOnset(run):null;
+    const all=(run.samples||[]).filter(x=>x.phase===phase && finiteOrNull(x.tMs)!==null&&(!onset||onset.detected&&Number(x.tMs)>=onset.startMs));
+    if (!all.length || limit===null || limit<=0) return {eligible:false,reason:"Coffee actuator evidence missing; keep command"};
+    const start=Math.min(...all.map(x=>Number(x.tMs)));
+    
+    
+    const rows=all.filter(x=>Number(x.tMs)-start>=1000);
+    let usable=0,nearLimit=0,underCommand=0;
+    for (const row of rows) {
+      const pressure=finiteOrNull(row.pressureBar), flow=finiteOrNull(row.machineFlowMlS);
+      
+      let command=phase==="stage2"?finiteOrNull(stage2EffectiveCommand(run)):finiteOrNull(row.targetFlowMlS);
+      if (phase==="stage3" && cfg.stage3Shape && cfg.stage3Shape.enabled) {
+        const frame=finiteOrNull(row.profileFrame);
+        command=frame===2?finiteOrNull(cfg.stage3Shape.earlyCommand):
+          frame===3?finiteOrNull(cfg.stage3Shape.midCommand):
+          frame===4?finiteOrNull(cfg.stage3Shape.lateCommand):null;
+      }
+      if (row.machineTelemetryValid!==true || finiteOrNull(row.machineAgeMs)===null || Number(row.machineAgeMs)>1000 || pressure===null || pressure<0 || flow===null || flow<0 || command===null || command<=0) continue;
+      usable++;
+      if (pressure>=limit*0.95) nearLimit++;
+      if (flow<command*0.70) underCommand++;
+    }
+    const pressureFraction=usable?nearLimit/usable:1;
+    const underCommandFraction=usable?underCommand/usable:1;
+    const eligible=usable>=4 && usable>=rows.length*0.60 && pressureFraction<0.35 && underCommandFraction<0.40;
+    const reason=usable<4 || usable<rows.length*0.60 ? "Coffee machine telemetry/frame coverage insufficient; keep command" :
+      pressureFraction>=0.35 ? "Pressure limiter may be active; cup-flow target may be unreachable. Keep command, do not increase pressure" :
+      underCommandFraction>=0.40 ? "Machine flow is not tracking the shot command; withhold numeric correction" :
+      "Coffee pressure and actuator quality gates passed";
+    return {eligible,reason,pressureLimitBar:limit,samples:usable,expectedSamples:rows.length,
+      pressureLimitedFraction:round(pressureFraction,3),underCommandFraction:round(underCommandFraction,3)};
+  }
+
+  
+  
+  
+  
+  
+  const S1_VOLUME_MIN_COMMAND_MLS = 1.0;
+  const S1_VOLUME_DEADBAND = 0.18;
+  const S1_VOLUME_CONTINUOUS_GS = 0.5;
+  const S1_VOLUME_TIMEOUT_S = 20;
+  function s1VolumeWindow(run) {
+    const raw = ((run && run.rawScaleSamples) || []).filter(x => Number.isFinite(Number(x.weightG)) && Number.isFinite(Number(x.tMs))).slice().sort((a, b) => Number(a.tMs) - Number(b.tMs));
+    const s2first = raw.find(x => x.phase === "stage2");
+    let win = raw.filter(x => ["stage1", "dumping", "soak", "restart_wait"].includes(x.phase) && (!s2first || Number(x.tMs) < Number(s2first.tMs)));
+    
+    let cut = win.length;
+    for (let i = 1; i < win.length; i++) if (Number(win[i - 1].weightG) - Number(win[i].weightG) >= 2) { cut = i; break; }
+    win = win.slice(0, cut);
+    const s1 = win.filter(x => x.phase === "stage1");
+    const events = (run && run.events) || [];
+    const trig = events.find(e => e.name === "stage1_weight_trigger" || e.name === "auto_release_enter" || e.name === "continuous_s1_weight_trigger");
+    const s1Start = s1.length ? Number(s1[0].tMs) : (win.length ? Number(win[0].tMs) : null);
+    const trigDelayS = trig && Number.isFinite(Number(trig.tMs)) && s1Start !== null ? (Number(trig.tMs) - s1Start) / 1000 : null;
+    const s1DurS = s1.length > 1 ? (Number(s1[s1.length - 1].tMs) - Number(s1[0].tMs)) / 1000 : null;
+    const timeout20 = s1DurS !== null && s1DurS > S1_VOLUME_TIMEOUT_S && (trigDelayS === null || trigDelayS > S1_VOLUME_TIMEOUT_S);
+    
+    let continuous = false, tailSlopeGS = null;
+    const activeRelease = run && run.config ? run.config.activeRelease !== false : true;
+    
+    if (activeRelease && win.length >= 4 && win.filter(x => x.phase === "soak").length >= 3) {
+      const tail = win.filter(x => Number(x.tMs) >= Number(win[win.length - 1].tMs) - 1000);
+      if (tail.length >= 3) {
+        const fit = linearRegression(tail.map(x => ({ x: Number(x.tMs) / 1000, y: Number(x.weightG) })));
+        if (fit) { tailSlopeGS = fit.slope; continuous = fit.slope > S1_VOLUME_CONTINUOUS_GS; }
+      }
+    }
+    return { win, s1, s1Start, trigDelayS, s1DurS, timeout20, continuous, tailSlopeGS };
+  }
+  function stage1VolumeMetrics(run) {
+    const g = s1VolumeWindow(run);
+    const win = g.win;
+    if (win.length < 8) return null;
+    const weights = win.map(x => Number(x.weightG));
+    const baseline = median(weights.slice(0, 3));
+    const maxW = Math.max(...weights);
+    const totalVol = maxW - baseline;
+    if (!(totalVol > 0)) return null;
+    let oi = -1;
+    for (let i = 1; i < win.length - 2; i++) if (weights[i] > baseline + 0.15 && weights[i + 2] > weights[i]) { oi = i; break; }
+    const trigger = Number(run && run.config && run.config.stage1Weight);
+    const ratio = Number.isFinite(trigger) && trigger > 0 ? totalVol / trigger : null;
+    return {
+      basis: "s1-volume-incl-soak", totalVolG: round(totalVol, 3), baselineG: round(baseline, 3),
+      triggerG: Number.isFinite(trigger) ? round(trigger, 3) : null,
+      ratio: ratio === null ? null : round(ratio, 4),
+      outflowStartS: oi >= 0 ? round((Number(win[oi].tMs) - Number(win[0].tMs)) / 1000, 2) : null,
+      windowS: round((Number(win[win.length - 1].tMs) - Number(win[0].tMs)) / 1000, 2),
+      samples: win.length, s1DurationS: g.s1DurS === null ? null : round(g.s1DurS, 2),
+      triggerDelayS: g.trigDelayS === null ? null : round(g.trigDelayS, 2),
+      timeout20: g.timeout20, continuous: g.continuous, tailSlopeGS: g.tailSlopeGS === null ? null : round(g.tailSlopeGS, 3)
+    };
+  }
+  function s1VolumePreviousEvidence(current) {
+    if (!current || !Array.isArray(state.adaptiveHistory)) return null;
+    for (let i = state.adaptiveHistory.length - 1; i >= 0; i--) {
+      const row = state.adaptiveHistory[i];
+      if (!row || row.runId === current.runId) continue;
+      if (!historyEvidenceAllowed(row)) continue;
+      const ev = row.s1;
+      if (!ev || ev.measurementBasis !== "s1-volume-incl-soak") continue;
+      if (Math.abs(Number(ev.targetGS) - Number(current.targetGS)) > 0.01) continue;
+      if (!(Number(ev.ratio) > 0)) continue;
+      return ev;
+    }
+    return null;
+  }
+  function stage1VolumeEvidence(run) {
+    if (!run || (run.kind || "hyperex") !== "hyperex") return null;
+    const m = stage1VolumeMetrics(run);
+    if (!m || m.timeout20 || m.continuous || m.outflowStartS === null || !(m.ratio > 0)) return null;
+    const command = Number(run.config && run.config.stage1CommandMlS);
+    if (!Number.isFinite(command) || command < 0.1) return null;
+    const ev = {
+      runId: run.runId, measurementBasis: "s1-volume-incl-soak",
+      targetGS: m.triggerG, command: round(command, 3), measured: m.totalVolG,
+      ratio: m.ratio, errorPct: round((m.ratio - 1) * 100, 1),
+      confidence: "MEDIUM", triggerDelayS: m.triggerDelayS, windowS: m.windowS, samples: m.samples
+    };
+    const prev = s1VolumePreviousEvidence(ev);
+    ev.noDropStreak = prev && Number(prev.ratio) > 0 && ev.ratio >= Number(prev.ratio) ? (Number(prev.noDropStreak) || 0) + 1 : 0;
+    return ev;
+  }
+  function s1VolumeSuggestion(current, previous, policy) {
+    const floor = S1_VOLUME_MIN_COMMAND_MLS;
+    const rule = "S1 volume: ratio→1 ideal / empirical floor; down-only ≤" + round(policy.s1[0] * 100, 1) + "% / " + policy.s1[1] + " ml/s; min command " + floor + " ml/s; stop at floor";
+    if (!current) return { usable: false, action: "REPEAT", confidence: "INSUFFICIENT", reason: "S1 volume window not measurable.", maxStepRule: rule };
+    const target = Number(current.targetGS), command = Number(current.command), ratio = Number(current.ratio);
+    const base = { targetGS: round(target, 3), currentCommandMlS: round(command, 3), measuredGS: round(Number(current.measured), 3), ratio: round(ratio, 4), errorPct: round((ratio - 1) * 100, 1), measurementBasis: "s1-volume-incl-soak", learningLevel: policy.name, maxStepRule: rule, floorMlS: floor, noDropStreak: Number(current.noDropStreak) || 0 };
+    if (!(target > 0) || !(command >= 0.1) || !(ratio > 0)) return { ...base, usable: false, action: "LIMITED / HOLD", confidence: "INSUFFICIENT", reason: "S1 volume evidence outside numeric envelope." };
+    if (command <= floor + 1e-9) return { ...base, usable: true, action: "HOLD", confidence: "MEDIUM", suggestedCommandMlS: round(command, 3), reason: "S1 command at volume floor (" + floor + " ml/s); stop adjusting (empirical storage floor)." };
+    if ((Number(current.noDropStreak) || 0) >= 2) return { ...base, usable: true, action: "HOLD", confidence: "MEDIUM", suggestedCommandMlS: round(command, 3), reason: "Ratio failed to drop for 2 consecutive cups; empirical storage floor reached, stop adjusting." };
+    if (ratio - 1 <= S1_VOLUME_DEADBAND) return { ...base, usable: true, action: "HOLD", confidence: "MEDIUM", suggestedCommandMlS: round(command, 3), reason: "S1 total-volume ratio within 18% of trigger; retain command." };
+    const prevRatio = previous && Number(previous.ratio) > 0 ? Number(previous.ratio) : null;
+    const agreement = prevRatio !== null && prevRatio > 1 && Math.abs(prevRatio - ratio) / ((prevRatio + ratio) / 2) <= 0.35 * policy.qualityWidth;
+    const modeled = agreement ? ratio * 0.8 + prevRatio * 0.2 : ratio;
+    const damping = prevRatio !== null && !agreement ? 0.5 : 1;
+    const delta = command * Math.max(-policy.s1[0], Math.min(0, (1 / modeled - 1) * policy.gain * damping));
+    const step = Math.max(-policy.s1[1], delta);
+    const value = Math.max(floor, snapCommandFlow(clampCommandFlow(command + step)));
+    if (!(value < command)) return { ...base, usable: true, action: "HOLD", confidence: "MEDIUM", suggestedCommandMlS: round(command, 3), reason: "Bounded step below driver quantum or floor; retain command." };
+    return { ...base, usable: true, action: "ADJUST", confidence: prevRatio !== null && !agreement ? "LOW" : "MEDIUM", suggestedCommandMlS: round(value, 3), previousRatio: prevRatio === null ? null : round(prevRatio, 4), reason: "S1 total-volume ratio above trigger (storage); bounded down-only correction toward empirical floor." };
+  }
+  function stage1AdaptiveEvidence(run) {
+    const controlled=stage1LiveLearning(run);if(controlled.applicable)return controlled.eligible?controlled.evidence:null;
+    if (!stageActuatorEvidence(run, "stage1").eligible) return null;
+    if (!run || (run.kind || "hyperex") !== "hyperex") return null;
+    const m = stage1StartupMetrics(run);
+    const cfg = run.config || {};
+    const target = Number(desiredRealForRunPhase(run, "stage1"));
+    const command = Number(cfg.stage1CommandMlS);
+    if (!m || m.confidence !== "MEDIUM" || !Number.isFinite(target) || target <= 0 || !Number.isFinite(command)) return null;
+    const admission=learningAdmission(run);
+    const measured = Number(m.midFlowGS), r2 = Number(m.midR2), transit = Number(m.transit20to80S), activeSeconds = Number(m.activeSeconds);
+    const transitFloor=m.fastTrajectory?admission.seconds(.55):admission.seconds(.90);
+    const activeFloor=m.fastTrajectory?admission.seconds(1.05):admission.seconds(1.25);
+    if (!Number.isFinite(measured) || measured <= 0 || !Number.isFinite(r2) || r2 < admission.r2(.90) || !Number.isFinite(transit) || transit < transitFloor || !Number.isFinite(activeSeconds) || activeSeconds < activeFloor) return null;
+    return {
+      runId: run.runId, targetGS: round(target,3), command: round(command,3), measured: round(measured,3),
+      errorPct: round((measured-target)/target*100,1), confidence:"MEDIUM", r2:round(r2,5),
+      transitS:round(transit,2), activeSeconds:round(activeSeconds,2), firstRiseDelayS:m.firstRiseDelayS,
+      fastTrajectory:!!m.fastTrajectory
+    };
+  }
+
+  
+  
+  function startupSignaturesCompatible(a,b) {
+    try {a=JSON.parse(a||"[]");b=JSON.parse(b||"[]");}catch(_){return false;}
+    if(!Array.isArray(a)||!Array.isArray(b)||![...a,...b].every(x=>Number.isFinite(x)&&x>0))return false;
+    if(!a.length||!b.length)return a.length===b.length;
+    if(Math.abs(a.length-b.length)>1)return false;
+    const close=(x,y)=>Math.abs(x/y-1)<=.15;
+    return close(a[0],b[0])&&close(a[a.length-1],b[b.length-1])&&Math.abs(a[a.length-1]/a[0]-b[b.length-1]/b[0])<=.10;
+  }
+  function stage2StartupMetrics(run) {
+    const admission=learningAdmission(run);
+    const cfg=run&&run.config||{},target=finiteOrNull(cfg.stage2Flow),base=finiteOrNull(cfg.stage2CommandMlS);
+    const result={schema:2,admissionFactor:admission.factor,basis:"windowed RAW source-time regression",eligible:false,reason:"S2 startup data insufficient",targetGS:target,baseCommandMlS:base,s1CommandMlS:finiteOrNull(cfg.stage1CommandMlS),
+      s1ControlSignature:JSON.stringify((run&&run.liveFlowTrim&&run.liveFlowTrim.trace||[]).filter(x=>x.kind==="write"&&Number(x.frame)===0).map(x=>round(Number(x.commandMlS),4)))};
+    if(!run||target===null||target<=0||base===null||base<=0)return result;
+    const rows=(run.rawScaleSamples||[]).filter(x=>x.phase==="stage2"&&Number(x.profileFrame)===1).slice().sort((a,b)=>a.tMs-b.tMs);
+    if(rows.length<12)return result;
+    const phaseStart=(run.events||[]).find(x=>x.name==="stage2_start");
+    const first=phaseStart&&Number.isFinite(phaseStart.tMs)&&phaseStart.tMs<=rows[0].tMs?phaseStart.tMs:rows[0].tMs,seen=new Set(),points=[],flows=[];let lastStamp=null,lastAt=null;
+    for(const x of rows){
+      const stamp=finiteOrNull(x.scaleTimestampSeconds),weight=finiteOrNull(x.weightG),at=finiteOrNull(x.tMs);
+      if(stamp===null||weight===null||at===null||seen.has(stamp))continue;
+      if(x.tareReset&&points.length||lastStamp!==null&&(stamp<=lastStamp||stamp-lastStamp>.6)||lastAt!==null&&at-lastAt>600){result.reason="S2 startup scale discontinuity";return result;}
+      seen.add(stamp);lastStamp=stamp;lastAt=at;points.push({x:stamp,y:weight});while(points.length&&stamp-points[0].x>.85)points.shift();
+      if(points.length<4||stamp-points[0].x<.59)continue;
+      const fit=linearRegression(points);if(fit&&fit.r2>=admission.r2(.90)&&fit.slope>=0)flows.push({at:at-first,flow:fit.slope});
+    }
+    if(flows.length<8||rows[rows.length-1].tMs-first<5000)return result;
+    const duration=rows[rows.length-1].tMs-first;
+    const peakLevel=Math.max(...flows.map(x=>x.flow))*.95;
+    const peakFlow=flows.find(x=>x.flow>=peakLevel)||flows[0];
+    const tailStart=Math.max(duration*.6,Number(peakFlow.at)+1500);
+    const plateauShort=tailStart>=duration-1200;
+    const tail=plateauShort?[]:flows.filter(x=>x.at>=tailStart),mean=tail.length?tail.reduce((s,x)=>s+x.flow,0)/tail.length:null;
+    const cv=mean>0?Math.sqrt(tail.reduce((s,x)=>s+(x.flow-mean)**2,0)/tail.length)/mean:null;
+    const crossing=level=>flows.find((x,i)=>i+2<flows.length&&flows[i+2].at-x.at<=600&&flows.slice(i,i+3).every(q=>q.flow>=level));
+    const t20=crossing(target*.2),t80=crossing(target*.8),p20=mean>0?crossing(mean*.2):null,p80=mean>0?crossing(mean*.8):null;
+    const targetRise=t20&&t80?round((t80.at-t20.at)/1000,2):null,plateauRise=p20&&p80?round((p80.at-p20.at)/1000,2):null;
+    const max=flows.reduce((m,x)=>Math.max(m,x.flow),0),previousPlan=cfg.s2StartupPlan||{};
+    Object.assign(result,{firstResponseDelayS:t20?round(t20.at/1000,2):p20?round(p20.at/1000,2):null,targetRise20to80S:targetRise,plateauRise20to80S:plateauRise,
+      rise20to80S:plateauRise===null?targetRise:plateauRise,riseBasis:plateauRise===null?"target":"observed plateau",riseReferenceGS:plateauRise===null?target:round(mean,3),
+      referenceRiseS:previousPlan.referenceRiseS||null,referenceRiseBasis:previousPlan.referenceRiseBasis||"target",referenceHoldMs:previousPlan.holdMs||null,
+      tailMeanGS:mean===null?null:round(mean,3),tailErrorPct:mean===null?null:round((mean/target-1)*100,2),tailCvPct:cv===null?null:round(cv*100,2),
+      overshootPct:round(Math.max(0,max/target-1)*100,2),pulseUsed:!!(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).find(x=>x.kind==="write"&&x.startupAction==="boost"),sampleCount:seen.size});
+    const machine=(run.samples||[]).filter(x=>x.phase==="stage2"&&Number(x.profileFrame)===1),limit=finiteOrNull(cfg.stage2PressureLimit);
+    const usable=machine.filter(x=>x.machineTelemetryValid===true&&finiteOrNull(x.machineAgeMs)!==null&&x.machineAgeMs<=600&&finiteOrNull(x.pressureBar)!==null&&x.pressureBar>=0&&finiteOrNull(x.machineFlowMlS)!==null&&finiteOrNull(x.targetFlowMlS)!==null&&x.targetFlowMlS>0);
+    const complete=(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).find(x=>x.kind==="startup-complete"&&Number(x.frame)===1);
+    const postStart=complete&&Number.isFinite(Number(complete.tMs))?Number(complete.tMs)+1000:first+1000;
+    const post=usable.filter(x=>x.tMs>=postStart),near=usable.filter(x=>x.pressureBar>=limit*.95).length,tracking=post.filter(x=>x.machineFlowMlS>=x.targetFlowMlS*.85).length;
+    const headroom=limit>0&&usable.length>=8&&usable.length>=machine.length*.8&&near/usable.length<.10&&post.length>=4&&tracking/post.length>=.9;
+    result.headroomPassed=!!headroom;result.machineCoveragePct=round(usable.length/Math.max(1,machine.length)*100,1);result.pressureLimitedPct=round(near/Math.max(1,usable.length)*100,1);
+    result.eligible=!!(rows[0].tMs-first<=600&&p20&&p80&&mean>=target*(1-admission.spread(.5))&&mean<=target*(1+admission.spread(.08))&&cv!==null&&cv<=admission.spread(.12)&&result.overshootPct<=admission.spread(8)&&headroom&&assessRunLearningIntegrity(run).eligible);
+    result.reason=rows[0].tMs-first>600?"S2 startup onset samples missing":!headroom?"S2 startup pressure or actuator headroom insufficient":plateauShort?"S2 plateau window too short":!p20||!p80?"S2 rise crossings incomplete":mean<target*(1-admission.spread(.5))||mean>target*(1+admission.spread(.08))?"S2 plateau outside startup-assist range":cv>admission.spread(.12)?"S2 tail ripple too high for startup boost":result.overshootPct>admission.spread(8)?"S2 overshoot; startup boost withheld":result.eligible?"S2 startup shape eligible":"S2 startup integrity check failed";
+    return result;
+  }
+  function startupMetricAllowed(m) {
+    if(!m)return false;
+    
+    const factor=learningPolicy().qualityWidth;
+    const statistical=m.schema===2&&m.headroomPassed===true&&["S2 tail ripple too high for startup boost","S2 overshoot; startup boost withheld","S2 plateau outside startup-assist range"].includes(m.reason);
+    const legacy=m.schema===1&&m.reason==="S2 baseline off target; learn level before startup boost";
+    
+    
+    
+    
+    return !!((m.eligible||legacy||statistical)&&Number.isFinite(m.tailMeanGS)&&m.tailMeanGS>=m.targetGS*(1-.5*factor)&&m.tailMeanGS<=m.targetGS*(1+.25*factor)&&Number.isFinite(m.tailCvPct)&&m.tailCvPct<=12*factor&&Number.isFinite(m.overshootPct)&&m.overshootPct<=8*factor);
+  }
+  function startupRise(m,basis) {
+    const v=basis==="target"?(m.schema===1?m.rise20to80S:m.targetRise20to80S):m.plateauRise20to80S;
+    return Number.isFinite(v)&&v>=0?v:null;
+  }
+  function stage2LegacyStartupPlan() {
+    const policy=learningPolicy(),plan={schema:2,enabled:false,reason:"S2 startup needs usable slow-rise evidence",holdMs:0,boostQuanta:0,sourceRunIds:[],learningLevel:policy.name};
+    if(!state.cfg.s2StartupAssist||!state.cfg.liveFlowTrimTest){plan.reason="S2 startup assist disabled";return plan;}
+    if(!state.persistentHistoryLoaded||!state.storageProbeVerified||state.persistentHistoryAvailable!==true){plan.reason="S2 startup history not verified";return plan;}
+    const base=Math.round(resolvedStageCommandFlow("stage2",state.cfg.stage2Flow)*16)/16,key=numericLearningFingerprintKey(adaptiveHistoryFingerprint()),s1=resolvedStageCommandFlow("stage1",state.cfg.stage1Flow);
+    if(base+1/16>Math.min(LIMITS.commandFlowMax,base*1.08)){plan.reason="S2 native quantum exceeds startup boost bound";return plan;}
+    if(!key){plan.reason="S2 startup history context invalid";return plan;}
+    const rows=(state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]).slice().reverse(),candidates=[];
+    for(const row of rows){
+      if(!historyLearningStatus(row).eligible||numericLearningFingerprintKey(row.fingerprint)!==key)continue;
+      const m=row.s2Startup;if(!m||![1,2].includes(m.schema)||!Number.isFinite(m.s1CommandMlS)||Math.abs(m.s1CommandMlS/s1-1)>.5||!Number.isFinite(m.baseCommandMlS)||Math.abs(m.baseCommandMlS/base-1)>.5||!(m.targetGS/state.cfg.stage2Flow>=.5&&m.targetGS/state.cfg.stage2Flow<=2))continue;
+      candidates.push({id:row.runId,m});if(candidates.length===2)break;
+    }
+    plan.sourceRunIds=candidates.map(x=>x.id);if(!candidates.length)return plan;
+    const latest=candidates[0].m;if(!startupMetricAllowed(latest)){plan.reason=latest.reason||"S2 latest comparable response does not justify startup boost";return plan;}
+    plan.s1ControlSignature=latest.s1ControlSignature||"[]";
+    if(latest.pulseUsed){
+      const basis=latest.referenceRiseBasis||"target",rise=startupRise(latest,basis),reference=latest.referenceRiseS;
+      if(rise===null||!Number.isFinite(reference)||rise>reference*.9){plan.reason="S2 startup boost benefit not demonstrated; return to baseline";return plan;}
+      return {...plan,enabled:true,reason:"S2 prior startup boost improved rise without excess ripple or overshoot",boostQuanta:1,holdMs:Math.max(400,Math.min(800,latest.referenceHoldMs||reference*250)),baseCommandMlS:base,referenceRiseS:reference,referenceRiseBasis:basis};
+    }
+    const basis=latest.schema===2&&startupRise(latest,"observed plateau")!==null?"observed plateau":"target",a=startupRise(latest,basis);
+    if(a===null||a<=(policy.rank===3?1:1.2)){plan.reason="S2 rise is already steep enough; hold startup baseline";return plan;}
+    const single=policy.single||policy.largeSingle&&a>=2.5&&latest.tailCvPct<=8;
+    if(single)return {...plan,enabled:true,reason:"S2 clean slow rise; learning policy permits bounded single-shot startup trial",boostQuanta:1,holdMs:400,baseCommandMlS:base,referenceRiseS:a,referenceRiseBasis:basis};
+    if(candidates.length===1){plan.reason="S2 startup needs a second comparable slow-rise shot";return plan;}
+    const previous=candidates[1].m,b=startupRise(previous,basis);
+    if(!startupMetricAllowed(previous)||previous.pulseUsed||b===null||b<=1.2){plan.reason="S2 latest comparable responses do not justify a startup boost";return plan;}
+    if(!startupSignaturesCompatible(plan.s1ControlSignature,previous.s1ControlSignature||"[]")){plan.reason="S2 startup preceding S1 trajectories differ";return plan;}
+    if(Math.abs(a-b)/((a+b)/2)>.35){plan.reason="S2 startup rise varies across shots";return plan;}
+    return {...plan,enabled:true,reason:"S2 two clean slow-rise shots; one-quantum bounded startup boost",boostQuanta:1,holdMs:Math.round(Math.max(400,Math.min(800,(a+b)/2*250))),baseCommandMlS:base,referenceRiseS:(a+b)/2,referenceRiseBasis:basis};
+  }
+  function validatedS2RefillSettings(raw,strict) {
+    const input=raw===null||raw===undefined?{}:raw;
+    if(typeof input!=="object"||Array.isArray(input))throw new Error("S2 refill settings must be an object");
+    if(strict&&!S2_REFILL_BASES.includes(input.basis))throw new Error("S2 refill basis changed; reload current curve");
+    if(input.basis!==undefined&&!S2_REFILL_BASES.includes(input.basis))throw new Error("S2 refill basis invalid");
+    const out={basis:input.basis===undefined?"pump-command":input.basis,floodMode:input.floodMode===undefined?"fixed":input.floodMode};
+    if(!S2_REFILL_FLOOD_MODES.includes(out.floodMode))throw new Error("S2 refill parameter outside allowed range: floodMode");
+    for(const key of Object.keys(S2_REFILL_DEFAULTS)){
+      const value=input[key]===undefined?S2_REFILL_DEFAULTS[key]:input[key],[lo,hi,step]=S2_REFILL_LIMITS[key];
+      if(typeof value!=="number"||!Number.isFinite(value)||value<lo||value>hi||Math.abs((value-lo)/step-Math.round((value-lo)/step))>1e-6)throw new Error("S2 refill parameter outside allowed range: "+key);
+      out[key]=value;
+    }
+    return out;
+  }
+  function validatedRefillPrevious(raw) {
+    if(!raw||typeof raw!=="object"||typeof raw.at!=="string"||!Number.isFinite(Date.parse(raw.at)))return null;
+    try{return {at:raw.at,before:validatedS2RefillSettings(raw.before,true),after:validatedS2RefillSettings(raw.after,true)};}catch(_){return null;}
+  }
+  function refillLastShotSnapshot() {
+    const local=state.diagnosticLast&&state.diagnosticLast.kind!=="calibration"?state.diagnosticLast:null;
+    const saved=(state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]).slice(-1)[0];
+    const run=local||saved;if(!run)return null;
+    const plan=run.config&&run.config.s2StartupPlan||run.liveFlowTrim&&run.liveFlowTrim.s2StartupPlan;
+    if(!plan)return {runId:run.runId,startedAt:run.startedAt||null,available:false};
+    const write=(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).find(x=>x.kind==="write"&&x.startupAction==="boost");
+    return {runId:run.runId,startedAt:run.startedAt||null,available:true,settings:plan.settings?{...plan.settings}:null,
+      basis:plan.settings&&plan.settings.basis||"legacy-cup-target",baseCommandMlS:plan.baseCommandMlS,
+      plannedBoostMlS:plan.boostCommandMlS,plannedHoldingMlS:plan.returnCommandMlS==null?plan.baseCommandMlS:plan.returnCommandMlS,executedBoostMlS:write?write.commandMlS:null,
+      execution:run.liveFlowTrim&&run.liveFlowTrim.startupExecution||null,adaptive:plan.adaptiveFlood||null,timeline:s2RefillTimeline(run)};
+  }
+  
+  
+  
+  
+  
+  function refillFloodFloor(){return Math.min(LIMITS.commandFlowMax,Math.max(LIMITS.commandFlowMin,Math.round(S2_REFILL_FLOOD_MIN_MLS*16)/16));}
+  
+  
+  
+  
+  
+  
+  
+  
+  function soakWettingObservation(run) {
+    const raw=run&&Array.isArray(run.rawScaleSamples)?run.rawScaleSamples:null;
+    if(!raw||!raw.length)return {available:false,reason:"no-samples"};
+    const soak=raw.filter(x=>x&&x.phase==="soak"&&Number.isFinite(Number(x.tMs)));
+    if(soak.length<S2_REFILL_SOAK_MIN_SAMPLES)return {available:false,reason:"soak-samples",samples:soak.length};
+    const t0=Number(soak[0].tMs);
+    const head=soak.slice(0,5).map(x=>Number(x.pressureBar)).filter(Number.isFinite);
+    if(head.length<3)return {available:false,reason:"soak-pressure-head",samples:soak.length};
+    const p0=median(head);
+    if(!(p0>S2_REFILL_SOAK_MIN_P0_BAR))return {available:false,reason:"soak-pressure-low",samples:soak.length,p0Bar:round(p0,3)};
+    const at=soak.find(x=>Number(x.tMs)-t0>=S2_REFILL_VI_WINDOW_S*1000);
+    if(!at)return {available:false,reason:"soak-window",samples:soak.length,p0Bar:round(p0,3)};
+    const p2=Number(at.pressureBar);
+    if(!Number.isFinite(p2))return {available:false,reason:"soak-pressure-window",samples:soak.length,p0Bar:round(p0,3)};
+    
+    
+    const eTh=p0*Math.exp(-1);
+    const tau=soak.find(x=>Number.isFinite(Number(x.pressureBar))&&Number(x.pressureBar)<=eTh);
+    return {available:true,samples:soak.length,windowS:S2_REFILL_VI_WINDOW_S,
+      soakP0Bar:round(p0,3),soakP2sBar:round(p2,3),soakP2sRatio:round(p2/p0,4),
+      soakTauES:tau?round((Number(tau.tMs)-t0)/1000,3):null,
+      soakSeconds:round((Number(soak[soak.length-1].tMs)-t0)/1000,2)};
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  function refillAdaptiveFloodDecision(run,platformMlS,settings,headroomMlS) {
+    const holdCfg=Number(settings&&settings.maxDurationMs)>0?Number(settings.maxDurationMs):S2_REFILL_DEFAULTS.maxDurationMs;
+    const riseTarget=S2_REFILL_RISE_TARGET_S;
+    const fRise=S2_REFILL_RR_QUANTILE/riseTarget;
+    const platform=Number.isFinite(Number(platformMlS))&&Number(platformMlS)>0?Number(platformMlS):null;
+    const fc=platform===null?0:S2_REFILL_FC_FACTOR*platform;
+    const obs=soakWettingObservation(run);
+    const signaled=!!(obs&&obs.available===true);
+    const viExtrapolated=signaled&&(Number(obs.soakP2sRatio)<S2_REFILL_VI_RATIO_MIN||Number(obs.soakP2sRatio)>S2_REFILL_VI_RATIO_MAX);
+    const viLaw=signaled
+      ?Math.min(S2_REFILL_VI_MAX_ML,Math.max(S2_REFILL_VI_MIN_ML,S2_REFILL_VI_A+S2_REFILL_VI_B*Number(obs.soakP2sRatio)))
+      :S2_REFILL_VI_FALLBACK_ML;
+    
+    
+    
+    
+    
+    let vi=viLaw,viLearning=null,viUsedSource=signaled?"law":"cold-start-fallback";
+    if(signaled&&!viExtrapolated){
+      const sug=viMemorySuggestion(run);
+      if(sug){
+        viLearning={bandLo:sug.bandLo,bandHi:sug.bandHi,routedBy:sug.routedBy,viLearnedMl:sug.vi,n:sug.n,
+          confidence:sug.confidence,fpKeyMatch:sug.fpKeyMatch,deviationPct:sug.deviationPct,
+          censoredN:sug.censoredN,lastRunId:sug.lastRunId,blend:0,floored:false};
+        let blended=viLaw;
+        if(sug.fpKeyMatch&&sug.confidence==="HIGH"){blended=sug.vi;viUsedSource="learned-high";viLearning.blend=1;}
+        else if(sug.fpKeyMatch&&sug.confidence==="MEDIUM"){blended=0.5*sug.vi+0.5*viLaw;viUsedSource="learned-medium-blend";viLearning.blend=0.5;}
+        
+        
+        
+        vi=Math.max(viLaw,blended);
+        if(blended<viLaw){viLearning.floored=true;viUsedSource=viUsedSource+"-floored";}
+        vi=Math.min(S2_VI_LEARN_USED_MAX,Math.max(S2_VI_LEARN_USED_MIN,vi));
+      }
+    }
+    const budgetS=Math.max(0.3,holdCfg/1000+S2_REFILL_CUTOFF_LEAD_S-riseTarget);
+    const fBudget=fc+vi/budgetS;
+    const lo=refillFloodFloor(),hi=LIMITS.commandFlowMax;
+    const clampFlood=v=>{const s=snapCommandFlow(Math.min(hi,Math.max(lo,v)));return Number.isFinite(s)?s:snapCommandFlow(S2_REFILL_FLOOD_COLD_MLS);};
+    
+    
+    
+    
+    
+    
+    const headroom=Number.isFinite(Number(headroomMlS))&&Number(headroomMlS)>0?Number(headroomMlS)+1/16:0;
+    let flood=signaled?clampFlood(Math.max(fRise,fBudget)):clampFlood(Math.max(S2_REFILL_FLOOD_COLD_MLS,headroom));
+    let binding=signaled?(fRise>=fBudget?"rise-target":"hold-budget"):"cold-start";
+    const needAt=f=>vi/Math.max(0.2,f-fc)+S2_REFILL_RR_MEDIAN/f-S2_REFILL_CUTOFF_LEAD_S;
+    let needed=needAt(flood);
+    const round100=s=>Math.min(S2_REFILL_HOLD_MS_MAX,Math.max(S2_REFILL_HOLD_MS_MIN,Math.ceil((s+S2_REFILL_HOLD_MARGIN_S)*10)*100));
+    let holdMs,holdAdjusted=null;
+    if(needed<=holdCfg/1000){
+      
+      
+      
+      holdMs=Math.min(holdCfg,round100(needed));
+      if(holdMs!==holdCfg)holdAdjusted="shrunk";
+    }else{
+      
+      holdMs=Math.max(holdCfg,round100(needed));
+      holdAdjusted="raised";
+      if(needed>S2_REFILL_HOLD_MS_MAX/1000){
+        flood=clampFlood(hi);binding="envelope-max";needed=needAt(flood);
+        holdMs=S2_REFILL_HOLD_MS_MAX;
+      }
+    }
+    const infeasible=needed>holdMs/1000;
+    const boostVolumeMl=round(flood*holdMs/1000,1);
+    const s2w=Number(state.cfg&&state.cfg.stage2Weight),s1w=Number(state.cfg&&state.cfg.stage1Weight);
+    const weightBudgetG=Number.isFinite(s2w)&&Number.isFinite(s1w)&&s2w>s1w?round(s2w-s1w,1):null;
+    return {floodMlS:flood,holdMs:holdMs,holdMsConfigured:holdCfg,holdAdjusted:holdAdjusted,
+      fRiseMlS:round(fRise,3),fBudgetMlS:round(fBudget,3),binding:binding,
+      riseTargetS:riseTarget,rrQuantile:S2_REFILL_RR_QUANTILE,rrMedian:S2_REFILL_RR_MEDIAN,
+      cutoffLeadS:S2_REFILL_CUTOFF_LEAD_S,fcFactor:S2_REFILL_FC_FACTOR,fcMlS:round(fc,3),platformMlS:platform,
+      viMl:round(vi,2),viLawMl:round(viLaw,2),viSource:signaled?"soak-p2s-ratio":"cold-start-fallback",
+      viUsedSource,viLearning,viExtrapolated,
+      viRatioSupport:[S2_REFILL_VI_RATIO_MIN,S2_REFILL_VI_RATIO_MAX],
+      predictedWetLatencyS:round(Math.max(0,needed+S2_REFILL_CUTOFF_LEAD_S-S2_REFILL_RR_MEDIAN/flood),3),
+      predictedRiseS:round(S2_REFILL_RR_MEDIAN/flood,3),predictedBoostToBleedS:round(needed,3),
+      budgetInfeasible:infeasible,
+      budgetInfeasibleReason:infeasible?"predicted wetting + rise "+round(needed,2)+" s exceeds holdMs "+holdMs+" ms at flood "+flood.toFixed(3)+"; puck outside the calibrated range, needs a longer watchdog or a coarser grind":null,
+      boostVolumeMl:boostVolumeMl,boostVolumeWarnMl:S2_REFILL_BOOST_VOLUME_WARN_ML,
+      boostVolumeWarn:boostVolumeMl>S2_REFILL_BOOST_VOLUME_WARN_ML,
+      s2WeightBudgetG:weightBudgetG,observation:obs};
+  }
+  
+  
+  
+  
+  
+  
+  function adaptiveReplanAtStage2Entry(t) {
+    t.startup.adaptiveReplanAt=Date.now();
+    const before=t.startup.plan;
+    if(!before||before.strategy!=="refill-85")return;
+    const obs=soakWettingObservation(t.run);
+    
+    
+    state.hecSoakSource=hecSoakSourceFromObs(t.run,obs);
+    const forecast=refillAdaptiveFloodDecision(t.run,Number(before.controlBaseMlS),before.settings||{},Number(before.refillPumpBaseMlS));
+    const curFlood=Number(before.floodCommandMlS)>0?Number(before.floodCommandMlS):forecast.floodMlS;
+    const curNeed=forecast.viMl/Math.max(0.2,curFlood-forecast.fcMlS)+S2_REFILL_RR_MEDIAN/Math.max(0.2,curFlood)-S2_REFILL_CUTOFF_LEAD_S;
+    
+    
+    liveTrimRecord("soak-wetting",{available:!!(obs&&obs.available),reason:obs&&obs.reason||null,
+      soakP0Bar:obs&&obs.soakP0Bar!=null?obs.soakP0Bar:null,
+      soakP2sRatio:obs&&obs.soakP2sRatio!=null?obs.soakP2sRatio:null,
+      soakTauES:obs&&obs.soakTauES!=null?obs.soakTauES:null,
+      samples:obs&&obs.samples||0,floodMode:before.floodMode||null,applied:before.floodMode==="adaptive",
+      viMl:forecast.viMl,viSource:forecast.viSource,fcMlS:forecast.fcMlS,
+      viLawMl:forecast.viLawMl,viUsedSource:forecast.viUsedSource,viLearning:forecast.viLearning,
+      lawFloodMlS:forecast.floodMlS,lawHoldMs:forecast.holdMs,lawBinding:forecast.binding,
+      currentFloodMlS:round(curFlood,4),predictedBoostToBleedS:round(curNeed,3),
+      configuredHoldMs:Number(before.holdMs)||null,
+      fitsConfiguredHoldMs:curNeed<=(Number(before.holdMs)||0)/1000,
+      budgetInfeasible:forecast.budgetInfeasible===true});
+    
+    
+    
+    if(before.floodMode!=="adaptive")return;
+    const mode=t.algorithmIntervention||normalizeAlgorithmIntervention(state.algorithmIntervention);
+    const plan=stage2StartupPlan(mode,t.run);
+    if(!plan||plan.strategy!=="refill-85"||!plan.enabled){
+      
+      
+      liveTrimRecord("adaptive-replan-skipped",{reason:plan&&plan.reason||"rebuilt plan unavailable"});
+      return;
+    }
+    const changed=plan.floodCommandMlS!==before.floodCommandMlS||plan.holdMs!==before.holdMs;
+    t.startup.plan=plan;t.run.config.s2StartupPlan=plan;t.report.s2StartupPlan=plan;
+    t.report.startupExecution={status:"armed",reason:plan.reason};
+    liveTrimRecord("adaptive-replan",{changed:changed,
+      floodMlS:plan.floodCommandMlS,previousFloodMlS:before.floodCommandMlS,
+      holdMs:plan.holdMs,previousHoldMs:before.holdMs,
+      adaptive:plan.adaptiveFlood||null});
+    if(plan.adaptiveFlood&&plan.adaptiveFlood.budgetInfeasible===true){
+      liveTrimRecord("refill-budget-infeasible",{reason:plan.adaptiveFlood.budgetInfeasibleReason,
+        floodMlS:plan.floodCommandMlS,holdMs:plan.holdMs,
+        predictedBoostToBleedS:plan.adaptiveFlood.predictedBoostToBleedS,
+        viMl:plan.adaptiveFlood.viMl,viSource:plan.adaptiveFlood.viSource});
+      log("S2 refill budget infeasible: "+plan.adaptiveFlood.budgetInfeasibleReason);
+    }
+  }
+
+  function currentS2RefillSettings(){let out;try{out=validatedS2RefillSettings(state.s2RefillSettings);}catch(_){out=validatedS2RefillSettings(null);}if(state.cfg&&state.cfg.s2RefillBoundedModel){out={...out};out.targetPercent=100;if(!state.s2RefillSettings||!S2_REFILL_BASES.includes(state.s2RefillSettings.basis))out.basis="cup-target";}
+    if(out.floodMaxMlS<refillFloodFloor())out.floodMaxMlS=refillFloodFloor();
+    
+    
+    
+    
+    
+    
+    
+    
+    return out;}
+  
+  
+  
+  
+  function s2RefillPumpEstimate(base,targetGS) {
+    const prior=state.diagnosticLast;
+    if(!prior||!trustedAdaptiveRun(prior))return null;
+    if(numericLearningFingerprintKey(prior.config&&prior.config.adaptiveFingerprint)!==numericLearningFingerprintKey(adaptiveHistoryFingerprint()))return null;
+    const q=controlOutputQuality(prior,"stage2"),raw=phaseRawSamples(prior,"stage2");
+    if(!q.available||!raw.length)return null;
+    const lastWrite=(prior.liveFlowTrim&&prior.liveFlowTrim.trace||[]).filter(x=>x.kind==="write"&&Number(x.frame)===1).slice(-1)[0];
+    const previousCommand=lastWrite?Number(lastWrite.commandMlS):Number(prior.config.stage2CommandMlS);
+    if(!(previousCommand>0))return null;
+    const first=Number(raw[0].tMs),last=Number(raw[raw.length-1].tMs),limit=Number(prior.config.stage2PressureLimit);
+    const tail=(prior.samples||[]).filter(x=>x.phase==="stage2"&&Number(x.tMs)>=first+(last-first)*.4);
+    const fresh=tail.filter(x=>x.machineTelemetryValid===true&&Number(x.machineAgeMs)<=600&&Number(x.machineFlowMlS)>=previousCommand*.85&&Number(x.machineFlowMlS)<=previousCommand*1.15&&Number(x.pressureBar)<limit*.9);
+    
+    
+    if(!(q.tailRippleCVPct<=25)||!(q.tailMeanGS>=targetGS*.5&&q.tailMeanGS<=targetGS*1.5))return null;
+    if(fresh.length<8||fresh.length<tail.length*.8)return null;
+    const estimate=previousCommand*targetGS/Math.max(.1,q.tailMeanGS);
+    if(!Number.isFinite(estimate)||estimate<LIMITS.commandFlowMin||estimate>LIMITS.commandFlowMax)return null;
+    return {command:estimate,basis:"target-cup-flow observed-tail local model",referenceTailGS:round(q.tailMeanGS,3),sourceRunId:prior.runId,previousCommandMlS:round(previousCommand,4),rippleCVPct:round(q.tailRippleCVPct,2),rippleDamped:q.tailRippleCVPct>=12};
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  function platformMemoryGain(gm){
+    if(!gm||!(Number(gm.r)>0))return null;
+    const immature=!gm.local&&gm.bandMatched&&(Number(gm.bandN)<3||gm.bandProvisional===true);
+    const r=immature&&Number(gm.smoothedR)>0?Number(gm.smoothedR):Number(gm.r);
+    return Number.isFinite(r)&&r>0?r:null;
+  }
+  
+  
+  
+  
+  
+  
+  function ffKQualified(gain){
+    if(!gain||!(Number(gain.k)>0))return false;
+    const ok=gain.samples>=3?gain.spread<=.12:gain.samples===2&&gain.spread<=.05;
+    if(!ok)return false;
+    return !gain.mixedBand||gain.spread<=.05;
+  }
+  function s2FfPlatformCandidate(targetGS){
+    if(!(Number(targetGS)>0))return null;
+    const prior=state.diagnosticLast||state.diagnosticCurrent;
+    const gain=stageGainEstimate("s2",prior,prior?stage2AdaptiveEvidence(prior):null);
+    if(!ffKQualified(gain))return null;
+    const command=snapCommandFlow(clampCommandFlow(Number(targetGS)/Number(gain.k)));
+    if(!(Number.isFinite(command)&&command>0))return null;
+    return {commandMlS:command,k:Number(gain.k),spread:gain.spread,samples:gain.samples,mixedBand:!!gain.mixedBand};
+  }
+  
+  
+  
+  
+  
+  
+  
+  function adaptiveEstimateFallback(node,targetGS){
+    if(!node||!(Number(targetGS)>0))return null;
+    const gm=node.gainMemory;
+    if(gm&&gm.confidence==="HIGH"){
+      const r=platformMemoryGain(gm);
+      if(r){
+        const command=snapCommandFlow(clampCommandFlow(Number(targetGS)/r));
+        if(Number.isFinite(command)&&command>0)return {commandMlS:command,source:"gain-memory"};
+      }
+    }
+    const ff=node.gainFeedForward;
+    if(ff&&ff.eligible===true&&Number(ff.k)>0&&Number(ff.targetGS)>0&&(!ff.mixedBand||Number(ff.spread)<=.05)){
+      const command=snapCommandFlow(clampCommandFlow(Number(ff.targetGS)/Number(ff.k)));
+      if(Number.isFinite(command)&&command>0)return {commandMlS:command,source:"feed-forward-k"};
+    }
+    return null;
+  }
+  function boundedRefillControlBase(targetGS,profileBase,observedBase) {
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    const gm=liveTrimMemoryCandidate("stage2",state.diagnosticLast||state.diagnosticCurrent);
+    const gmR=platformMemoryGain(gm);
+    const gmCommand=gmR&&Number(targetGS)>0?snapCommandFlow(Number(targetGS)/gmR):null;
+    
+    
+    
+    
+    const ff=s2FfPlatformCandidate(targetGS);
+    if(ff){
+      let command=ff.commandMlS;
+      if(gmCommand){const hi=Math.max(gmCommand*1.25,gmCommand+0.35),lo=Math.min(gmCommand*0.75,gmCommand-0.35);command=snapCommandFlow(clampCommandFlow(Math.max(lo,Math.min(hi,command))));}
+      if(command)return {commandMlS:command,r:Number(targetGS)/command,source:"feed-forward-k",bucketId:gm?gm.bucketId:null};
+    }
+    if(gmCommand)return {commandMlS:gmCommand,r:Number(targetGS)/gmCommand,source:"gain-memory",bucketId:gm.bucketId};
+    
+    
+    
+    if(Number.isFinite(Number(observedBase))&&Number(observedBase)>0){const observedCommand=snapCommandFlow(Number(observedBase));if(observedCommand)return {commandMlS:observedCommand,r:Number(targetGS)/observedCommand,source:"observed-tail"};}
+    const command=snapCommandFlow(Number(profileBase));
+    if(command)return {commandMlS:command,r:Number(targetGS)/command,source:"profile-base"};
+    const mapped=Number.isFinite(Number(targetGS))?mappedCommandForReal(targetGS):null;
+    if(Number.isFinite(Number(mapped))&&Number(mapped)>0){const mappedCommand=snapCommandFlow(mapped);if(mappedCommand)return {commandMlS:mappedCommand,r:Number(targetGS)/mappedCommand,source:"lut"};}
+    return {commandMlS:Number(profileBase),r:Number(targetGS)/Number(profileBase),source:"profile-base"};
+  }
+  
+  
+  
+  
+  
+  
+  function boundedRefillCommand(t) {
+    const plan=t&&t.startup&&t.startup.plan;
+    if(!plan||plan.boundedModel!==true)return plan?plan.boostCommandMlS:null;
+    const platform=Number(plan.controlBaseMlS);
+    const target=Number(plan.refillTargetGS||(t.run&&t.run.config&&t.run.config.stage2Flow));
+    const flood=Number(plan.floodCommandMlS)>0?Number(plan.floodCommandMlS):LIMITS.commandFlowMax;
+    const r=Number(plan.controlGain)>0?Number(plan.controlGain):(platform>0?target/platform:1);
+    if(!(platform>0)||!(flood>0)||!(target>0))return null;
+    const estimate=s2RefillFlowEstimate(t);
+    const cutoff=target*Number(plan.cutoffFraction||.85);
+    let wanted;
+    if(!estimate){
+      
+      
+      
+      
+      
+      
+      wanted=flood;
+    }else{
+      const predicted=Math.max(0,Number(estimate.predicted));
+      
+      
+      
+      
+      
+      
+      wanted=plan.floodMode==="adaptive"
+        ?Math.max(platform,platform+(target-predicted)/Math.max(.15,r))
+        :(predicted<cutoff?flood:platform+(target-predicted)/Math.max(.15,r));
+    }
+    
+    
+    
+    let out=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(flood,wanted)));
+    
+    
+    
+    const previous=Number(t.startup&&t.startup.lastBoostCommandMlS);
+    if(out===null)return null;
+    if(Number.isFinite(previous)&&previous>LIMITS.commandFlowMin)out=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(out,previous)));
+    return out;
+  }
+  
+  
+  function s2HoldingReference(base,boost) {
+    const out={commandMlS:base,basis:"verified profile base; no clean holding reference",sourceRunId:null};
+    const run=state.diagnosticLast;if(!run||!trustedAdaptiveRun(run))return out;
+    const q=controlOutputQuality(run,"stage2"),raw=phaseRawSamples(run,"stage2");
+    if(!q.available||!raw.length||q.tailRippleCVPct>25||q.tailMeanGS<state.cfg.stage2Flow*.5||q.tailMeanGS>state.cfg.stage2Flow*1.5)return out;
+    const start=Number(raw[0].tMs),end=Number(raw[raw.length-1].tMs),writes=run.liveFlowTrim&&run.liveFlowTrim.trace||[];
+    const known=[Number(run.config.stage2CommandMlS),...writes.filter(x=>x.kind==="write"&&Number(x.frame)===1).map(x=>Number(x.commandMlS))];
+    const tail=(run.samples||[]).filter(x=>x.phase==="stage2"&&Number(x.tMs)>=start+(end-start)*.4);
+    const good=tail.filter(x=>x.machineTelemetryValid===true&&Number(x.machineAgeMs)<=600&&Number(x.pressureBar)<Number(run.config.stage2PressureLimit)*.9&&known.some(v=>Math.abs(Number(x.targetFlowMlS)-v)<.02)&&Number(x.machineFlowMlS)>=Number(x.targetFlowMlS)*.85&&Number(x.machineFlowMlS)<=Number(x.targetFlowMlS)*1.15);
+    if(good.length<8||good.length<tail.length*.8)return out;
+    const previous=median(good.map(x=>Number(x.targetFlowMlS)));if(!(previous>0))return out;
+    
+    
+    
+    const requested=previous*(1+(q.tailRippleCVPct>=12?.25:.5)*(state.cfg.stage2Flow/q.tailMeanGS-1));
+    const command=Math.floor((Math.min(boost,base*1.2,8,Math.max(base,requested))+1e-9)*16)/16;
+    return {commandMlS:Math.max(base,command),basis:"bounded settled-cup holding reference",sourceRunId:run.runId,referenceTailGS:q.tailMeanGS};
+  }
+  function disabledS2StartupPlan(reason) {
+    const base = Math.round(resolvedStageCommandFlow("stage2", state.cfg.stage2Flow) * 16) / 16;
+    return { schema: 5, strategy: "none", enabled: false, reason, baseCommandMlS: base };
+  }
+  function stage2StartupPlan(mode,run) {
+    const intervention = normalizeAlgorithmIntervention(mode === undefined ? state.algorithmIntervention : mode);
+    if (intervention === "off") return disabledS2StartupPlan("算法介入已关闭：仅检测，不执行补水或起步增强");
+    if (intervention === "hec") return disabledS2StartupPlan("HEC：补水由 APK 负责；握手失败时插件接管重建本计划");
+    if(!activeReleaseEnabled(state.cfg))return stage2LegacyStartupPlan();
+    const settings=currentS2RefillSettings();
+    const cupTarget=Number(state.cfg.stage2Flow);
+    const raw=resolvedStageCommandFlow("stage2",state.cfg.stage2Flow),base=Math.round(raw*16)/16;
+    const estimate=settings.basis==="cup-target"&&cupTarget>0?s2RefillPumpEstimate(base,cupTarget):null;
+    const bounded=state.cfg.s2RefillBoundedModel===true;
+    const control=bounded&&settings.basis==="cup-target"?boundedRefillControlBase(cupTarget,base,estimate&&estimate.command):null;
+    const refillBase=bounded?(control?Number(control.commandMlS):base):(estimate?estimate.command:base);
+    const controlBase=refillBase;
+    const controlGain=bounded?(control&&Number(control.r)>0?Number(control.r):(cupTarget>0?cupTarget/refillBase:null)):null;
+    const controlSource=bounded?(control?control.source:(settings.basis==="cup-target"?"profile-base":"base")):"legacy";
+    
+    
+    
+    
+    
+    
+    const floodMode=bounded&&settings.floodMode==="adaptive"?"adaptive":"fixed";
+    const floodFixedMlS=bounded?Math.max(refillFloodFloor(),Math.min(LIMITS.commandFlowMax,Math.round(settings.floodMaxMlS*16)/16)):null;
+    
+    
+    
+    
+    
+    
+    
+    const wetting=bounded?refillAdaptiveFloodDecision(run,control?Number(control.commandMlS):NaN,settings,refillBase):null;
+    const applyAdaptive=!!(wetting&&floodMode==="adaptive");
+    if(wetting)wetting.applied=applyAdaptive;
+    const adaptiveColdMlS=bounded
+      ?(applyAdaptive?wetting.floodMlS:Math.max(refillFloodFloor(),Math.min(LIMITS.commandFlowMax,S2_REFILL_FLOOD_COLD_MLS)))
+      :LIMITS.commandFlowMax;
+    const floodCommandMlS=bounded?(floodMode==="adaptive"?adaptiveColdMlS:floodFixedMlS):Math.min(LIMITS.commandFlowMax,Math.floor(refillBase*1.6*16)/16);
+    
+    
+    
+    const holdMs=applyAdaptive?wetting.holdMs:settings.maxDurationMs;
+    const plan={schema:5,strategy:"refill-85",enabled:false,reason:"S2 refill assist disabled",baseCommandMlS:base,
+      refillPumpBaseMlS:round(refillBase,4),controlBaseMlS:round(controlBase,4),controlGain,controlSource,
+      boundedModel:bounded,floodCommandMlS:round(floodCommandMlS,4),floodMode,floodMaxMlS:floodMode==="fixed"?round(floodFixedMlS,4):null,refillTargetFraction:settings.targetPercent/100,cutoffFraction:settings.cutoffPercent/100,
+      
+      
+      
+      
+      startDelayMs:settings.startDelayMs,predictionSeconds:1.5,holdMs:holdMs,adaptiveFlood:wetting,dispatchWindowMs:settings.startDelayMs+4000,approachMs:settings.approachMs,settings:{...settings},
+      sourceRunIds:estimate?[estimate.sourceRunId]:[],learningLevel:learningPolicy().name};
+    if(settings.basis==="cup-target"){plan.refillTargetGS=round(cupTarget,3);if(estimate)plan.referenceTailGS=estimate.referenceTailGS;plan.commandBasis=estimate?estimate.basis:"target-cup-flow base fallback (no observed tail)";}
+    if(!state.cfg.s2StartupAssist||!state.cfg.liveFlowTrimTest)return plan;
+    if(!Number.isFinite(base)||base<LIMITS.commandFlowMin||base>LIMITS.commandFlowMax){plan.reason="S2 refill base command invalid";return plan;}
+    if(!Number.isFinite(refillBase)||refillBase<LIMITS.commandFlowMin||refillBase>LIMITS.commandFlowMax){plan.reason="S2 refill target estimate invalid";return plan;}
+    
+    
+    
+    
+    
+    const flowCutoffGS=cupTarget*settings.cutoffPercent/100;
+    const requested=bounded?floodCommandMlS:refillBase*settings.targetPercent/100;
+    if(settings.basis!=="cup-target")plan.commandBasis="base-pump-command multiplier";
+    
+    
+    
+    
+    
+    const ceiling=floodCommandMlS;
+    const boost=Math.floor((Math.min(ceiling,Math.max(refillBase,requested))+1e-9)*16)/16;
+    plan.flowCutoffGS=round(flowCutoffGS,3);
+    
+    
+    
+    
+    
+    
+    
+    
+    plan.requestedCommandMlS=round(requested,4);
+    plan.floodAtSafetyEnvelope=bounded&&boost>=LIMITS.commandFlowMax;
+    plan.commandLimited=bounded?false:requested>ceiling;
+    plan.controlMaxMlS=bounded?round(boost,4):null;
+    plan.refillMaxCommandMlS=boost;
+    if(boost<(bounded?refillBase:base)+1/16){plan.reason=requested<=refillBase?"S2 refill target needs no extra command":"S2 refill has no command headroom";return plan;}
+    
+    
+    
+    
+    
+    
+    
+    
+    const trustedControl=!!(control&&(control.source==="gain-memory"||control.source==="observed-tail"||control.source==="feed-forward-k"));
+    const holdingCommand=bounded&&settings.basis==="cup-target"?(trustedControl?round(refillBase,4):Math.max(round(refillBase,4),base)):null;
+    
+    
+    
+    const holding=bounded&&settings.basis==="cup-target"?{commandMlS:holdingCommand,basis:"target/r platform handoff, not below the running S2 command"+(controlGain?" (r="+round(controlGain,3)+")":""),sourceBucketId:control&&control.bucketId||null}:s2HoldingReference(base,boost);
+    
+    
+    
+    const bleedCommandMlS=bounded&&settings.basis==="cup-target"?snapCommandFlow(Math.max(LIMITS.commandFlowMin,holdingCommand*S2_REFILL_BLEED_FRACTION)):null;
+    const basisReason=bounded?(settings.basis==="cup-target"?"S2 refill bounded by target-equivalent command; targetPercent is an upper bound":"S2 refill bounded by profile command; targetPercent is an upper bound"):(settings.basis==="cup-target"?(estimate?"S2 refill aims at the S2 cup target using the observed tail":"S2 refill aims at the S2 cup target; profile base pump command, no clean observed tail"):"S2 configurable refill");
+    return {...plan,returnCommandMlS:holding.commandMlS,bleedCommandMlS,bleedMs:S2_REFILL_BLEED_MS,holdingReference:holding,enabled:true,reason:basisReason+"; predicted target or safety deadline",
+      
+      maximumExtraCommandMl:round(Math.max(0,boost-base)*plan.holdMs/1000,3),
+      boostCommandMlS:boost,floodPlanMlS:boost,boostQuanta:Math.round((boost-refillBase)*16)};
+  }
+  function s2RefillFlowEstimate(t) {
+    
+    
+    if (tickCache && t && t.run) {
+      const rss = t.run.rawScaleSamples || [];
+      const key = (t.startup ? t.startup.status : "") + ":" + t.frame + ":" + rss.length + ":" + (rss.length ? Number(rss[rss.length - 1].scaleTimestampSeconds) : "");
+      if (tickCache.refill && tickCache.refill.key === key) return tickCache.refill.value;
+      const v = s2RefillFlowEstimateUncached(t);
+      tickCache.refill = { key, value: v };
+      return v;
+    }
+    return s2RefillFlowEstimateUncached(t);
+  }
+  function s2RefillFlowEstimateUncached(t) {
+    const now=Date.now(),seen=new Set(),points=[];
+    for(const x of t.run.rawScaleSamples||[]){
+      if(x.phase!=="stage2"||Number(x.profileFrame)!==1||x.tMs<t.frameAt-t.run.startedAtMs||now-t.run.startedAtMs-x.tMs>1300)continue;
+      if(x.tareReset){points.length=0;seen.clear();}
+      const stamp=finiteOrNull(x.scaleTimestampSeconds),weight=finiteOrNull(x.weightG);
+      if(stamp===null||weight===null||seen.has(stamp))continue;
+      if(points.length&&(stamp<=points[points.length-1].x||stamp-points[points.length-1].x>.6))points.length=0;
+      seen.add(stamp);points.push({x:stamp,y:weight,at:x.tMs});
+    }
+    
+    
+    const gate=(g,extra)=>{t.startup.lastEstimateGate=Object.assign({gate:g,atMs:now},extra||{});return null;};
+    if(points.length<6)return gate("points",{points:points.length});
+    if(points[points.length-1].x-points[0].x<.6)return gate("span",{spanS:round(points[points.length-1].x-points[0].x,3)});
+    if(now-t.run.startedAtMs-points[points.length-1].at>600)return gate("stale",{ageMs:now-t.run.startedAtMs-points[points.length-1].at});
+    let tail=points.filter(x=>points[points.length-1].x-x.x<=.75);
+    if(tail.length<6)tail=points;
+    if(tail[tail.length-1].x-tail[0].x<.6)return gate("tail-span",{tailPoints:tail.length});
+    const fit=linearRegression(tail);
+    if(!fit||tail.length<6)return gate("tail-points",{tailPoints:tail.length});
+    if(fit.r2<.90)return gate("r2",{r2:round(fit.r2,4)});
+    if(fit.slope<0)return gate("slope",{slope:round(fit.slope,3)});
+    
+    
+    
+    
+    
+    if(fit.slope<=1e-6)return gate("slope-zero",{slope:round(fit.slope,3)});
+    t.startup.lastEstimateGate=null;
+    const previous=t.startup.lastEstimate,current={slope:fit.slope,stamp:tail[tail.length-1].x,r2:fit.r2};
+    
+    
+    
+    if(!Array.isArray(t.startup.estHistory))t.startup.estHistory=[];
+    if(!previous||current.stamp>previous.stamp){
+      t.startup.estHistory.push(current);
+      if(t.startup.estHistory.length>S2_REFILL_ACCEL_HISTORY)t.startup.estHistory.shift();
+      t.startup.lastEstimate=current;
+    }
+    const hist=t.startup.estHistory;let acceleration=0;
+    if(hist.length>=2){
+      const pairs=[];
+      for(let i=1;i<hist.length;i++){const dt=hist[i].stamp-hist[i-1].stamp;if(dt>0)pairs.push((hist[i].slope-hist[i-1].slope)/dt);}
+      if(pairs.length){pairs.sort((a,b)=>a-b);acceleration=pairs.length%2?pairs[(pairs.length-1)/2]:(pairs[pairs.length/2-1]+pairs[pairs.length/2])/2;}
+    }
+    acceleration=Math.max(-t.run.config.stage2Flow,Math.min(t.run.config.stage2Flow,acceleration));
+    const predicted=Math.max(0,current.slope+acceleration*t.startup.plan.predictionSeconds);
+    
+    
+    
+    
+    const predictedCapped=Math.min(predicted,t.run.config.stage2Flow*S2_REFILL_PREDICTED_CAP);
+    return {...current,acceleration,predicted,predictedCapped:round(predictedCapped,3)};
+  }
+  function s2RefillReturnReason(t) {
+    const p=t.startup,plan=p.plan;
+    const limit=Number(t.profile.steps[runPhysicalStageFrame(t.run,"s2")].limiter.value);
+    if(state.lastMachineTelemetryValid&&Date.now()-state.lastMachineAtMs<=600&&state.lastPressure>=limit*.90)return "S2 refill pressure margin reached";
+    if(Date.now()-p.startedAt>=plan.holdMs)return "S2 refill maximum duration reached";
+    if(Date.now()-state.latestScaleAtMs>600)return "S2 refill scale became stale";
+    const flow=s2RefillFlowEstimate(t),target=t.run.config.stage2Flow,threshold=target*plan.cutoffFraction;
+    
+    
+    
+    
+    
+    const blindFlood=!flow||!(Number(flow.slope)>0);
+    if(blindFlood&&state.lastMachineTelemetryValid&&Date.now()-state.lastMachineAtMs<=600){
+      const now=Date.now(),pr=Number(state.lastPressure);
+      if(Number.isFinite(pr)&&pr>=0){
+        if(!p.blindPressure)p.blindPressure={firstAt:now,firstBar:pr};
+        if(pr>=S2_REFILL_BLIND_PRESSURE_BAR&&now-p.blindPressure.firstAt>=500&&pr-p.blindPressure.firstBar>=S2_REFILL_BLIND_RISE_BAR)return "S2 refill blind-flood pressure climb (no cup outflow)";
+      }
+    }
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    if(p.status==="boosting"){
+      const rs=scaleSampleGate((t.run.rawScaleSamples||[]).filter(x=>x.phase==="stage2"&&Number(x.profileFrame)===1));
+      const need=S2_REFILL_INSTANT_CROSS_SAMPLES;
+      if(rs.length>=need+1){
+        const thr=target*S2_REFILL_INSTANT_CROSS_FACTOR;
+        let ok=true,inst=null;
+        for(let i=rs.length-need;i<rs.length;i++){
+          const a=rs[i-1],b=rs[i];
+          const dt=Number(b.scaleTimestampSeconds)-Number(a.scaleTimestampSeconds);
+          const s=dt>0.02?(Number(b.weightG)-Number(a.weightG))/dt:null;
+          if(s===null||s<thr){ok=false;break;}
+          inst=s;
+        }
+        if(ok&&inst!==null){
+          const bs=target*S2_REFILL_CUTOFF_BACKSTOP;
+          p.cutoff={rawGS:round(inst,3),predictedGS:round(inst,3),predictedRawGS:round(inst,3),decisionGS:round(inst,3),thresholdGS:round(threshold,3),backstopGS:round(bs,3),basis:"instantaneous-cross",estHistory:(t.startup.estHistory||[]).map(x=>({slope:round(x.slope,3),stamp:x.stamp,r2:x.r2!=null?round(x.r2,4):null})),margin:round(inst-bs,3),firingTickMs:Number(t.report.periodMs)||null,firingObservedGS:round(inst,3),instantCrossGS:round(inst,3),instantCrossFactor:S2_REFILL_INSTANT_CROSS_FACTOR,atMs:Date.now()};
+          return "S2 refill instantaneous slope cross-check (channeling breakthrough)";
+        }
+      }
+    }
+    const observed=flow?Number(flow.slope):null,predicted=flow?Number(flow.predicted):null;
+    const decisionFlow=Number.isFinite(predicted)?predicted:observed;
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    const backstop=target*S2_REFILL_CUTOFF_BACKSTOP;
+    const predictedHit=Number.isFinite(decisionFlow)&&decisionFlow>=target;
+    const backstopHit=Number.isFinite(observed)&&observed>=backstop;
+    if(flow&&Number.isFinite(observed)&&observed>=threshold*.6&&(predictedHit||backstopHit)){
+      p.cutoff={rawGS:round(flow.slope,3),predictedGS:flow.predictedCapped!=null?flow.predictedCapped:(Number.isFinite(predicted)?round(predicted,3):null),predictedRawGS:Number.isFinite(predicted)?round(predicted,3):null,decisionGS:round(decisionFlow,3),thresholdGS:round(threshold,3),backstopGS:round(backstop,3),basis:predictedHit?"predicted":"observed-backstop",estHistory:(t.startup.estHistory||[]).map(x=>({slope:round(x.slope,3),stamp:x.stamp,r2:x.r2!=null?round(x.r2,4):null})),margin:round(observed-backstop,3),firingTickMs:Number(t.report.periodMs)||null,firingObservedGS:round(flow.slope,3),atMs:Date.now()};
+      return predictedHit?"S2 refill reached predicted target with observed above noise floor":"S2 refill observed-slope backstop reached (bounded overshoot)";
+    }
+    return null;
+  }
+  function completeS2Startup(t) {
+    if(!t||!t.startup||t.startup.status==="complete")return;
+    clearS2StartupTimers(t);t.startup.status="complete";t.startup.completedAt=Date.now();t.s2Recovery=null;t.startup.resumeAt=Date.now()+(t.startup.plan.strategy==="refill-85"?50:1600);
+    if(t.startup.plan.strategy==="refill-85")t.startup.approachAt=t.startup.resumeAt;
+    
+    
+    const lastEst=t.startup.lastEstimate;
+    const estSnapshot=lastEst?{slope:round(lastEst.slope,3),stamp:lastEst.stamp,r2:lastEst.r2!=null?round(lastEst.r2,4):null}:null;
+    t.report.startupExecution={status:"complete",reason:t.startup.returnReason||"S2 startup baseline return confirmed",cutoff:t.startup.cutoff||null,confirmation:t.startup.returnConfirmation||"machine-target-echo",estimate:estSnapshot,estimateGate:t.startup.lastEstimateGate||null};
+    t.pending=null;t.retry=null;liveTrimRecord("startup-complete",{frame:1,strategy:t.startup.plan.strategy||"legacy-pulse",reason:t.report.startupExecution.reason,cutoff:t.startup.cutoff||null,confirmation:t.startup.returnConfirmation||"machine-target-echo",estimate:estSnapshot,estimateGate:t.startup.lastEstimateGate||null});
+  }
+  function startupBlock(t,reason) {if(t.startup)t.startup.blockReason=reason;return false;}
+
+  function clearS2StartupTimers(t) {
+    if(!t)return;for(const key of ["startupReturnTimer","startupWatchdog","startupAckTimer"]){if(t[key])clearTimeout(t[key]);t[key]=null;}
+  }
+  async function dispatchS2Startup(t,action) {
+    const p=t.startup,frame=finiteOrNull(state.lastFrame),now=Date.now(),refill=p&&p.plan.strategy==="refill-85";
+    const current=state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run;
+    if(effectiveInterventionForRun(t.run)==="off"){if(p)p.status="disabled";return false;}
+    if(current&&action==="boost"&&p.status==="armed"&&state.phase==="stage2"&&frame!==1&&!state.stage2SkipSent)return startupBlock(t,"S2 startup waiting for confirmed frame 1");
+    if(current&&state.phase==="stage2"&&frame===null&&!state.stage2SkipSent)return startupBlock(t,"S2 startup waiting for fresh frame telemetry");
+    if(!current||state.phase!=="stage2"||frame!==1||state.stage2SkipSent){clearS2StartupTimers(t);if(p)p.status="frame-ended";return false;}
+    if(!t.handle||!state.runtimeProfileVerified||!t.run.config.profileTruthVerified||state.commandBusy||!state.lastMachineTelemetryValid||now-state.lastMachineAtMs>600||state.lastMachineState!=="espresso"||!["pouring","preinfusion"].includes(state.lastSubstate))return startupBlock(t,"S2 startup transport or fresh machine feedback unavailable");
+    const step=t.profile.steps[runPhysicalStageFrame(t.run,"s2")],base=Math.round(Number(step.flow)*16)/16,limiter=Number(step.limiter&&step.limiter.value);
+    if(action==="bleed"){
+      
+      
+      if(!refill||p.plan.boundedModel!==true||p.status!=="boosting")return false;
+      if(!(t.pending||t.retry)||!(t.pending||t.retry).ack)return false;
+      if(!Number.isFinite(Number(p.plan.bleedCommandMlS)))return startupBlock(t,"S2 refill bleed command unavailable");
+      if(t.report.maxWrites-t.report.writes<2)return startupBlock(t,"S2 refill bleed return budget unavailable");
+    }else if(action==="trim"){
+      
+      
+      
+      
+      
+      if(!refill||p.plan.boundedModel!==true||p.status!=="boosting")return false;
+      
+      
+      
+      if(!(t.pending||t.retry)||!(t.pending||t.retry).ack)return false;
+      if(t.lastWriteAt!==null&&now-t.lastWriteAt<S2_REFILL_TRIM_MS)return false;
+      if(t.report.maxWrites-t.report.writes<2)return startupBlock(t,"S2 refill trim return budget unavailable");
+      if(now-state.latestScaleAtMs>600)return startupBlock(t,"S2 refill trim scale data stale");
+      if(!Number.isFinite(limiter)||limiter<=0||!Number.isFinite(state.lastPressure)||state.lastPressure<0||state.lastPressure>=limiter*.90)return startupBlock(t,"S2 refill trim pressure headroom unavailable");
+      if(Math.abs(base-p.plan.baseCommandMlS)>1e-9)return startupBlock(t,"S2 startup base profile changed");
+    }else if(action==="boost"){
+      if(refill){
+        let limits;try{limits=validatedS2RefillSettings(p.plan.settings);}catch(_){return startupBlock(t,"S2 refill plan settings invalid");}
+        const planBase=Number.isFinite(Number(p.plan.refillPumpBaseMlS))?Number(p.plan.refillPumpBaseMlS):base;
+        const expectedBoost=p.plan.boundedModel===true
+          ?Math.floor((Math.min(LIMITS.commandFlowMax,Number(p.plan.refillMaxCommandMlS||LIMITS.commandFlowMax))+1e-9)*16)/16
+          :Math.floor((Math.min(LIMITS.commandFlowMax,planBase*limits.targetPercent/100)+1e-9)*16)/16;
+        if(!(p.plan.adaptiveFlood&&p.plan.adaptiveFlood.applied===true
+          
+          
+          
+          
+          ?(p.plan.holdMs===p.plan.adaptiveFlood.holdMs&&p.plan.adaptiveFlood.holdMsConfigured===limits.maxDurationMs)
+          :p.plan.holdMs===limits.maxDurationMs)||p.plan.cutoffFraction!==limits.cutoffPercent/100||p.plan.approachMs!==limits.approachMs||p.plan.startDelayMs!==limits.startDelayMs||p.plan.refillTargetFraction!==limits.targetPercent/100||!Number.isFinite(planBase)||planBase<LIMITS.commandFlowMin||planBase>LIMITS.commandFlowMax||typeof p.plan.commandBasis!=="string"||!p.plan.commandBasis||p.plan.boostCommandMlS!==expectedBoost)return startupBlock(t,"S2 refill plan settings invalid");
+        if(now-(Number.isFinite(p.frameConfirmedAt)?p.frameConfirmedAt:t.frameAt)<limits.startDelayMs)return startupBlock(t,"S2 refill start delay");
+      }
+      if(p.status!=="armed"||t.pending||t.retry||t.report.trace.some(x=>x.kind==="write"&&Number(x.frame)===1))return startupBlock(t,"S2 startup blocked by an existing pending or issued S2 command");
+      if(learningPolicy(t.run.config.adaptiveLearningLevel).rank<2&&!startupSignaturesCompatible(p.plan.s1ControlSignature||"[]",JSON.stringify(t.report.trace.filter(x=>x.kind==="write"&&Number(x.frame)===0).map(x=>round(Number(x.commandMlS),4)))))return startupBlock(t,"S2 startup preceding S1 trajectories differ");
+      if(t.report.maxWrites-t.report.writes<2||t.report.maxChecks-t.report.checks<12)return startupBlock(t,"S2 startup return budget unavailable");
+      if(now-(refill&&Number.isFinite(p.enteredAt)?p.enteredAt:t.frameAt)>(refill?p.plan.dispatchWindowMs:2000))return startupBlock(t,"S2 startup dispatch window elapsed");
+      if(now-state.latestScaleAtMs>600)return startupBlock(t,"S2 startup scale data stale");
+      if(!Number.isFinite(limiter)||limiter<=0||!Number.isFinite(state.lastPressure)||state.lastPressure<0||state.lastPressure>=limiter*.90)return startupBlock(t,"S2 startup pressure headroom unavailable");
+      if(Math.abs(base-p.plan.baseCommandMlS)>1e-9)return startupBlock(t,"S2 startup base profile changed");
+      if(!refill&&(!Number.isFinite(state.lastFlow)||state.lastFlow<base*.85||!Number.isFinite(t.observedTarget)||Math.abs(t.observedTarget-base)>.02))return startupBlock(t,"S2 startup waiting for actual baseline target and actuator response");
+      const reg=refill?s2RefillFlowEstimate(t):liveTrimRegression(t);
+      if(reg&&reg.slope>=t.run.config.stage2Flow*(refill?p.plan.cutoffFraction:.8)){
+        if(refill){p.status="skipped";t.report.startupExecution={status:"skipped",reason:"S2 predicted flow already at target; refill unnecessary"};}
+        return startupBlock(t,"S2 startup cup flow already high; skip late boost");
+      }
+    }else if(!["boosting","bleeding","return-unconfirmed"].includes(p.status))return false;
+    const boosted=refill?(p.plan.boundedModel===true?boundedRefillCommand(t):p.plan.boostCommandMlS):base+1/16;
+    if(refill&&p.plan.boundedModel===true&&!(Number(boosted)>0))return startupBlock(t,"S2 bounded refill command unavailable");
+    if(action==="trim"){
+      const running=Number(t.commands[1]);
+      if(!Number.isFinite(boosted)||!Number.isFinite(running)||Math.abs(boosted-running)<1/16-1e-9)return false;
+    }
+    
+    
+    
+    
+    
+    
+    const platformRaw=refill&&p.plan.boundedModel===true?Number(p.plan.controlBaseMlS||p.plan.refillPumpBaseMlS):base;
+    const platform=Number.isFinite(platformRaw)?Math.round(platformRaw*16)/16:base;
+    const protective=Math.round(Math.min(Number.isFinite(platform)?platform:base,base)*16)/16;
+    const returnFloor=refill&&p.plan.boundedModel===true?protective:platform;
+    if(refill&&action==="return"&&!Number.isFinite(p.actualReturnCommandMlS)){
+      const proposed=finiteOrNull(p.plan.returnCommandMlS),protectiveReason=/pressure|stale/i.test(p.returnReason||"");
+      p.actualReturnCommandMlS=protectiveReason?protective:(proposed===null?platform:proposed);
+    }
+    
+    
+    if(refill&&action==="return"){
+      const q=Number(p.actualReturnCommandMlS);
+      if(!Number.isFinite(q)||q<returnFloor-1e-9||Math.abs(q*16-Math.round(q*16))>1e-6)p.actualReturnCommandMlS=platform;
+    }
+    const command=toDriverStep(action==="return"?(refill?p.actualReturnCommandMlS:base):action==="bleed"?Number(p.plan.bleedCommandMlS):boosted);
+    if(refill&&action==="return"&&(command<returnFloor||command>Math.max(platform,base*1.2)+1e-9||Math.abs(command*16-Math.round(command*16))>1e-6))return false;
+    const commandCeiling=refill?Math.min(LIMITS.commandFlowMax,p.plan.boundedModel===true?Math.max(Number(p.plan.refillMaxCommandMlS||boosted),action==="return"?Number(p.actualReturnCommandMlS)||0:0):(Number.isFinite(Number(p.plan.refillPumpBaseMlS))?Number(p.plan.refillPumpBaseMlS):base)*1.6):base*1.08;
+    if(!Number.isFinite(command)||command<LIMITS.commandFlowMin||command>LIMITS.commandFlowMax||command>commandCeiling+1e-9)return false;
+    
+    
+    
+    if((action==="return"||action==="bleed")&&(!(t.pending||t.retry)||!(t.pending||t.retry).ack))return false;
+    if(action==="return"&&t.report.writes>=t.report.maxWrites)return false;
+    
+    
+    
+    const previousCommand=Number.isFinite(Number(t.commands[1]))?Number(t.commands[1]):base;
+    if(action==="return"){
+      liveTrimRecord("startup-boost-ended",{frame:1,boostTargetSeen:!!(t.pending||t.retry).targetSeen});t.pending=null;t.retry=null;p.status="returning";
+    }else if(action==="bleed"){
+      liveTrimRecord("startup-bleed-start",{frame:1,commandMlS:command,previousMlS:previousCommand,reason:p.returnReason||null});
+      t.pending=null;t.retry=null;p.status="bleeding";p.bleedStartedAt=now;
+    }else{
+      if(action==="trim")liveTrimRecord("startup-bleed",{frame:1,commandMlS:command,previousMlS:previousCommand});
+      t.pending=null;t.retry=null;p.status="boosting";
+    }
+    t.report.startupExecution={status:action==="return"?"returning":action==="bleed"?"bleeding":action==="trim"?"trimming":"issued",reason:action==="return"?(p.returnReason||"S2 startup returning to baseline"):p.plan.reason,cutoff:p.cutoff||null,returnCommandMlS:action==="return"?command:null,trimCommandMlS:action==="trim"?command:null};
+    const pending={frame:1,command,at:now,ack:false,targetSeen:false,startupAction:action,flowAtWrite:finiteOrNull(state.lastFlow),slopeAtWrite:null};t.pending=pending;
+    t.report.writes++;t.lastWriteAt=now;state.liveTrimDirty=true;
+    
+    
+    
+    
+    
+    
+    liveTrimRecord("write",{frame:1,commandMlS:command,previousMlS:previousCommand,...(action==="return"&&refill?{plannedMlS:round(Number(boosted),4)}:{}),retry:false,startupAction:action,startupReason:t.report.startupExecution.reason,payload:encodeLiveFlowFrame(step,runPhysicalStageFrame(t.run,"s2"),command)});
+    
+    
+    
+    
+    t.commands[1]=command;
+    if(refill&&(action==="boost"||action==="trim"))t.startup.lastBoostCommandMlS=command;
+    if(action==="boost"){
+      p.startedAt=now;
+      if(refill)t.startupAckTimer=setTimeout(()=>{
+        t.startupAckTimer=null;
+        if(state.liveTrim===t&&t.active&&state.phase==="stage2"&&(finiteOrNull(state.lastFrame)===null||Number(state.lastFrame)===1)&&["boosting","returning"].includes(p.status)&&t.pending&&!t.pending.ack)abortSequence("S2 refill driver ACK missing",true);
+      },2000);
+      t.startupReturnTimer=setTimeout(()=>{
+        t.startupReturnTimer=null;
+        
+        
+        if(p.status!=="boosting")return;
+        p.returnReason=p.returnReason||"S2 startup maximum duration reached";
+        
+        
+        
+        const bleed=p.plan.strategy==="refill-85"&&p.plan.boundedModel===true;
+        dispatchS2Startup(t,bleed?"bleed":"return").catch(()=>abortSequence(bleed?"S2 startup bleed write failed":"S2 startup return write failed",true));
+      },p.plan.holdMs);
+      const refillWatchdog=()=>{
+        t.startupWatchdog=null;
+        if(state.liveTrim===t&&t.active&&state.phase==="stage2"&&(finiteOrNull(state.lastFrame)===null||Number(state.lastFrame)===1)&&p.status!=="complete"){
+          const pending=t.pending;
+          if(!pending||!pending.ack||(pending.startupAction!=="return"&&pending.startupAction!=="bleed"))abortSequence("S2 startup base return driver ACK missing",true);
+          else if(pending.startupAction==="bleed"){
+            
+            
+            if((p.watchdogExtensions||0)<2){p.watchdogExtensions=(p.watchdogExtensions||0)+1;t.startupWatchdog=setTimeout(refillWatchdog,1500);}
+            else abortSequence("S2 refill platform return driver ACK missing",true);
+          }
+          else {p.status="return-unconfirmed";t.retry=pending;t.pending=null;t.report.status="monitoring-degraded-startup-base-feedback";liveTrimRecord("startup-base-feedback-missing",{frame:1});}
+        }
+      };
+      t.startupWatchdog=setTimeout(refillWatchdog,refill?p.plan.holdMs+2500:2500);
+    }
+    if(refill&&action==="return"){
+      if(t.startupAckTimer)clearTimeout(t.startupAckTimer);
+      t.startupAckTimer=setTimeout(()=>{
+        t.startupAckTimer=null;
+        if(state.liveTrim===t&&t.active&&state.phase==="stage2"&&(finiteOrNull(state.lastFrame)===null||Number(state.lastFrame)===1)&&["returning","return-unconfirmed"].includes(p.status)&&t.pending&&!t.pending.ack)abortSequence("S2 refill base return driver ACK missing",true);
+      },2000);
+    }
+    await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A010",payload:encodeLiveFlowFrame(step,runPhysicalStageFrame(t.run,"s2"),command)})});
+    return true;
+  }
+
+
+  function stage2AdaptiveEvidence(run) {
+    const chain=liveTrimChainEvidence(run);
+    if(chain){
+      const target=Number(desiredRealForRunPhase(run,"stage2"));
+      if(Number.isFinite(target)&&target>0)return {measurementBasis:"single-shot command chain",runId:run.runId,targetGS:round(target,3),command:round(chain.commandMlS,3),measured:round(chain.endGS,3),errorPct:round((chain.endGS/target-1)*100,1),confidence:"MEDIUM",r2:null,seconds:null,liveTrimChain:chain};
+    }
+    const controlled=controlLearningAssessment(run,"stage2");
+    if(controlled.applicable&&controlled.eligible){
+      
+      
+      
+      const ev=controlled.evidence;
+      if(ev){
+        const tail=tailMachineGain(run,"stage2",controlled.actuator);
+        if(tail&&Math.abs(Number(tail.tailErrorPct))>=2)ev.tailGain=tail;
+      }
+      return ev;
+    }
+    const tailGain=tailMachineGain(run,"stage2",controlled.actuator);
+    if(tailGain&&Number.isFinite(Number(tailGain.tailErrorPct))&&Math.abs(Number(tailGain.tailErrorPct))>=2){
+      const target=Number(desiredRealForRunPhase(run,"stage2"));
+      if(Number.isFinite(target)&&target>0)return {measurementBasis:"single-shot steady tail machine gain",runId:run.runId,targetGS:round(target,3),command:round(target/tailGain.k,3),measured:tailGain.tailMeanGS,errorPct:round((tailGain.tailMeanGS/target-1)*100,1),confidence:"MEDIUM",r2:null,seconds:null,tailGain};
+    }
+    if(controlled.applicable)return null;
+    run = liveTrimLearningView(run, "stage2");
+    if (!run || !stageActuatorEvidence(run, "stage2").eligible) return null;
+    if (!run || (run.kind || "hyperex") !== "hyperex") return null;
+    const admission=learningAdmission(run),quality=controlOutputQuality(run,"stage2");
+    if(quality.available&&quality.tailRippleCVPct>admission.spread(12))return null;
+    const p = diagnosticPhaseSummary(run, "stage2");
+    const cfg = run.config || {};
+    const target = Number(desiredRealForRunPhase(run, "stage2"));
+    const command = Number(cfg.stage2CommandMlS);
+    if (!p || !Number.isFinite(target) || target <= 0 || !Number.isFinite(command)) return null;
+    const raw=phaseRawSamples(run,"stage2"),start=raw.length?Number(raw[0].tMs):0,end=raw.length?Number(raw[raw.length-1].tMs):0;
+    const tail=regressionForRawSamples(raw.filter(x=>Number(x.tMs)>=start+(end-start)*.4));
+    const settled=tail&&tail.r2>=admission.r2(.97)&&tail.seconds>=admission.seconds(4)&&tail.slope>0;
+    const measured = settled?tail.slope:Number(p.rawRegressionGS), r2 = settled?tail.r2:Number(p.rawRegressionR2), seconds = settled?tail.seconds:Number(p.rawRegressionSeconds);
+    if (!Number.isFinite(measured) || measured <= 0 || !Number.isFinite(r2) || r2 < admission.r2(.97) || !Number.isFinite(seconds) || seconds < admission.seconds(4)) return null;
+    return {
+      measurementBasis:settled?"S2 settled-tail RAW regression":"RAW fixed-command regression",runId:run.runId, targetGS:round(target,3), command:round(command,3), measured:round(measured,3),
+      errorPct:round((measured-target)/target*100,1), confidence:"HIGH", r2:round(r2,5), seconds:round(seconds,2)
+    };
+  }
+
+  function stage3AdaptiveEvidence(run) {
+    const controlled=controlLearningAssessment(run,"stage3");
+    if(controlled.applicable)return controlled.eligible?controlled.evidence:null;
+    run = liveTrimLearningView(run, "stage3");
+    if (!run || !stageActuatorEvidence(run, "stage3").eligible) return null;
+    if (!run || (run.kind || "hyperex") !== "hyperex") return null;
+    const admission=learningAdmission(run);
+    const st = stage3StabilityDiagnostics(run);
+    const phase = diagnosticPhaseSummary(run, "stage3");
+    const target3 = Number(desiredRealForRunPhase(run, "stage3"));
+    if (!st || !phase || !Number.isFinite(target3) || target3 <= 0) return null;
+    const cfg = run.config || {};
+    const baseCurrent = Number(cfg.stage3CommandMlS);
+    const runShape = cfg.stage3Shape && cfg.stage3Shape.enabled === true ? cfg.stage3Shape : null;
+    const commandTriplet = runShape
+      ? [Number(runShape.earlyCommand), Number(runShape.midCommand), Number(runShape.lateCommand)]
+      : [baseCurrent, baseCurrent, baseCurrent];
+    if (!commandTriplet.every(Number.isFinite)) return null;
+
+    const overallGS = Number(phase.rawRegressionGS), overallR2 = Number(phase.rawRegressionR2), overallSeconds = Number(phase.rawRegressionSeconds);
+    if (!Number.isFinite(overallGS) || overallGS <= 0 || !Number.isFinite(overallR2) || overallR2 < admission.r2(.93) || !Number.isFinite(overallSeconds) || overallSeconds < admission.seconds(5)) return null;
+
+    let source = null;
+    let measurementBasis = null;
+    let stallQualitative = false;
+    if (Array.isArray(st.shapeFrames) && st.shapeFrames.length === 3 && st.shapeFrames.every(x =>
+      Number.isFinite(Number(x.commandMlS)) && Number.isFinite(Number(x.slope)) && Number(x.slope) > 0 &&
+      Number.isFinite(Number(x.r2)) && Number(x.r2) >= admission.r2(.90) && Number.isFinite(Number(x.seconds)) && Number(x.seconds) >= admission.seconds(3))) {
+      source = st.shapeFrames.map((x,i) => ({ name:x.name, command:Number(commandTriplet[i]), measured:Number(x.slope), r2:Number(x.r2), seconds:Number(x.seconds), quality:"clean" }));
+      measurementBasis = "profile-frame regression";
+    } else if ([st.early,st.mid,st.late].every(x =>
+      x && Number.isFinite(Number(x.slope)) && Number(x.slope) > 0 && Number.isFinite(Number(x.r2)) && Number(x.r2) >= admission.r2(.90) &&
+      Number.isFinite(Number(x.seconds)) && Number(x.seconds) >= admission.seconds(3))) {
+      
+      
+      source = [
+        { name:"S3 EARLY", command:commandTriplet[0], measured:Number(st.early.slope), r2:Number(st.early.r2), seconds:Number(st.early.seconds), quality:"clean" },
+        { name:"S3 MID", command:commandTriplet[1], measured:Number(st.mid.slope), r2:Number(st.mid.r2), seconds:Number(st.mid.seconds), quality:"clean" },
+        { name:"S3 LATE", command:commandTriplet[2], measured:Number(st.late.slope), r2:Number(st.late.r2), seconds:Number(st.late.seconds), quality:"clean" }
+      ];
+      measurementBasis = "stability 25/50/25 fallback";
+    } else if (st.stall && st.stall.suspected) {
+      
+      
+      
+      
+      const clean = x => x && Number.isFinite(Number(x.slope)) && Number(x.slope) > 0 &&
+        Number.isFinite(Number(x.r2)) && Number(x.r2) >= admission.r2(.90) && Number.isFinite(Number(x.seconds)) && Number(x.seconds) >= admission.seconds(3);
+      const lateSlope = st.late && Number.isFinite(Number(st.late.slope)) && Number(st.late.slope) >= 0
+        ? Number(st.late.slope)
+        : Number(st.stall.rawSlopeGS);
+      if (clean(st.early) && clean(st.mid) && Number.isFinite(lateSlope) && lateSlope >= 0 &&
+          Number.isFinite(Number(st.late && st.late.seconds)) && Number(st.late.seconds) >= 3.0) {
+        source = [
+          { name:"S3 EARLY", command:commandTriplet[0], measured:Number(st.early.slope), r2:Number(st.early.r2), seconds:Number(st.early.seconds), quality:"clean" },
+          { name:"S3 MID", command:commandTriplet[1], measured:Number(st.mid.slope), r2:Number(st.mid.r2), seconds:Number(st.mid.seconds), quality:"clean" },
+          { name:"S3 LATE", command:commandTriplet[2], measured:lateSlope, r2:Number.isFinite(Number(st.late && st.late.r2)) ? Number(st.late.r2) : Number(st.stall.rawR2), seconds:Number(st.late.seconds), quality:"stall-qualitative" }
+        ];
+        measurementBasis = "STALL RECOVERY: clean EARLY/MID + confirmed late stall";
+        stallQualitative = true;
+      }
+    }
+    if (!source) return null;
+
+    const shapeCfg = cfg.stage3Shape && cfg.stage3Shape.enabled ? cfg.stage3Shape : null;
+    const earlySeconds = shapeCfg&&finiteOrNull(shapeCfg.earlySeconds)!==null ? Number(shapeCfg.earlySeconds) : 8;
+    const midSeconds = shapeCfg&&finiteOrNull(shapeCfg.midSeconds)!==null ? Number(shapeCfg.midSeconds) : 14;
+    return {
+      runId: run.runId, targetGS: target3, status: st.status, stall:!!(st.stall&&st.stall.suspected), stallQualitative,
+      stallRawSlopeGS: st.stall&&st.stall.suspected ? round(st.stall.rawSlopeGS,3) : null,
+      stallMachineFlowMlS: st.stall&&st.stall.suspected ? round(st.stall.machineFlowMlS,3) : null,
+      lateToEarlyRatio: st.lateToEarlyRatio,
+      overallGS:round(overallGS,3), overallR2:round(overallR2,5), overallSeconds:round(overallSeconds,2),
+      earlySeconds: round(earlySeconds,1), midSeconds: round(midSeconds,1), measurementBasis,
+      source: source.map(x => ({ name:x.name, command:round(x.command,3), measured:round(x.measured,3), r2:Number.isFinite(Number(x.r2))?round(x.r2,5):null, seconds:round(x.seconds,2), quality:x.quality||"clean" }))
+    };
+  }
+
+  function sameScalarAdaptiveEvidence(a,b) {
+    
+    
+    
+    return !!(a && b && Math.abs(Number(a.command)-Number(b.command)) <= COMMAND_EQUAL_TOLERANCE && Math.abs(Number(a.targetGS)-Number(b.targetGS)) <= 0.01);
+  }
+
+  function stage3ShapeFamily(e) {
+    return e&&e.measurementBasis==="live target-normalized frame windows"?"profile-frame regression":e&&e.measurementBasis==="live target-normalized stability windows"?"stability 25/50/25 fallback":e&&e.measurementBasis;
+  }
+
+  function sameStage3Shape(a, b) {
+    if (!a || !b || !Array.isArray(a.source) || !Array.isArray(b.source) || a.source.length !== 3 || b.source.length !== 3) return false;
+    if (Math.abs(Number(a.earlySeconds) - Number(b.earlySeconds)) > 0.25 || Math.abs(Number(a.midSeconds) - Number(b.midSeconds)) > 0.25) return false;
+    if (Math.abs(Number(a.targetGS)-Number(b.targetGS)) > 0.01) return false;
+    
+    
+    
+    for (let i = 0; i < 3; i++) if (Math.abs(Number(a.source[i].command) - Number(b.source[i].command)) > COMMAND_EQUAL_TOLERANCE) return false;
+    return true;
+  }
+
+  function adaptiveHistoryFingerprint() {
+    if (!state.cfg || !state.calibrationMapUsable || !state.calibrationMap || state.calibrationMap.valid !== true ||
+        finiteOrNull(state.flowMultiplierCurrent) === null || !multiplierClose(state.flowMultiplierCurrent, calibrationBaseMultiplier())) return null;
+    return {
+      schema: 3,
+      basketContext: state.cfg.basketContext,
+      mapCreatedAt: String(state.calibrationMap.createdAt || ""),
+      lutSchema: state.calibrationMap.schema,
+      lutAlgorithm: state.calibrationMap.algorithm || "",
+      lutPoints: canonicalProfileValue(calibrationPoints()),
+      targetAnchors: canonicalProfileValue(state.calibrationMap.targetAnchors || []),
+      baseFlowMultiplier: round(calibrationBaseMultiplier(), 4),
+      actualFlowMultiplier: round(state.flowMultiplierCurrent, 4),
+      targets: { stage1:round(state.cfg.stage1Flow,4), stage2:round(state.cfg.stage2Flow,4), stage3:round(state.cfg.stage3Flow,4) },
+      shotSettings: {
+        activeRelease:activeReleaseEnabled(state.cfg),
+        temperature:state.cfg.temperature, stage1Weight:state.cfg.stage1Weight, soakSeconds:state.cfg.soakSeconds,
+        stage2Weight:state.cfg.stage2Weight, finalWeight:state.cfg.finalWeight,
+        stage1PressureLimit:state.cfg.stage1PressureLimit, stage2PressureLimit:state.cfg.stage2PressureLimit,
+        stage3PressureLimit:state.cfg.stage3PressureLimit, hardPressureLimit:state.cfg.hardPressureLimit
+      },
+      profileTruthSchema: 3,
+      model: "hyperex-realflow-lut-nextshot-v3"
+    };
+  }
+
+  
+  
+  function qualificationFingerprintKey(fp) {
+    if(!fp||typeof fp!=="object")return "";
+    const q={...fp,shotSettings:{...(fp.shotSettings||{})}};
+    delete q.basketContext;delete q.shotSettings;delete q.targets;
+    
+    
+    delete q.lutPoints;delete q.targetAnchors;delete q.lutSchema;delete q.lutAlgorithm;
+    return adaptiveHistoryFingerprintKey(q);
+  }
+
+  function refreshLearningStage() {
+    if (!state.cfg || state.phase!=="idle") return state.learningStage;
+    const status={automatic:true,minEmptyShots:2,maxEmptyShots:3,emptyShots:0};
+    const finish=(stage,message,extra={})=>{
+      state.learningStage={...status,stage,message,...extra};
+      return state.learningStage;
+    };
+    if (!state.calibrationMapUsable) {
+      if (state.lutBootstrapMode) {
+        state.cfg.basketContext = "coffee";
+        const failures = state.lutBootstrapFailures || 0;
+        return finish("BOOTSTRAP · 首杯建图", failures >= 3 ? "建图未完成：下一杯继续建图；也可在诊断页跑空碗 Flow Cal（可选）。" : "无 LUT 引导：下一杯用种子指令，杯末从 S2/S3 稳态建图。", { bootstrapFailures: failures });
+      }
+      state.cfg.basketContext="empty";
+      return finish("STEP 1 · EMPTY CALIBRATION","Run Step 1 with an empty locked-in basket to save the original LUT.");
+    }
+    const key=qualificationFingerprintKey;
+    const fingerprint=key(adaptiveHistoryFingerprint());
+    const rows=state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
+    const matching=fingerprint?rows.filter(r=>r && historyLearningStatus(r).eligible && /^completed at /i.test(String(r.result||"")) &&
+      r.profileTruthSchema===3 && r.profileTruthVerified===true && key(r.fingerprint)===fingerprint):[];
+    const empty=matching.filter(r=>(r.basketContext||"unknown")!=="coffee");
+    const coffee=matching.filter(r=>r.basketContext==="coffee");
+    status.emptyShots=empty.length;
+    const retained=state.persistentHistoryFile&&state.persistentHistoryFile.coffeeQualification;
+    if (coffee.length||retained&&(retained.fingerprint===fingerprint||qualificationFingerprintKey(parseStoredJson(retained.fingerprint))===fingerprint)) {
+      state.cfg.basketContext="coffee";
+      if(coffee.length)keepCoffeeQualification();
+      return finish("NORMAL COFFEE · AUTO","Continue normal coffees; the retained empty baseline is refined from completed coffee evidence.");
+    }
+    
+    
+    const applyStatus=state.autoApplyLastStatus && state.autoApplyLastStatus.status;
+    if (["scheduled","applying"].includes(applyStatus)) return finish("STEP 2 · APPLYING","Wait for the pending next-shot decision and verified application. Do not start an extra test cup.");
+    if (!state.runtimeProfileVerified || !state.machineProfileAckKey || state.persistentHistoryAvailable!==true || state.pendingHistoryWrite) {
+      return finish("STEP 2 · CHECKING","Waiting for verified workflow and history readback; do not add test cups while checks are pending.");
+    }
+    if (applyStatus==="error") return finish("STEP 2 · BLOCKED","Automatic application failed. Read the raw workflow/error and fix it; do not add empty-basket cups.");
+    const usable=(r,strict)=>{
+      const a=r.s2||{},b=r.s3||{};
+      return [a.rawRegressionGS,b.rawRegressionGS].every(x=>finiteOrNull(x)!==null && Number(x)>0) &&
+        Number(a.windowS)>=4 && Number(b.windowS)>=5 &&
+        Number(a.rawRegressionR2)>=(strict ? .97 : .93) && Number(b.rawRegressionR2)>=(strict ? .93 : .85) &&
+        !(r.s3Stability&&r.s3Stability.stall&&r.s3Stability.stall.suspected);
+    };
+    const last=empty.slice(-2);
+    const inBand=r=>["s2","s3"].every(k=>{
+      const q=r[k];return Number(q.targetGS)>0 && Math.abs(Number(q.rawRegressionGS)/Number(q.targetGS)-1)<=.12;
+    });
+    const variation=k=>{
+      const a=Number(last[0]&&last[0][k]&&last[0][k].rawRegressionGS);
+      const b=Number(last[1]&&last[1][k]&&last[1][k].rawRegressionGS);
+      return Math.abs(a-b)/((a+b)/2);
+    };
+    const stable=last.length===2 && last.every(r=>usable(r,true)&&inBand(r)) && variation("s2")<=.15 && variation("s3")<=.20;
+    const capped=empty.length>=3 && last.length===2 && last.every(r=>usable(r,false));
+    if (stable || capped) {
+      state.cfg.basketContext="coffee";keepCoffeeQualification();
+      return finish("READY FOR COFFEE · AUTO",stable?
+        "Two clean stable empty-basket shots are sufficient. You can fill the basket and brew normally; no further empty-basket tuning.":
+        "Empty-basket tuning has reached its 3-shot limit. Preserve this baseline and begin coffee use; at most one dedicated filled-basket acceptance shot.",
+        {transitionBasis:stable?"two stable shots":"bounded empty-basket test budget",limitedEmptyImprovement:!stable});
+    }
+    state.cfg.basketContext="empty";
+    return finish(empty.length>=3?"STEP 2 · BLOCKED":"STEP 2 · EMPTY BASELINE",empty.length>=3?
+      "The 3-shot limit is reached but data/stall checks need attention. Stop empty-basket tests and inspect existing diagnostics.":
+      "Run Step 2 with an empty basket. The plugin refines the next-shot command mapping while preserving the original LUT. It will prompt you automatically after 2–3 shots.");
+  }
+
+  function baselineFeedForwardPayload() {
+    const fingerprint=adaptiveHistoryFingerprint();
+    const baseKey=qualificationFingerprintKey;
+    const key=baseKey(fingerprint);
+    const rows=state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
+    const references=key ? rows.filter(row=>row && historyLearningStatus(row).eligible && /^completed at /i.test(String(row.result||"")) && row.profileTruthSchema===3 && row.profileTruthVerified===true &&
+      (row.basketContext||"unknown")!=="coffee" && baseKey(row.fingerprint)===key) : [];
+    const latest=references.length?references[references.length-1]:null;
+    const override=testOverrideStatus();
+    return {role:"feed-forward prior; not a matching coffee consensus shot",
+      calibrationRetained:!!state.calibrationMapUsable,referenceShots:references.length,
+      sourceRunIds:references.map(row=>row.runId),sourceClassification:"empty/pre-upgrade reference",
+      commandSeedRetained:!!(override.valid && override.baselinePrior && override.activeStages.length),
+      sourceCommands:latest&&latest.commands||null,
+      priorCupResponse:latest?{stage1:latest.s1Startup||latest.s1,stage2:latest.s2,stage3:latest.s3,stage3Stability:latest.s3Stability}:null,
+      note:"Retain LUT, validated command baseline and historical cup-response reference. Coffee backpressure changes the response; numeric coffee updates require new coffee evidence and actuator/pressure quality."};
+  }
+
+  function numericLearningFingerprintKey(fp) {
+    if(!fp||typeof fp!=="object")return "";
+    const q={...fp,shotSettings:{...(fp.shotSettings||{})}};
+    delete q.shotSettings.temperature;
+    q.shotSettings={activeRelease:fp.shotSettings&&fp.shotSettings.activeRelease!==undefined?fp.shotSettings.activeRelease!==false:true};
+    delete q.targets;
+    
+    
+    
+    delete q.lutPoints;
+    delete q.targetAnchors;
+    delete q.lutSchema;
+    delete q.lutAlgorithm;
+    return adaptiveHistoryFingerprintKey(q);
+  }
+
+  function assessRunLearningIntegrity(run) {
+    const reasons=[],events=run&&run.events||[],add=(code,phase,detail)=>{if(!reasons.some(x=>x.code===code&&x.phase===phase))reasons.push({code,phase:phase||null,detail:detail||null});};
+    if(!run)return {schema:1,eligible:false,status:"excluded",reasons:[{code:"missing-run"}]};
+    if(!/^completed at /i.test(String(run.result||"")))add("not-completed");
+    if(!run.config||run.config.profileTruthVerified!==true||run.config.profileTruthSchema!==3)add("unverified-profile");
+    for(const event of events)if(event.name==="learning_fault")add("execution-fault",event.phase,event.data&&event.data.reason);
+    for(const fault of run.learningExecutionFaults||[])add("execution-fault",fault.phase,fault.reason);
+    const skips=events.filter(x=>x.name==="command_accepted"&&x.data&&x.data.machineState==="skipStep");
+    const allowedSkips=runProfileLayout(run).release!==null?3:2;
+    const skipCount=Math.max(skips.length,Number(run.learningSkipCount)||0);if(skipCount>allowedSkips)add("extra-skip-commands",null,skipCount);
+    
+    
+    const raw=run.rawScaleSamples||[];
+    for(const phase of ["stage1","stage2","stage3"]){
+      const rows=raw.filter(x=>x.phase===phase).sort((a,b)=>Number(a.tMs)-Number(b.tMs));if(rows.length<2)continue;
+      const first=Number(rows[0].tMs);let previous=null,start=null,peak=null;
+      for(const row of rows){
+        const weight=finiteOrNull(row.weightG),at=finiteOrNull(row.tMs),stamp=finiteOrNull(row.scaleTimestampSeconds);
+        if(weight===null||at===null)continue;
+        if(start===null)start=weight;
+        const gain=peak===null?0:peak-start,settled=at-first>=2000;
+        if(previous&&settled&&gain>=2){
+          const drop=previous.weight-weight,dt=stamp!==null&&previous.stamp!==null?stamp-previous.stamp:null;
+          if(drop>=3)add("scale-drop-during-extraction",phase,round(drop,2));
+          if(dt!==null&&dt>0&&dt<=.6&&weight-previous.weight>Math.max(12,30*dt))add("scale-jump-during-extraction",phase,round(weight-previous.weight,2));
+        }
+        if(row.tareReset&&(at-first<2000||gain<2)){start=weight;peak=weight;}
+        peak=peak===null?weight:Math.max(peak,weight);previous={weight,stamp};
+      }
+    }
+    
+    const s1g=s1VolumeWindow(run);
+    if(s1g.timeout20)add("s1-trigger-timeout","stage1",s1g.s1DurS===null?null:round(s1g.s1DurS,2));
+    if(s1g.continuous)add("s1-continuous-outflow","stage1",s1g.tailSlopeGS===null?null:round(s1g.tailSlopeGS,3));
+    return {schema:1,eligible:reasons.length===0,status:reasons.length?"excluded":"no-confirmed-fault",reasons,rawChecked:raw.length>0,eventsChecked:events.length>0};
+  }
+  function historyLearningStatus(row) {
+    if(!row)return {eligible:false,status:"excluded",reasons:["missing-record"]};
+    if(row.observationOnly===true)return {eligible:false,status:"observation-only",reasons:["algorithm-intervention-off"]};
+    if(row.learningReview&&row.learningReview.excluded===true)return {eligible:false,status:"manual-excluded",reasons:[row.learningReview.reason||"operator-marked"]};
+    const integrity=row.learningIntegrity;
+    if(integrity&&integrity.schema===1&&integrity.eligible===false)return {eligible:false,status:"auto-excluded",reasons:(integrity.reasons||[]).map(x=>x.code)};
+    if(Object.prototype.hasOwnProperty.call(row,"result")&&!/^completed at /i.test(String(row.result||"")))return {eligible:false,status:"auto-excluded",reasons:["not-completed"]};
+    if(row.profileTruthVerified===false||row.profileTruthSchema&&row.profileTruthSchema!==3)return {eligible:false,status:"auto-excluded",reasons:["unverified-profile"]};
+    return {eligible:true,status:integrity?"no-confirmed-fault":"legacy-limited-audit",reasons:[]};
+  }
+  function learningRunAllowed(run) {
+    if(!run||run.observationOnly===true||!historyLearningStatus(run).eligible)return false;
+    const saved=(state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]).find(x=>x.runId===run.runId);
+    if(saved&&!historyLearningStatus(saved).eligible)return false;
+    return assessRunLearningIntegrity(run).eligible;
+  }
+  function historyEvidenceAllowed(evidence) {
+    if(!historyLearningStatus(evidence).eligible)return false;
+    const saved=(state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]).find(x=>x.runId===evidence.runId);
+    return !saved||historyLearningStatus(saved).eligible;
+  }
+  function keepCoffeeQualification() {
+    const file=state.persistentHistoryFile,key=qualificationFingerprintKey(adaptiveHistoryFingerprint());
+    if(file&&key)file.coffeeQualification={fingerprint:key,establishedAt:new Date().toISOString()};
+  }
+  
+  function bootstrapEffectiveCommand(run, phase) {
+    if (phase === "stage2") {
+      const eff = stage2EffectiveCommand(run);
+      if (Number.isFinite(eff) && eff > 0) return eff;
+      const rows = (run.samples || []).filter(x => x.phase === "stage2" && x.machineTelemetryValid === true && Number.isFinite(Number(x.targetFlowMlS)) && Number(x.targetFlowMlS) > 0).sort((a, b) => Number(a.tMs) - Number(b.tMs));
+      if (rows.length < 4) return null;
+      const tail = rows.slice(Math.floor(rows.length * 0.6)).map(x => Number(x.targetFlowMlS));
+      return tail.length ? median(tail) : null;
+    }
+    const rows = (run.samples || []).filter(x => x.phase === "stage3" && x.machineTelemetryValid === true && Number.isFinite(Number(x.targetFlowMlS)) && Number(x.targetFlowMlS) > 0 && Number.isFinite(Number(x.profileFrame)));
+    if (rows.length >= 4) {
+      const groups = new Map();
+      for (const x of rows) { const f = Number(x.profileFrame); if (!groups.has(f)) groups.set(f, []); groups.get(f).push(x); }
+      const frames = [...groups.keys()].map(f => { const g = groups.get(f); return { f, c: median(g.map(x => Number(x.tMs))) }; }).sort((a, b) => a.c - b.c);
+      const mid = frames[Math.floor(frames.length / 2)];
+      const vals = groups.get(mid.f).map(x => Number(x.targetFlowMlS));
+      if (vals.length >= 2) return median(vals);
+    }
+    const cfg = run.config || {};
+    const shape = cfg.stage3Shape && cfg.stage3Shape.enabled === true ? cfg.stage3Shape : null;
+    const fallback = shape ? Number(shape.midCommand) : Number(cfg.stage3CommandMlS);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : null;
+  }
+  
+  
+  function bootstrapCalibrationFromRun(run) {
+    if (!state.lutBootstrapMode || !run || (run.kind || "hyperex") !== "hyperex") return { ok: false, reason: "not-bootstrap" };
+    if (!/^completed at /i.test(String(run.result || ""))) return { ok: false, reason: "not-completed" };
+    if (!learningRunAllowed(run)) return { ok: false, reason: "learning-excluded" };
+    const mult = finiteOrNull(state.flowMultiplierCurrent);
+    if (mult === null) return { ok: false, reason: "multiplier-not-ready" };
+    const s2 = run.summary && run.summary.stage2, s3 = run.summary && run.summary.stage3;
+    if (!s2 || !(Number(s2.rawRegressionGS) > 0) || !(Number(s2.rawRegressionR2) >= 0.93) || !(Number(s2.rawRegressionSeconds) >= 4)) return { ok: false, reason: "s2-window-unqualified" };
+    if (!s3 || !(Number(s3.rawRegressionGS) > 0) || !(Number(s3.rawRegressionR2) >= 0.85) || !(Number(s3.rawRegressionSeconds) >= 5)) return { ok: false, reason: "s3-window-unqualified" };
+    const s2cmd = bootstrapEffectiveCommand(run, "stage2"), s3cmd = bootstrapEffectiveCommand(run, "stage3");
+    if (!(s2cmd > 0) || !(s3cmd > 0)) return { ok: false, reason: "effective-command-missing" };
+    const cfg = run.config || {};
+    const t1 = Number(cfg.stage1Flow);
+    const s2a = Number(s2.rawRegressionGS), s3a = Number(s3.rawRegressionGS);
+    const anchors = [
+      { blockId: "S2", targetSource: "stage2Flow", origin: "coffee", actualFlow: round(s2a, 4), commandFlow: round(s2cmd, 4), machineFlow: null, r2: round(Number(s2.rawRegressionR2), 5), samples: Number(s2.rawRegressionSamples) || null, quality: "coffee-steady" },
+      { blockId: "S3", targetSource: "stage3Flow", origin: "coffee", actualFlow: round(s3a, 4), commandFlow: round(s3cmd, 4), machineFlow: null, r2: round(Number(s3.rawRegressionR2), 5), samples: Number(s3.rawRegressionSamples) || null, quality: "coffee-steady" }
+    ];
+    const rS2 = s2a / s2cmd;
+    const s1cmd = t1 > 0 && rS2 > 0 ? t1 / rS2 : NaN;
+    if (Number.isFinite(s1cmd) && s1cmd > 0 && s1cmd < s2cmd && t1 < s2a) {
+      anchors.push({ blockId: "S1", targetSource: "stage1Flow", origin: "synthesized-from-s2", actualFlow: round(t1, 4), commandFlow: round(s1cmd, 4), machineFlow: null, r2: null, samples: null, quality: "synthesized-from-s2" });
+    }
+    anchors.sort((a, b) => Number(a.actualFlow) - Number(b.actualFlow));
+    for (let i = 1; i < anchors.length; i++) if (!(Number(anchors[i].commandFlow) > Number(anchors[i - 1].commandFlow) + 0.02)) return { ok: false, reason: "non-monotonic-anchors" };
+    const actuals = anchors.map(p => Number(p.actualFlow));
+    const map = {
+      schema: 3, algorithm: "coffee-bootstrap-v1", lutOrigin: "coffee",
+      createdAt: new Date().toISOString(), calibrationMode: "coffee-bootstrap",
+      baseFlowMultiplier: round(mult, 4), valid: true, coversTargets: true,
+      targetCoverage: anchors.map(p => ({ blockId: p.blockId, targetSource: p.targetSource, target: p.actualFlow, ok: true, quality: p.quality, commandFlow: p.commandFlow })),
+      targetAnchors: anchors,
+      actualRange: [round(Math.min(...actuals), 4), round(Math.max(...actuals), 4)],
+      desiredRange: [round(Math.min(...actuals), 4), round(Math.max(...actuals), 4)],
+      points: anchors.map(p => ({ commandFlow: p.commandFlow, actualFlow: p.actualFlow, machineFlow: p.machineFlow, r2: p.r2, samples: p.samples, quality: p.quality, blockId: p.blockId, targetSource: p.targetSource, origin: p.origin })),
+      suggestedFlowMultiplier: null
+    };
+    return { ok: true, map, twoPoint: anchors.length === 2 };
+  }
+  function s3CommandHistoryAudit() {
+    const events=[],transitions=[],lastByContext=new Map();
+    const shapeOf=commands=>{
+      const stage=commands&&(commands.appliedProfile&&commands.appliedProfile.stage3||commands.stage3),shape=stage&&stage.shape||commands&&commands.s3Shape;
+      if(!stage&&!shape)return null;
+      const enabled=shape&&shape.enabled===true,flat=stage&&(stage.flatCommandMlS===undefined?stage.commandMlS:stage.flatCommandMlS);
+      const values=enabled?[shape.earlyCommand,shape.midCommand,shape.lateCommand].map(Number):[flat,flat,flat].map(Number);
+      if(!values.every(x=>Number.isFinite(x)&&x>=.1&&x<=8))return null;
+      return {values:values.map(x=>round(x,3)),flat:Math.max(...values)-Math.min(...values)<.001,timedShape:!!enabled,
+        origin:stage&&stage.origin||commands&&commands.stage3Origin||"retained"};
+    };
+    for(const row of state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]){
+      const context=numericLearningFingerprintKey(row.fingerprint),snapshot=shapeOf(row.commands),applied=row.nextShotApplied;
+      if(!snapshot){if(context)lastByContext.delete(context);else lastByContext.clear();} 
+      const add=(shape,kind,at,verified)=>{
+        if(!shape)return;
+        const entry={runId:row.runId,version:row.pluginVersion||null,at:at||null,kind,verified:!!verified,context,...shape,learningExcluded:!historyLearningStatus(row).eligible};
+        const previous=context?lastByContext.get(context):null;
+        events.push(entry);
+        if(previous&&!previous.flat&&entry.flat&&previous.verified&&entry.verified)transitions.push({before:previous,after:entry,basis:kind==="applied"?"verified next-shot application":"first observed flat shot-start snapshot"});
+        if(context)lastByContext.set(context,entry);
+      };
+      add(snapshot,"shot-start",row.startedAt,row.profileTruthVerified===true);
+      
+      if(applied&&applied.profileTruth&&applied.profileTruth.verified===true)add(shapeOf(applied.commandFlows),"applied",applied.at,true);
+    }
+    return {events,flatTransitions:transitions,earliestRetainedFlat:events.find(x=>x.flat&&x.verified)||null,
+      note:"Retained history only; missing older records cannot establish the first-ever change. Suggestions are not verified applications."};
+  }
+  function learningHistoryPayload() {
+    const rows=state.persistentHistoryFile&&state.persistentHistoryFile.shots||[];
+    return {s3CommandAudit:s3CommandHistoryAudit(),savePending:!!(state.pendingHistoryWrite||state.historyWriteDirty),editable:state.phase==="idle"&&!state.calibrationActive&&!state.curveApplyBusy&&!(state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")&&state.persistentHistoryAvailable===true&&state.storageProbeVerified,
+      records:rows.slice().reverse().map(row=>({runId:row.runId,startedAt:row.startedAt,result:row.result,basketContext:row.basketContext,activeRelease:row.activeRelease!==undefined?row.activeRelease!==false:!(row.fingerprint&&row.fingerprint.shotSettings&&row.fingerprint.shotSettings.activeRelease===false),releaseMode:row.releaseMode||((row.activeRelease===false||(row.fingerprint&&row.fingerprint.shotSettings&&row.fingerprint.shotSettings.activeRelease===false))?'off':'on'),version:row.pluginVersion,
+        review:row.learningReview||null,integrity:historyLearningStatus(row),stageEvidence:{s1:!!(row.evidence&&row.evidence.s1),s2:!!(row.evidence&&row.evidence.s2),s3:!!(row.evidence&&row.evidence.s3)}}))};
+  }
+  function setLearningHistoryReview(body) {
+    if(state.phase!=="idle"||state.calibrationActive||state.curveApplyBusy||state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")throw new Error("History review requires idle state");
+    if(state.persistentHistoryAvailable!==true||!state.storageProbeVerified||!state.persistentHistoryLoaded)throw new Error("History storage is not verified");
+    if(!body||typeof body.runId!=="string"||typeof body.excluded!=="boolean")throw new Error("Invalid history review");
+    const row=(state.persistentHistoryFile&&state.persistentHistoryFile.shots||[]).find(x=>x.runId===body.runId);
+    if(!row)throw new Error("History record not found");
+    if(body.excluded&&!['operator-mistake','plugin-fault','scale-or-cup-disturbance','other'].includes(body.reason))throw new Error("Select an exclusion reason");
+    if(state.cfg.basketContext==="coffee")keepCoffeeQualification();
+    row.learningReview={excluded:body.excluded,reason:body.excluded?body.reason:null,at:new Date().toISOString()};
+    row.learningReviewLog=(Array.isArray(row.learningReviewLog)?row.learningReviewLog:[]).concat({...row.learningReview}).slice(-20);
+    const run=state.diagnosticLast&&state.diagnosticLast.runId===row.runId?state.diagnosticLast:null;
+    if(run)run.learningReview={...row.learningReview};
+    if(body.excluded&&state.autoApplyLastStatus&&state.autoApplyLastStatus.runId===row.runId&&state.autoApplyLastStatus.status==="scheduled"){
+      clearTimer("autoApplyTimer");state.autoApplyLastStatus={runId:row.runId,status:"excluded",message:"Shot excluded from learning"};
+    }
+    
+    
+    restoreAdaptiveHistoryFromPersistentFile();
+    if(!persistHistoryFile())throw new Error("History exclusion applied in this session; persistent save unavailable");
+    if(run)run.summary=diagnosticSummary(run);
+    emitSkinChanged();return learningHistoryPayload();
+  }
+
+  
+  
+  
+  
+  
+  
+  function restoreGainMemoryFromSnapshot(body) {
+    if(state.phase!=="idle"||state.calibrationActive||state.curveApplyBusy||state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")throw new Error("Gain-memory restore requires idle state");
+    if(state.persistentHistoryAvailable!==true||!state.storageProbeVerified||!state.persistentHistoryLoaded)throw new Error("History storage is not verified");
+    if(!body||typeof body!=="object")throw new Error("Invalid restore body");
+    if(typeof body.excludeRunId!=="string"||!body.excludeRunId)throw new Error("excludeRunId required");
+    if(!["operator-mistake","plugin-fault","scale-or-cup-disturbance","other"].includes(body.excludeReason))throw new Error("Select an exclusion reason");
+    if(!state.cfg||state.cfg.basketContext!=="coffee")throw new Error("Gain-memory restore requires coffee basket context");
+    const fpKey=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    if(!fpKey||typeof body.fingerprintKey!=="string"||body.fingerprintKey!==fpKey)throw new Error("Fingerprint mismatch; snapshot calibration context differs from current");
+    if(!body.gainMemory||typeof body.gainMemory!=="object"||!Array.isArray(body.gainMemory.buckets))throw new Error("gainMemory snapshot with buckets required");
+    const normalized=normalizeGainMemory(body.gainMemory);
+    if(Array.isArray(normalized.dropped)&&normalized.dropped.length)throw new Error("Snapshot rejected by normalizeGainMemory: "+JSON.stringify(normalized.dropped));
+    if(!normalized.buckets.length&&!(normalized.viBuckets||[]).length)throw new Error("Snapshot has no valid buckets");
+    const file=state.persistentHistoryFile;
+    const live=gainMemoryState(false);
+    if(!live||!Array.isArray(live.buckets))throw new Error("No live gain memory to restore");
+    
+    const contributed=live.buckets.some(b=>b&&b.stages&&b.stages.s2&&b.stages.s2.lastRunId===body.excludeRunId)||(live.viBuckets||[]).some(v=>v.lastRunId===body.excludeRunId);
+    if(!contributed)throw new Error("excludeRunId is not the latest s2 or vi contributor of any bucket; nothing to undo");
+    const row=(file.shots||[]).find(x=>x&&x.runId===body.excludeRunId);
+    if(!row)throw new Error("History record not found for excludeRunId");
+    const before=gainMemoryRestoreSummary(live);
+    
+    
+    
+    file.gainMemory=normalized;
+    setLearningHistoryReview({runId:body.excludeRunId,excluded:true,reason:body.excludeReason});
+    
+    
+    
+    if(state.diagnosticLast&&state.diagnosticLast.runId===body.excludeRunId){
+      state.diagnosticLast=null;
+      restoreDiagnosticLastFromPersistentFile();
+    }
+    const after=gainMemoryState(false);
+    const excludedRow=(file.shots||[]).find(x=>x&&x.runId===body.excludeRunId);
+    emitSkinChanged();
+    return {ok:true,restored:true,excludeRunId:body.excludeRunId,excludedReview:excludedRow?excludedRow.learningReview:null,diagnosticLastRunId:state.diagnosticLast?state.diagnosticLast.runId:null,before,after:gainMemoryRestoreSummary(after),persistedState:historyStatusPayload()};
+  }
+  function gainMemoryRestoreSummary(gm){
+    const stage=s=>s?{r:s.r,n:s.n,deviationPct:s.lastDeviation==null?null:round(s.lastDeviation*100,1),confidence:gainConfidence(s),lastRunId:s.lastRunId}:null;
+    const vi=v=>v?{bandLo:v.bandLo,bandHi:v.bandHi,vi:v.vi,n:v.n,deviationPct:v.lastDeviation==null?null:round(v.lastDeviation*100,1),confidence:viConfidence(v),lastRunId:v.lastRunId,fpKey:v.fpKey||null}:null;
+    return {seq:gm.seq,lastBucketId:gm.lastBucketId,updatedAt:gm.updatedAt,buckets:(gm.buckets||[]).map(b=>({id:b.id,center:b.center,radius:b.radius,s2:stage(b.stages&&b.stages.s2),s3:stage(b.stages&&b.stages.s3)})),viBuckets:(gm.viBuckets||[]).map(vi)};
+  }
+
+  function trustedAdaptiveRun(run) {
+    const c = run && run.config;
+    const key = numericLearningFingerprintKey(adaptiveHistoryFingerprint());
+    return !!(run && run.kind === "hyperex" && learningRunAllowed(run) && /^completed at /i.test(String(run.result || "")) && c &&
+      c.profileTruthVerified === true && c.profileTruthSchema === 3 && c.basketContext === state.cfg.basketContext && key &&
+      numericLearningFingerprintKey(c.adaptiveFingerprint) === key);
+  }
+
+  function adaptiveHistoryFingerprintKey(fp) {
+    if (!fp || typeof fp !== "object") return "";
+    try { return JSON.stringify(canonicalProfileValue(fp)); } catch (_) { return ""; }
+  }
+
+  function historyStatusPayload() {
+    const shots = state.persistentHistoryFile && Array.isArray(state.persistentHistoryFile.shots) ? state.persistentHistoryFile.shots.length : 0;
+    return {
+      available: state.persistentHistoryAvailable,
+      status: state.persistentHistoryStatus || "unknown",
+      savedShots: shots,
+      compatibleShots: Number(state.persistentHistoryCompatibleCount || 0),
+      baselineReferenceShots: baselineFeedForwardPayload().referenceShots,
+      maxShots: HISTORY_FILE_MAX_SHOTS,
+      storageKey: STORAGE_HISTORY_FILE
+    };
+  }
+
+  function setPersistentHistoryUnavailable(reason) {
+    state.persistentHistoryAvailable = false;
+    state.storageProbeVerified = false;
+    state.pendingHistoryWrite = null;
+    state.adaptiveHistory = (state.adaptiveHistory || []).filter(ev => !ev.restoredFromDisk);
+    state.persistentHistoryCompatibleCount = 0;
+    if (state.historyWriteTimer) { clearTimeout(state.historyWriteTimer); state.historyWriteTimer = null; }
+    state.persistentHistoryStatus = `SESSION ONLY: ${reason || 'pluginStorage unavailable'}`;
+    if (state.storageProbeTimer) { clearTimeout(state.storageProbeTimer); state.storageProbeTimer = null; }
+    log(`Persistent adaptive history unavailable. Shot-to-shot adaptation remains active for this plugin session, but cross-reload/version history is disabled. ${reason || ''}`);
+    if(state.historyRecoveryAttempts<2&&!state.historyRecoveryTimer){
+      const recover=()=>{state.historyRecoveryTimer=null;if(state.phase!=="idle"){state.historyRecoveryTimer=setTimeout(recover,1000);return;}state.historyRecoveryAttempts++;state.persistentHistoryAvailable=null;startPersistentHistoryProbe();if(!state.persistentHistoryLoaded)storageRead(STORAGE_HISTORY_FILE);};
+      state.historyRecoveryTimer=setTimeout(recover,1500);
+    }
+    emitSkinChanged();
+  }
+
+  function startPersistentHistoryProbe() {
+    if (state.storageProbeTimer) clearTimeout(state.storageProbeTimer);
+    state.storageProbeToken = `${Date.now()}-${Math.random().toString(36).slice(2,10)}`;
+    state.storageProbeVerified = false;
+    state.persistentHistoryAvailable = null;
+    state.persistentHistoryStatus = "checking pluginStorage write/readback";
+    
+    state.storageProbeTimer = setTimeout(() => {
+      if (state.persistentHistoryAvailable !== true) setPersistentHistoryUnavailable("write/readback probe timed out");
+    }, 3500);
+    if (!storageWrite(STORAGE_HISTORY_PROBE, state.storageProbeToken)) {
+      setPersistentHistoryUnavailable("probe write failed");
+      return;
+    }
+    if (!storageRead(STORAGE_HISTORY_PROBE)) setPersistentHistoryUnavailable("probe read request failed");
+  }
+
+  function compactPersistentShotRecord(run, evidence) {
+    if (!run || !run.runId) return null;
+    const summary = run.summary || diagnosticSummary(run) || {};
+    const compactPhase = phase => {
+      const q = summary[phase] || {};
+      return {
+        targetGS: q.desiredRealFlowGS, rawRegressionGS: q.rawRegressionGS, rawRegressionR2: q.rawRegressionR2,
+        windowS: q.rawRegressionSeconds, de1Flow: q.machineFlowAvg, decaidWeightFlow: q.gflowAvg, status: q.validationStatus, errorPct: q.rawErrorPct
+      };
+    };
+    const st = summary.stage3Stability || null;
+    return {
+      runId: String(run.runId),
+      pluginVersion: PLUGIN_VERSION,
+      activeRelease:activeReleaseEnabled(run.config),
+      releaseMode:releaseMode(run.config),
+      algorithmIntervention: run.config && run.config.algorithmIntervention || "full",
+      observationOnly: run.observationOnly === true,
+      hecTakeover: run.config && run.config.hecTakeover ? run.config.hecTakeover : null,
+      learningIntegrity: assessRunLearningIntegrity(run),
+      learningReview: run.learningReview||null,
+      basketContext: run.config && run.config.basketContext || "unknown",
+      startedAt: run.startedAt || null, endedAt: run.endedAt || null, result: run.result || null,
+      fingerprint: run.config && run.config.adaptiveFingerprint || null,
+      profileTruthSchema: run.config && run.config.profileTruthSchema || 0,
+      profileTruthVerified: !!(run.config && run.config.profileTruthVerified),
+      experimentalLiveTrim: !!(run.config && run.config.experimentalLiveTrim),
+      liveFlowTrim: compactLiveHistory(run.liveFlowTrim),
+      workflowProfileCommands: run.config && run.config.workflowProfileCommands ? run.config.workflowProfileCommands : null,
+      profileReadbackAt: run.config && run.config.profileReadbackAt || null,
+      machineUploadAcknowledged: !!(run.config && run.config.machineProfileUploadAcknowledged),
+      commands: diagnosticRunCommandSnapshot(run),
+      flowMultiplier: run.config ? round(run.config.flowMultiplier,4) : null,
+      s1: compactPhase("stage1"), s2: compactPhase("stage2"), s3: compactPhase("stage3"),
+      s1Startup: summary.stage1Startup ? { confidence:summary.stage1Startup.confidence, firstRiseDelayS:summary.stage1Startup.firstRiseDelayS, midFlowGS:summary.stage1Startup.midFlowGS, midR2:summary.stage1Startup.midR2, activeFlowGS:summary.stage1Startup.activeFlowGS } : null,
+      s2Startup: summary.stage2Startup || stage2StartupMetrics(run),
+      s3Stability: st ? { status:st.status, lateToEarlyRatio:st.lateToEarlyRatio, early:st.early, mid:st.mid, late:st.late, stall:st.stall } : null,
+      adaptiveDecision: summary.nextShotAdaptive || null,
+      nextShotApplied: null,
+      fullRecord: fullShotRecord(run),
+      evidence: evidence || null,
+      
+      
+      diagnosticMirror: compactDiagnosticMirror(run, evidence || null),
+      grindAdvice: grindAdvisory(run)
+    };
+  }
+
+  
+  
+  function scheduleHistoryTrimWrite() {
+    clearTimer("historyTrimWriteTimer");
+    let tries=0;
+    const attempt=()=>{
+      state.historyTrimWriteTimer=null;
+      if(!state.persistentHistoryLoaded||!state.persistentHistoryFile)return;
+      if(state.phase!=="idle"||state.calibrationActive){if(++tries<12)state.historyTrimWriteTimer=setTimeout(attempt,5000);return;}
+      persistHistoryFile();
+    };
+    state.historyTrimWriteTimer=setTimeout(attempt,3000);
+  }
+
+  function persistHistoryFile() {
+    
+    if (!state.persistentHistoryLoaded || !state.storageProbeVerified || state.persistentHistoryAvailable === false || !state.persistentHistoryFile) return false;
+    if (state.pendingHistoryWrite) { state.historyWriteDirty = true; return true; }
+    state.persistentHistoryFile.writerVersion = PLUGIN_VERSION;
+    state.persistentHistoryFile.updatedAt = new Date().toISOString();
+    state.persistentHistoryFile.writeToken = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    state.pendingHistoryWriteToken = state.persistentHistoryFile.writeToken;
+    state.pendingHistoryWrite = JSON.stringify(state.persistentHistoryFile);
+    state.historyWriteBytes=utf8ByteLength(state.pendingHistoryWrite);
+    state.historyWriteDirty = false;
+    state.historyWriteTimer = setTimeout(() => setPersistentHistoryUnavailable('history file readback timed out'), 3500);
+    if (!storageWrite(STORAGE_HISTORY_FILE, state.pendingHistoryWrite) || !storageRead(STORAGE_HISTORY_FILE)) {
+      setPersistentHistoryUnavailable('history file write/read request failed');
+      return false;
+    }
+    return true;
+  }
+
+  function recordNextShotApplied(run, commandFlows) {
+    const rows = state.persistentHistoryFile && state.persistentHistoryFile.shots;
+    const row = Array.isArray(rows) && rows.find(x => x && x.runId === run.runId);
+    if (!row) return;
+    row.nextShotApplied = { at:new Date().toISOString(), commandFlows, profileTruth:runtimeProfileTruthPayload() };
+    
+    
+    if (state.pendingHistoryWrite || (state.historyJustPersistedRunId === run.runId && Date.now() - (state.historyJustPersistedAt || 0) < 3000)) {
+      state.historyWriteDirty = true;
+      if (!state.historyWriteDeferred) state.historyWriteDeferred = setTimeout(() => { state.historyWriteDeferred = null; if (state.historyWriteDirty && !state.pendingHistoryWrite) persistHistoryFile(); }, 1200);
+      return;
+    }
+    persistHistoryFile();
+  }
+
+  function appendPersistentHistoryShot(run, evidence) {
+    const record = compactPersistentShotRecord(run, evidence);
+    if (!record) return;
+    if (!state.persistentHistoryFile || typeof state.persistentHistoryFile !== "object") {
+      state.persistentHistoryFile = { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:PLUGIN_VERSION, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString(), shots:[] };
+    }
+    if (!Array.isArray(state.persistentHistoryFile.shots)) state.persistentHistoryFile.shots = [];
+    state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== record.runId);
+    state.persistentHistoryFile.shots.push(record);
+    if (state.persistentHistoryFile.shots.length > HISTORY_FILE_MAX_SHOTS) state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.slice(-HISTORY_FILE_MAX_SHOTS);
+    trimHistoryFullRecords(state.persistentHistoryFile);
+    if (persistHistoryFile()) { state.historyJustPersistedRunId = record.runId; state.historyJustPersistedAt = Date.now(); }
+  }
+
+  function restoreAdaptiveHistoryFromPersistentFile() {
+    gainMemoryState(true);
+    refreshLearningStage();
+    const fpKey = numericLearningFingerprintKey(adaptiveHistoryFingerprint());
+    const compatible = row => row && row.profileTruthSchema === 3 && row.fingerprint &&
+      numericLearningFingerprintKey(row.fingerprint) === fpKey;
+    
+    const session = (state.adaptiveHistory || []).filter(ev => historyEvidenceAllowed(ev) && compatible(ev) && (!ev.restoredFromDisk || state.persistentHistoryAvailable === true));
+    const saved = state.persistentHistoryAvailable === true && fpKey && state.persistentHistoryFile && Array.isArray(state.persistentHistoryFile.shots)
+      ? state.persistentHistoryFile.shots.filter(row => row && historyLearningStatus(row).eligible && row.evidence && row.profileTruthVerified === true && compatible(row)) : [];
+    state.persistentHistoryCompatibleCount = saved.length;
+    const merged = new Map();
+    for (const ev of saved.map(row => ({...row.evidence, learningIntegrity:row.learningIntegrity||null, learningReview:row.learningReview||null, restoredFromDisk:true})).concat(session)) {
+      if (ev && ev.runId && compatible(ev)) merged.set(ev.runId, ev);
+    }
+    state.adaptiveHistory = Array.from(merged.values()).slice(-20);
+    restoreDiagnosticLastFromPersistentFile();
+    emitSkinChanged();
+    return state.adaptiveHistory.length > 0;
+  }
+
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  function restoreDiagnosticLastFromPersistentFile() {
+    if (state.diagnosticLast || state.phase !== "idle" || state.calibrationActive) return false;
+    if (state.persistentHistoryAvailable !== true || !state.persistentHistoryFile || !Array.isArray(state.persistentHistoryFile.shots)) return false;
+    const fp = adaptiveHistoryFingerprint();
+    const fpKey = fp ? adaptiveHistoryFingerprintKey(fp) : "";
+    if (!fpKey || !state.cfg) return false;
+    const shots = state.persistentHistoryFile.shots;
+    for (let i = shots.length - 1; i >= 0; i--) {
+      const row = shots[i];
+      if (!row || !row.runId || row.profileTruthSchema !== 3 || row.profileTruthVerified !== true) continue;
+      if (row.observationOnly === true || String(row.algorithmIntervention || "full") === "off") continue;
+      if (!row.fingerprint || adaptiveHistoryFingerprintKey(row.fingerprint) !== fpKey) continue;
+      if (String(row.basketContext || "") !== String(state.cfg.basketContext || "")) continue;
+      if (!historyLearningStatus(row).eligible) continue;
+      const fr = row.fullRecord;
+      if (!fr || !Array.isArray(fr.samples) || !fr.samples.length) continue;
+      const cmd = row.commands || {};
+      const c1 = cmd.stage1 || {}, c2 = cmd.stage2 || {}, c3 = cmd.stage3 || {};
+      if (!(Number(c2.desiredGS) > 0) || !(Number(c2.commandMlS) > 0)) continue;
+      const shape = c3.shape && c3.shape.enabled === true
+        ? { enabled:true, earlyCommand:c3.shape.earlyCommand, earlySeconds:c3.shape.earlySeconds, midCommand:c3.shape.midCommand, midSeconds:c3.shape.midSeconds, lateCommand:c3.shape.lateCommand }
+        : { enabled:false };
+      const run = {
+        runId: String(row.runId), kind: "hyperex", result: row.result,
+        startedAt: row.startedAt || null, endedAt: row.endedAt || null,
+        observationOnly: false, restoredFromDisk: true,
+        learningReview: row.learningReview || null,
+        learningIntegrity: row.learningIntegrity || null,
+        gainMemoryBucketId: row.evidence && row.evidence.gainMemory && row.evidence.gainMemory.bucketId || null,
+        config: {
+          basketContext: row.basketContext,
+          profileTruthVerified: true, profileTruthSchema: 3,
+          adaptiveFingerprint: row.fingerprint,
+          adaptiveLearningLevel: state.cfg.adaptiveLearningLevel,
+          releaseMode: row.releaseMode, activeRelease: row.activeRelease,
+          algorithmIntervention: row.algorithmIntervention || "full",
+          experimentalLiveTrim: !!row.experimentalLiveTrim,
+          flowMultiplier: row.flowMultiplier,
+          s3DriftModel: state.cfg.s3DriftModel,
+          stage1Flow: c1.desiredGS, stage1CommandMlS: c1.commandMlS, stage1LutCommandMlS: c1.lutCommandMlS,
+          stage1CommandMode: c1.mode || "auto", stage1CommandOrigin: c1.origin || null,
+          stage2Flow: c2.desiredGS, stage2CommandMlS: c2.commandMlS, stage2LutCommandMlS: c2.lutCommandMlS,
+          stage2CommandMode: c2.mode || "auto", stage2CommandOrigin: c2.origin || null,
+          stage3Flow: c3.desiredGS, stage3LutCommandMlS: c3.lutCommandMlS,
+          stage3CommandMlS: c3.mode === "shape" ? c3.shape.midCommand : c3.flatCommandMlS,
+          stage3CommandMode: c3.mode || "auto", stage3CommandOrigin: c3.origin || null,
+          stage3Shape: shape,
+          stage1Weight: state.cfg.stage1Weight, stage2Weight: state.cfg.stage2Weight, finalWeight: state.cfg.finalWeight,
+          stage1PressureLimit: state.cfg.stage1PressureLimit, stage2PressureLimit: state.cfg.stage2PressureLimit,
+          stage3PressureLimit: state.cfg.stage3PressureLimit, hardPressureLimit: state.cfg.hardPressureLimit,
+          temperature: state.cfg.temperature, soakSeconds: state.cfg.soakSeconds
+        },
+        samples: fr.samples, rawScaleSamples: fr.rawScaleSamples || [],
+        events: fr.events || [], liveFlowTrim: fr.liveFlowTrim || null,
+        evidence: row.evidence || null
+      };
+      if (!trustedAdaptiveRun(run)) continue;
+      run.summary = diagnosticSummary(run);
+      state.diagnosticLast = run;
+      log("Warm start: restored diagnosticLast " + run.runId + " from persistent history (fingerprint/basket matched; first cup consumes the learned estimates).");
+      emitSkinChanged();
+      return true;
+    }
+    return false;
+  }
+
+  function rememberAdaptiveEvidence(run) {
+    
+    if (state.lutBootstrapMode && run && (run.kind || "hyperex") === "hyperex") {
+      const boot = bootstrapCalibrationFromRun(run);
+      if (boot.ok) {
+        adoptCalibrationMap(boot.map);
+        state.lutBootstrapMode = false;
+        state.lutBootstrapFailures = 0;
+        run.config.adaptiveFingerprint = adaptiveHistoryFingerprint();
+        keepCoffeeQualification();
+        log("Coffee LUT bootstrap built (" + (boot.twoPoint ? "2-point + S1 independent learning" : "3-point") + "): " + boot.map.points.map(p => p.actualFlow + "->" + p.commandFlow).join(", ") + " @ multiplier " + boot.map.baseFlowMultiplier + ".");
+      } else {
+        state.lutBootstrapFailures = (state.lutBootstrapFailures || 0) + 1;
+        log("Coffee LUT bootstrap deferred (" + boot.reason + "); failure " + state.lutBootstrapFailures + ", next cup retries.");
+      }
+    }
+    const truthVerified = trustedAdaptiveRun(run);
+    const ev = truthVerified ? { runId:run && run.runId, profileTruthSchema:3, fingerprint:run.config.adaptiveFingerprint, learningIntegrity:assessRunLearningIntegrity(run), s1:stage1VolumeEvidence(run)||stage1AdaptiveEvidence(run), s2:stage2AdaptiveEvidence(run), s3:stage3AdaptiveEvidence(run) } : null;
+    if (truthVerified && ev) {
+      const gainMemory = updateGainMemoryFromRun(run, ev);
+      if (gainMemory) ev.gainMemory = gainMemory;
+      
+      
+      const viMemory = updateViMemoryFromRun(run, ev);
+      if (viMemory) ev.viMemory = viMemory;
+      if (state.liveTrim && state.liveTrim.run && state.liveTrim.run.runId === (run && run.runId)) {
+        liveTrimRecord("vi-learning", viMemory || {status:"rejected",reason:"no-memory"});
+      }
+      if (run.summary) run.summary.nextShotAdaptive = nextShotAdaptiveSuggestion(run);
+    }
+    if (!truthVerified) {
+      appendPersistentHistoryShot(run, null);
+      if (run && run.kind === "hyperex") log(run.observationOnly ? "Adaptive evidence excluded: algorithm intervention off (observation only) (" + (run.runId || "unknown run") + ")." : "Adaptive evidence excluded: workflow profile truth was not verified at shot start (" + (run.runId || "unknown run") + ").");
+      return;
+    }
+    if (!ev.runId || (!ev.s1 && !ev.s2 && !ev.s3)) {
+      appendPersistentHistoryShot(run, ev && ev.runId ? ev : null);
+      return;
+    }
+    if (!Array.isArray(state.adaptiveHistory)) state.adaptiveHistory = [];
+    state.adaptiveHistory = state.adaptiveHistory.filter(x => x && x.runId !== ev.runId);
+    state.adaptiveHistory.push(ev);
+    if (state.adaptiveHistory.length > 20) state.adaptiveHistory = state.adaptiveHistory.slice(-20);
+    storageWrite(STORAGE_ADAPTIVE_HISTORY, JSON.stringify(state.adaptiveHistory.slice(-8)));
+    appendPersistentHistoryShot(run, ev);
+  }
+
+  function matchingAdaptiveEvidenceSearch(current,key) {
+    const result={evidence:null,matchedRunId:null,checked:0,skippedStorage:0,skippedContext:0,missingStage:0,incompatibleCommands:0,malformed:0};
+    if(!current||!Array.isArray(state.adaptiveHistory))return result;
+    const fingerprint=adaptiveHistoryFingerprint();if(!fingerprint)return result;
+    const currentKey=numericLearningFingerprintKey(fingerprint);
+    for(let i=state.adaptiveHistory.length-1;i>=0;i--){
+      const row=state.adaptiveHistory[i];if(!row||row.runId===current.runId)continue;
+      result.checked++;
+      if(!historyEvidenceAllowed(row)){result.skippedExcluded=(result.skippedExcluded||0)+1;continue;}
+      if(row.restoredFromDisk&&state.persistentHistoryAvailable!==true){result.skippedStorage++;continue;}
+      if(row.profileTruthSchema!==3||numericLearningFingerprintKey(row.fingerprint)!==currentKey){result.skippedContext++;continue;}
+      let evidence=row[key]||(key==="s3"&&row.source?row:null);
+      if(!evidence){result.missingStage++;continue;}
+      if(key==="s2"&&current.measurementBasis!==evidence.measurementBasis){result.mixedBasis=(result.mixedBasis||0)+1;evidence={...evidence,comparisonModel:"cross-window historical reference"};}
+      const plausible=key==="s3"?Array.isArray(evidence.source)&&evidence.source.every(x=>Number(x.measured)/Number(evidence.targetGS)>=.2&&Number(x.measured)/Number(evidence.targetGS)<=3):Number(evidence.measured)/Number(evidence.targetGS)>=.2&&Number(evidence.measured)/Number(evidence.targetGS)<=3;
+      if(!plausible){result.extremeResponses=(result.extremeResponses||0)+1;continue;}
+      let matches=false;try{matches=key==="s3"?sameStage3Shape(current,evidence):sameScalarAdaptiveEvidence(current,evidence);}catch(_){result.malformed++;continue;}
+      if(!matches&&(key==="s1"||key==="s2")){const comparable=s2NearbyEvidence(current,evidence,key);if(comparable){evidence=comparable;matches=true;result.nearbyCommandComparisons=(result.nearbyCommandComparisons||0)+1;}}
+      if(!matches&&key==="s3"){const comparable=stage3ReferenceEvidence(current,evidence);if(comparable){evidence=comparable;matches=true;result.nearbyCommandComparisons=(result.nearbyCommandComparisons||0)+1;}}
+      if(matches&&key==="s3"&&stage3ShapeFamily(current)!==stage3ShapeFamily(evidence))evidence={...evidence,comparisonModel:"cross-window historical reference"};
+      if(!matches){result.incompatibleCommands++;continue;}
+      
+      
+      result.evidence=evidence;result.matchedRunId=row.runId;return result;
+    }
+    return result;
+  }
+  function previousMatchingAdaptiveEvidence(current,key) {
+    return matchingAdaptiveEvidenceSearch(current,key).evidence;
+  }
+
+  function scalarConsensusSuggestion(label,current,previous,opt) {
+    if (!current) return { usable:false, action:"REPEAT", confidence:"INSUFFICIENT", reason:`${label} data is not clean enough for numeric adaptation.` };
+    const base = { targetGS:round(Number(current.targetGS),3), currentCommandMlS:snapCommandFlow(Number(current.command)), measuredGS:round(Number(current.measured),3) };
+    if (!previous) return { ...base, usable:false, action:"REPEAT SAME COMMAND", confidence:"PENDING", repeatCount:1, reason:`One clean ${label} shot is not enough. Repeat the same command once more.` , maxStepRule:opt.rule };
+    const mean=(Number(current.measured)+Number(previous.measured))/2;
+    const variability=mean>0?Math.abs(Number(current.measured)-Number(previous.measured))/mean:Infinity;
+    const e1=(Number(previous.measured)-Number(current.targetGS))/Number(current.targetGS)*100;
+    const e2=(Number(current.measured)-Number(current.targetGS))/Number(current.targetGS)*100;
+    const meanErr=(mean-Number(current.targetGS))/Number(current.targetGS)*100;
+    const common={...base, measuredGS:round(mean,3), previousGS:round(Number(previous.measured),3), currentGS:round(Number(current.measured),3), variabilityPct:round(variability*100,1), repeatCount:2, maxStepRule:opt.rule};
+    if (!Number.isFinite(variability) || variability>opt.maxVariability) return {...common,usable:false,action:"VARIABLE / REPEAT",confidence:"LOW",reason:`Repeated ${label} response differs by ${round(variability*100,1)}%; keep the same command rather than chasing shot variability.`};
+    if (Math.abs(e1)<=opt.deadbandPct && Math.abs(e2)<=opt.deadbandPct) return {...common,usable:true,action:"HOLD",confidence:"HIGH",suggestedCommandMlS:snapCommandFlow(Number(current.command)),reason:`Both matching shots are inside the ${opt.deadbandPct}% deadband.`};
+    if (Math.sign(e1)!==Math.sign(e2) || Math.abs(e1)<=opt.deadbandPct || Math.abs(e2)<=opt.deadbandPct) return {...common,usable:false,action:"MIXED / REPEAT",confidence:"MEDIUM",reason:`The two matching shots do not show the same out-of-band direction; keep the command and collect another shot.`};
+    const ratio=Number(current.targetGS)/mean;
+    let factor=1+(ratio-1)*opt.gain;
+    factor=Math.max(1-opt.maxFraction,Math.min(1+opt.maxFraction,factor));
+    let out=Number(current.command)*factor;
+    out=Math.max(Number(current.command)-opt.maxAbs,Math.min(Number(current.command)+opt.maxAbs,out));
+    out=snapCommandFlow(clampCommandFlow(out));
+    const delta=Math.abs(out-Number(current.command));
+    return {...common,usable:true,action:sameCommandFlow(out,Number(current.command))?"HOLD":"ADJUST",confidence:"HIGH",suggestedCommandMlS:out,errorPct:round(meanErr,1),reason:delta<0.005?`Consensus error is too small to justify a command change.`:`Two matching ${label} shots agree on the same error direction; apply one bounded damped step to the next shot.`};
+  }
+
+  
+  
+  
+  
+  
+  function stageGainEstimate(stage,run,current) {
+    const rows=[];
+    const addSingle=e=>{if(!e)return;const cmd=Number(e.command),m=Number(e.measured);if(cmd>0&&m>0)rows.push({k:m/cmd,cmd,m,runId:e.runId});};
+    const addS3=e=>{if(!e)return;if(Array.isArray(e.source)&&e.source.length){let ws=0,cs=0,ms=0;for(const f of e.source){const w=Math.max(1,Number(f.seconds)||1),c=Number(f.command),m=Number(f.measured);if(c>0&&m>0){ws+=w;cs+=c*w;ms+=m*w;}}if(ws>0&&cs>0&&ms>0)rows.push({k:(ms/ws)/(cs/ws),cmd:cs/ws,m:ms/ws,runId:e.runId});}else addSingle(e);};
+    
+    
+    
+    const saved=(state.adaptiveHistory||[]).slice(-8);
+    for(const s of saved){if(run&&s&&s.runId===run.runId)continue;stage==="s3"?addS3(s.s3):addSingle(s[stage]);}
+    stage==="s3"?addS3(current):addSingle(current);
+    if(rows.length<2)return {samples:rows.length,k:null};
+    const ks=rows.map(x=>x.k).sort((a,b)=>a-b),k=median(ks);
+    if(!(k>0))return null;
+    const spread=Math.sqrt(rows.reduce((a,x)=>a+(x.k-k)**2,0)/rows.length)/k;
+    const last=rows[rows.length-1];
+    
+    
+    const bands=new Set(rows.map(x=>commandBandOf(x.cmd)));
+    return {samples:rows.length,k,spread,command:last.cmd,measured:last.m,sources:rows.map(x=>x.runId).filter(Boolean).slice(-8),mixedBand:bands.size>1};
+  }
+  
+  
+  
+  
+  function curveCommandsForRun(run) {
+    const c=run&&run.config||{},sh=c.stage3Shape;
+    let s3;
+    if(sh&&sh.enabled===true&&String(sh.model||"")==="drift"){
+      const mid=snapCommandFlow(Number(sh.midCommand)),ef=Number(sh.earlyFactor),dr=Number(sh.drift);
+      s3=[snapCommandFlow(mid*ef),mid,snapCommandFlow(mid*dr)];
+    }else if(sh&&sh.enabled===true){
+      s3=[snapCommandFlow(Number(sh.earlyCommand)),snapCommandFlow(Number(sh.midCommand)),snapCommandFlow(Number(sh.lateCommand))];
+    }else{
+      const flat=snapCommandFlow(Number(c.stage3CommandMlS));
+      s3=[flat,flat,flat];
+    }
+    return {s1:snapCommandFlow(Number(c.stage1CommandMlS)),s2:snapCommandFlow(Number(c.stage2CommandMlS)),s3};
+  }
+
+  function reconcileStageWithCurve(node,curve,label,shape) {
+    if(!node||node.usable===false)return false;
+    if(shape){
+      let proposed=null;
+      if(node.driftShape){
+        const mid=snapCommandFlow(Number(node.driftShape.midCommand));
+        proposed=[snapCommandFlow(mid*Number(node.driftShape.earlyFactor)),mid,snapCommandFlow(mid*Number(node.driftShape.drift))];
+      }else if(node.suggestedShape){
+        proposed=[snapCommandFlow(Number(node.suggestedShape.earlyCommand)),snapCommandFlow(Number(node.suggestedShape.midCommand)),snapCommandFlow(Number(node.suggestedShape.lateCommand))];
+      }
+      if(!proposed||!curve.every((v,i)=>Number.isFinite(v)&&sameCommandFlow(proposed[i],v)))return false;
+      node.action="HOLD";delete node.suggestedShape;delete node.driftShape;
+      node.reason=(node.reason?String(node.reason)+"; ":"")+label+" already matches the curve commands";
+      return true;
+    }
+    if(!Number.isFinite(Number(node.suggestedCommandMlS)))return false;
+    if(node.action!=="ADJUST"&&node.action!=="LUT COMPENSATE")return false;
+    if(!sameCommandFlow(node.suggestedCommandMlS,curve))return false;
+    node.action="HOLD";delete node.suggestedCommandMlS;
+    node.reason=(node.reason?String(node.reason)+"; ":"")+label+" already matches the curve command";
+    return true;
+  }
+
+  function nextShotAdaptiveSuggestion(run) {
+    if (!trustedAdaptiveRun(run)) return null;
+    
+    const s1vol=stage1VolumeEvidence(run);
+    const s1ev=s1vol?null:stage1AdaptiveEvidence(run), s2ev=stage2AdaptiveEvidence(run), s3ev=stage3AdaptiveEvidence(run);
+    const s1Search=matchingAdaptiveEvidenceSearch(s1ev,"s1"),s2Search=matchingAdaptiveEvidenceSearch(s2ev,"s2"),s3Search=matchingAdaptiveEvidenceSearch(s3ev,"s3");
+    const searchAudit=x=>{const {evidence,...audit}=x;return audit;};
+    const policy=learningPolicy(run.config.adaptiveLearningLevel);
+    const s1=s1vol?s1VolumeSuggestion(s1vol,s1VolumePreviousEvidence(s1vol),policy):scalarLearningSuggestion("S1 startup","s1",s1ev,s1Search.evidence,policy,!!s1ev&&Math.abs(s1ev.errorPct)>=20);
+
+    if (!s1vol&&!s1ev) {
+      const startup=stage1StartupMetrics(run);
+      s1.reason=stage1LiveLearning(run).applicable?stage1LiveLearning(run).reason:startup ? startup.qualityReason : "Not enough S1 RAW scale samples or collected gain.";
+      s1.startupMetrics=startup;
+    }
+    if(s1vol)s1.volumeMetrics=stage1VolumeMetrics(run);
+    const s2=s2AdaptiveSuggestion(run,s2ev,s2Search.evidence);
+
+    const liveS2=controlLearningAssessment(run,"stage2"),liveS3=controlLearningAssessment(run,"stage3");
+    s2.evidenceBasis=liveS2.applicable?liveS2.basis:s2ev&&s2ev.measurementBasis||"RAW fixed-command regression";
+    if(liveS2.applicable)s2.reason=liveS2.reason+"; "+s2.reason;
+    else if(!s2ev){const q=controlOutputQuality(run,"stage2"),limit=learningAdmission(run).spread(12);if(q.available&&q.tailRippleCVPct>limit)s2.reason=`S2 tail ripple ${q.tailRippleCVPct}% exceeds ${round(limit,2)}% learning limit`;}
+    let s3={usable:false,action:"REPEAT",confidence:"INSUFFICIENT",reason:liveS3.applicable?liveS3.reason:"S3 segment/overall data is insufficient."};
+    if (s3ev) {
+      const prev=s3Search.evidence;
+      if (!prev) {
+        s3={usable:false,action:"REPEAT SAME SHAPE",confidence:"PENDING",targetGS:round(Number(s3ev.targetGS),3),overallGS:s3ev.overallGS,status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,sourceFrames:s3ev.source.map(x=>({name:x.name,commandMlS:x.command,measuredGS:x.measured,r2:x.r2,windowS:x.seconds})),repeatCount:1,maxStepRule:"2 matching shots; LEVEL and SHAPE are solved separately",reason:"One clean S3 shot is not enough. Repeat the same shape once more before numeric next-shot adaptation."};
+      } else if (s3ev.stall || prev.stall) {
+        const target=Number(s3ev.targetGS);
+        const currentRatio=Number(s3ev.lateToEarlyRatio), previousRatio=Number(prev.lateToEarlyRatio);
+        const currentLateWeak=!!(s3ev.stall || s3ev.status==="LATE DECAY" || (Number.isFinite(currentRatio)&&currentRatio<0.75));
+        const previousLateWeak=!!(prev.stall || prev.status==="LATE DECAY" || (Number.isFinite(previousRatio)&&previousRatio<0.75));
+        const bothLateWeak=currentLateWeak&&previousLateWeak;
+        const overallMean=(Number(s3ev.overallGS)+Number(prev.overallGS))/2;
+        const currentErr=(Number(s3ev.overallGS)-target)/target*100;
+        const previousErr=(Number(prev.overallGS)-target)/target*100;
+        if (!bothLateWeak || !Number.isFinite(overallMean) || overallMean<=0) {
+          s3={usable:false,action:"STALL / REPEAT",confidence:"LOW",targetGS:round(target,3),overallGS:Number.isFinite(overallMean)?round(overallMean,3):null,status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,repeatCount:2,maxStepRule:"stall recovery requires 2 same-shape shots that both show late weakness",reason:"A confirmed stall exists, but the matching shot does not confirm the same late-weakness pattern. Keep the current profile and repeat rather than chase one stall."};
+        } else {
+          
+          
+          
+          
+          let levelFactor=1;
+          if (currentErr < -10 && previousErr < -10) {
+            const ratio=target/overallMean;
+            levelFactor=1+(ratio-1)*0.14;
+            const stallMid=Math.max(.05,Number(s3ev.source[1].command));
+            levelFactor=Math.max(1.0,Math.min(1+Math.max(.04,s3StepLimit(stallMid,0,0)/stallMid),levelFactor));
+          }
+          const ratios=[currentRatio,previousRatio].filter(Number.isFinite);
+          const meanLateRatio=ratios.length?ratios.reduce((a,b)=>a+b,0)/ratios.length:0.5;
+          const severity=Math.max(0,Math.min(1,(0.80-meanLateRatio)/0.80));
+          const weights=s3ev.source.map(x=>Math.max(1,Number(x.seconds)||1));
+          const wsum=weights.reduce((a,b)=>a+b,0);
+          let shapeFactors=[1-0.025*severity,1+0.005*severity,1+0.060*severity];
+          const norm=shapeFactors.reduce((a,f,i)=>a+f*weights[i],0)/wsum;
+          shapeFactors=shapeFactors.map(f=>f/Math.max(0.001,norm));
+          
+          
+          const bounded=(cmd,f)=>{const lim=s3StepLimit(cmd,.07,.05);let out=cmd*f;out=Math.max(cmd-lim,Math.min(cmd+lim,out));return clampCommandFlow(out)};
+          const commands=s3ev.source.map(x=>Number(x.command));
+          let early=bounded(commands[0],levelFactor*shapeFactors[0]);
+          let mid=bounded(commands[1],levelFactor*shapeFactors[1]);
+          let late=bounded(commands[2],levelFactor*shapeFactors[2]);
+          const boundRise=(a,b)=>Math.min(b,Math.max(a,Math.min(a+0.25,a*1.35)));
+          mid=boundRise(early,mid);late=boundRise(mid,late);
+          const changed=[early,mid,late].some((v,i)=>Math.abs(v-commands[i])>=0.005);
+          s3={usable:changed,action:changed?"STALL RECOVERY":"STALL / HOLD",confidence:"MEDIUM",targetGS:round(target,3),overallGS:round(overallMean,3),levelErrorPct:round((overallMean-target)/target*100,1),levelFactor:round(levelFactor,4),shapeFactors:shapeFactors.map(x=>round(x,4)),status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,meanLateToEarlyRatio:round(meanLateRatio,3),recoverySeverity:round(severity,3),repeatCount:2,maxStepRule:"STALL RECOVERY requires 2 same-shape late-weak shots with ≥1 confirmed stall; LEVEL max +4% (min one 1/16 step); each frame max ±7% / ±0.05 ml/s (min one step)",sourceFrames:s3ev.source.map((x,i)=>({name:x.name,commandMlS:round(x.command,3),currentGS:round(x.measured,3),previousGS:round(prev.source[i]&&prev.source[i].measured,3),quality:x.quality||"clean",r2:x.r2,windowS:x.seconds})),suggestedShape:changed?{earlyCommand:round(early,3),earlySeconds:s3ev.earlySeconds,midCommand:round(mid,3),midSeconds:s3ev.midSeconds,lateCommand:round(late,3)}:null,reason:changed?"Two matching S3 shots confirm late weakness and at least one has a dedicated low-flow stall. Apply one conservative next-shot recovery step: LEVEL rises only if both overall flows are low, while normalized SHAPE shifts command toward LATE.":"Repeated stall evidence was confirmed but the bounded recovery step is too small to justify a profile rewrite."};
+        }
+      } else {
+        const pairs=s3ev.source.map((x,i)=>{const p=prev.source[i],mean=(Number(x.measured)+Number(p.measured))/2;return {name:x.name,command:Number(x.command),measuredMean:mean,variability:mean>0?Math.abs(Number(x.measured)-Number(p.measured))/mean:Infinity,r2:Math.min(Number(x.r2),Number(p.r2)),seconds:Math.max(1,Math.min(Number(x.seconds),Number(p.seconds))),currentMeasured:Number(x.measured),previousMeasured:Number(p.measured)}});
+        const overallMean=(Number(s3ev.overallGS)+Number(prev.overallGS))/2;
+        const overallVar=overallMean>0?Math.abs(Number(s3ev.overallGS)-Number(prev.overallGS))/overallMean:Infinity;
+        const maxVar=Math.max(overallVar,...pairs.map(x=>x.variability));
+        const minR2=Math.min(Number(s3ev.overallR2),Number(prev.overallR2),...pairs.map(x=>x.r2));
+        if (!Number.isFinite(maxVar)||maxVar>0.20) {
+          s3={usable:false,action:"VARIABLE / REPEAT",confidence:"LOW",targetGS:round(Number(s3ev.targetGS),3),overallGS:round(overallMean,3),status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,repeatCount:2,variabilityPct:round(maxVar*100,1),sourceFrames:pairs.map(x=>({name:x.name,commandMlS:round(x.command,3),measuredGS:round(x.measuredMean,3),variabilityPct:round(x.variability*100,1),previousGS:round(x.previousMeasured,3),currentGS:round(x.currentMeasured,3),r2:round(x.r2,5),windowS:round(x.seconds,2)})),maxStepRule:"no numeric adjustment when any repeated S3 measure differs by >20%",reason:"The repeated S3 response is too variable. Keep the same shape and repeat instead of chasing the latest shot."};
+        } else {
+          const confidence=minR2>=0.97&&maxVar<=0.15?"HIGH":"MEDIUM";
+          const target=Number(s3ev.targetGS);
+          const levelErr=(overallMean-target)/target*100;
+          const levelGain=policy.gain*(confidence==="HIGH"?1:.75);
+          
+          
+          
+          const levelStep=s3StepLimit(Number(pairs[1].command),0,0);
+          const levelSpan=Math.max(.05,levelStep/Math.max(.05,Number(pairs[1].command)));
+          let levelFactor=1;
+          const rawLevel=1+(target/overallMean-1)*levelGain;
+          if(Math.abs(rawLevel-1)*Number(pairs[1].command)>=levelStep/2)levelFactor=Math.max(1-levelSpan,Math.min(1+levelSpan,rawLevel));
+          const weights=pairs.map(x=>Math.max(1,x.seconds));
+          const wsum=weights.reduce((a,b)=>a+b,0);
+          const frameMean=pairs.reduce((a,x,i)=>a+x.measuredMean*weights[i],0)/wsum;
+          const shapeGain=policy.gain*(confidence==="HIGH"?.5:.35);
+          let shapeFactors=pairs.map(x=>{
+            const rel=frameMean/Math.max(0.05,x.measuredMean);
+            let f=1+(rel-1)*shapeGain;
+            return Math.max(0.97,Math.min(1.03,f));
+          });
+          const norm=shapeFactors.reduce((a,f,i)=>a+f*weights[i],0)/wsum;
+          shapeFactors=shapeFactors.map(f=>f/Math.max(0.001,norm));
+          const bounded=(cmd,f)=>{const lim=s3StepLimit(cmd,.07,.05);let out=cmd*f;out=Math.max(cmd-lim,Math.min(cmd+lim,out));return clampCommandFlow(out)};
+          let early=bounded(pairs[0].command,levelFactor*shapeFactors[0]);
+          let mid=bounded(pairs[1].command,levelFactor*shapeFactors[1]);
+          let late=bounded(pairs[2].command,levelFactor*shapeFactors[2]);
+          const rawProposedCommands=[early,mid,late],projected=projectS3Commands(rawProposedCommands,pairs.map(x=>x.command),policy,weights);
+          [early,mid,late]=projected;
+          const changed=[early,mid,late].some((v,i)=>Math.abs(v-pairs[i].command)>=0.005);
+          s3={usable:true,rawProposedCommands,action:changed?"LEVEL + SHAPE":"HOLD",confidence,targetGS:round(target,3),overallGS:round(overallMean,3),levelErrorPct:round(levelErr,1),levelFactor:round(levelFactor,4),shapeFactors:shapeFactors.map(x=>round(x,4)),status:s3ev.status,lateToEarlyRatio:s3ev.lateToEarlyRatio,repeatCount:2,variabilityPct:round(maxVar*100,1),maxStepRule:"2 matching shots; LEVEL uses overall S3; SHAPE is normalized to ~zero weighted level change; each frame max ±7% / ±0.05 ml/s (min one 1/16 step)",sourceFrames:pairs.map(x=>({name:x.name,commandMlS:round(x.command,3),measuredGS:round(x.measuredMean,3),variabilityPct:round(x.variability*100,1),previousGS:round(x.previousMeasured,3),currentGS:round(x.currentMeasured,3),r2:round(x.r2,5),windowS:round(x.seconds,2)})),suggestedShape:changed?{earlyCommand:round(early,3),earlySeconds:s3ev.earlySeconds,midCommand:round(mid,3),midSeconds:s3ev.midSeconds,lateCommand:round(late,3)}:null,reason:changed?"S3 overall LEVEL and EARLY/MID/LATE SHAPE were solved separately, then combined into one bounded next-shot profile.":"S3 consensus is inside the overall deadband and shape imbalance is too small to justify a change."};
+        }
+      }
+    }
+    const singleS3=stage3SingleSuggestion(s3ev,s3Search.evidence,policy);if(singleS3)s3=singleS3;else if(s3ev&&!s3Search.evidence&&policy.rank<2)s3.reason="Selected learning policy requires another comparable S3 observation; command and timing changes remain usable";
+    const driftS3=driftShapeSuggestion(run,s3ev,s3Search.evidence,policy);
+    if(driftS3){s3.driftShape=driftS3;s3.usable=true;s3.action="DRIFT + LEVEL";s3.confidence=driftS3.confidence;s3.reason=driftS3.reason;}
+    
+    
+    
+    
+    if(run.config.s3DriftModel===true&&s3.suggestedShape){
+      delete s3.suggestedShape;delete s3.rawProposedCommands;
+      if(!s3.driftShape){s3.usable=false;s3.action="HOLD";s3.reason+="; drift model found no expressible shape change";}
+    }
+    if(s3.suggestedShape&&s3ev&&Array.isArray(s3ev.source)){
+      const keys=["earlyCommand","midCommand","lateCommand"],old=s3ev.source.map(x=>Number(x.command)),[fraction,absolute]=policy.s3;
+      let requested=Array.isArray(s3.rawProposedCommands)?s3.rawProposedCommands.slice():keys.map(k=>Number(s3.suggestedShape[k]));
+      const actual=liveS3.outputQuality;
+      if(liveS3.applicable&&actual&&actual.available&&Math.abs(actual.tailErrorPct)>policy.deadband){
+        const high=actual.tailErrorPct>0;
+        const guarded=requested.map((v,i)=>high?Math.min(v,old[i]):Math.max(v,old[i]));
+        s3.actualDirectionGuard={actualTailErrorPct:actual.tailErrorPct,blocked:guarded.some((v,i)=>Math.abs(v-requested[i])>.0001),direction:high?"no-increase":"no-decrease"};
+        requested=guarded;
+        if(s3.actualDirectionGuard.blocked)s3.reason+="; Actual RAW tail disagrees with modeled correction; opposite-direction changes withheld";
+      }
+      const next=projectS3Commands(requested,old,policy,s3ev.source.map(x=>x.seconds));
+      if(next.every((v,i)=>Number.isFinite(v)&&Math.abs(v-old[i])<=s3StepLimit(old[i],fraction,absolute)+.001))keys.forEach((k,i)=>s3.suggestedShape[k]=round(next[i],3));
+      else {delete s3.suggestedShape;s3.usable=false;s3.action="LIMITED / HOLD";s3.reason="S3 proposed shape cannot satisfy the selected learning bounds";}
+    }
+    if(s3.suggestedShape&&s3ev){
+      const proposed=[s3.suggestedShape.earlyCommand,s3.suggestedShape.midCommand,s3.suggestedShape.lateCommand],old=s3ev.source.map(x=>Number(x.command));
+      if(!proposed.some((v,i)=>Math.abs(v-old[i])>=.005)){delete s3.suggestedShape;s3.action="HOLD";s3.reason+="; Bounded projection retains the current commands";}
+    }
+    if(s3Search.evidence&&s3Search.evidence.comparisonModel==="cross-window historical reference"){
+      s3.crossBasis=true;const lvl=String(s3.confidence||"LOW");
+      s3.confidence=lvl==="HIGH"?"MEDIUM":lvl==="MEDIUM"?"LOW":"LOW";
+      s3.reason=(s3.reason?String(s3.reason)+"; ":"")+"cross-window measurement basis; confidence reduced";
+    }
+    s3.learningLevel=policy.name;s3.maxStepRule=`${policy.name}: S3 step ≤ max(${round(policy.s3[0]*100,1)}%, ${policy.s3[1]} ml/s, one 1/16 step) per frame; adjacent-rise bound retained`;
+    const gainS2=stageGainEstimate("s2",run,s2ev),gainS3=stageGainEstimate("s3",run,s3ev);
+    const addGain=(targetNode,gain,stageKey,limits)=>{
+      const node=stageKey==="s2"?s2:s3;
+      if(!gain||!(Number(gain.k)>0)){node.gainFeedForward={stage:stageKey,samples:gain&&Number(gain.samples)||0,k:null};return;}
+      const target=Number(targetNode&&targetNode.targetGS)||Number(run.config&&run.config[stageKey==="s2"?"stage2Flow":"stage3Flow"]);
+      const cmd=Number(gain.command),ff=cmd>0?target/gain.k:null;
+      if(!(Number.isFinite(ff)&&ff>0))return;
+      const [frac,abs]=limits;
+      
+      
+      const span=stageKey==="s3"?s3StepLimit(cmd,frac,abs):Math.max(cmd*frac,abs);
+      
+      
+      const bounded=snapCommandFlow(clampCommandFlow(Math.max(cmd-span,Math.min(cmd+span,ff))));
+      if(!Number.isFinite(bounded))return;
+      
+      
+      
+      
+      
+      
+      
+      const ok=gain.samples>=3?gain.spread<=.12:gain.samples===2&&gain.spread<=.05;
+      const info={stage:stageKey,samples:gain.samples,k:round(gain.k,3),spread:round(gain.spread,3),targetGS:round(target,3),currentCommandMlS:round(cmd,3),targetCommandMlS:round(ff,3),boundedCommandMlS:round(bounded,3),sources:gain.sources,mixedBand:!!gain.mixedBand,eligible:!!ok,reason:ok?null:"spread "+round(gain.spread*100,1)+"% exceeds the "+(gain.samples>=3?"12%":"5%")+" agreement gate",applied:false};
+      node.gainFeedForward=info;
+      if(!ok)return;
+      if(stageKey==="s2"){
+        if(node.usable!==false&&Math.abs(bounded-cmd)>=.005){
+          node.suggestedCommandMlS=round(bounded,3);node.action=node.action==="HOLD"?"ADJUST":node.action;
+          node.gainFeedForward.applied=true;node.reason+=`; steady-gain feed-forward: k=${round(gain.k,3)}, bounded command ${round(bounded,3)} ml/s`;
+        }
+        return;
+      }
+      if(stageKey==="s3"&&node.suggestedShape&&s3ev&&Array.isArray(s3ev.source)){
+        const old=s3ev.source.map(x=>Number(x.command)),ratio=bounded/cmd;
+        const projected=projectS3Commands(old.map(v=>v*ratio),old,policy,s3ev.source.map(x=>x.seconds));
+        if(projected.some((v,i)=>Math.abs(v-old[i])>=.005)){
+          node.suggestedShape={...node.suggestedShape,earlyCommand:round(projected[0],3),midCommand:round(projected[1],3),lateCommand:round(projected[2],3)};
+          node.action="LEVEL + SHAPE";node.gainFeedForward.applied=true;node.reason+=`; steady-gain feed-forward: k=${round(gain.k,3)}, bounded command ${round(bounded,3)} ml/s`;
+        }
+      }
+    };
+    addGain(s2ev,gainS2,"s2",policy.s2);addGain(s3ev,gainS3,"s3",policy.s3);
+    const memoryS2=gainMemorySuggestion(run,"s2"),memoryS3=gainMemorySuggestion(run,"s3");
+    if(memoryS2){
+      s2.gainMemory={...memoryS2,applied:false};
+      
+      
+      const damped=/SATURATED|LIMITED|VARIABLE|MIXED/.test(String(s2.action||""));
+      if(damped){
+        s2.gainMemory.damped=true;
+        const lvl=String(memoryS2.confidence||"LOW");
+        s2.gainMemory.confidence=lvl==="HIGH"?"MEDIUM":lvl==="MEDIUM"?"LOW":"LOW";
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"scalar evidence is not admissible; gain memory applied at reduced confidence";
+      }
+      const curve=Number(run.config&&run.config.stage2CommandMlS);
+      const numeric=s2.usable!==false&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS));
+      
+      
+      
+      
+      
+      
+      const oq2=controlOutputQuality(run,"stage2");
+      const tailHit=!!(oq2&&oq2.available&&Number.isFinite(Number(oq2.tailErrorPct))&&Math.abs(Number(oq2.tailErrorPct))<=policy.deadband);
+        const manualOrigin=String(run.config&&run.config.stage2CommandOrigin||"")==="manual";
+        const regimeChange=!!(memoryS2.local||(!manualOrigin&&memoryS2.baseBand&&memoryS2.commandBand&&memoryS2.commandBand!==memoryS2.baseBand));
+      const bandImmature=!regimeChange&&memoryS2.bandMatched&&Number(memoryS2.bandN)<3;
+      if(numeric&&((tailHit&&!regimeChange)||bandImmature)){
+        
+        
+        s2.gainMemory.role=tailHit&&!regimeChange?"hit-anchor":"immature-band";
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+(tailHit&&!regimeChange?"HIT anchor: tail "+round(oq2.tailErrorPct,1)+"% inside the band; gain memory pull withheld (r="+memoryS2.r+")":"gain memory band n="+memoryS2.bandN+" < 3: immature band pull withheld");
+      }else if(numeric){
+        
+        
+        
+        
+        
+        
+        const base=Number(s2.suggestedCommandMlS),memoryTarget=Number(memoryS2.commandMlS);
+        const regime=!!(memoryS2.local||memoryS2.crossBand||memoryS2.confidence==="HIGH");
+        let pulled=false;
+        if(regime&&Number.isFinite(base)&&Number.isFinite(memoryTarget)){
+          const pull=memoryS2.confidence==="HIGH"?1:0.7;
+          
+          
+          
+          const wide=Number.isFinite(base)&&base>0&&Math.abs(memoryTarget-base)/base>.30;
+          const hi=Math.max(base*(wide?1.5:1.25),base+0.35),lo=Math.min(base*(wide?0.5:0.75),base-0.35);
+          const bounded=snapCommandFlow(clampCommandFlow(Math.max(lo,Math.min(hi,base+(memoryTarget-base)*pull))));
+          if(Number.isFinite(bounded)&&Math.abs(bounded-base)>=.005){
+            s2.suggestedCommandMlS=round(bounded,4);
+            s2.action=String(s2.action||"").includes("LUT")?"LUT COMPENSATE":"ADJUST";
+            s2.gainMemory.role="base";s2.gainMemory.applied=true;
+            s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" band "+(memoryS2.band||"—")+" r="+memoryS2.r+" is the base: next command "+formatCommandFlow(base)+" -> "+formatCommandFlow(bounded)+" ml/s ("+Math.round(pull*100)+"% toward target/r); same-shot reverse bounded by "+policy.name;
+            pulled=true;
+          }
+        }
+        if(!pulled){
+          
+          
+          s2.gainMemory.role="prior";
+          s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" band "+(memoryS2.band||"—")+" r="+memoryS2.r+" is a prior; the same-shot reverse keeps the command";
+        }
+      }else if(Number.isFinite(curve)&&sameCommandFlow(memoryS2.commandMlS,curve)){
+        s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+        s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory already maps to the curve command";
+      }else{
+        
+        
+        
+        if(s2.action==="HOLD"&&tailHit&&!regimeChange){
+          s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+          s2.gainMemory.applied=false;s2.gainMemory.role="hit-anchor";
+          s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"HIT anchor: tail "+round(oq2.tailErrorPct,1)+"% inside the band; gain memory override withheld (r="+memoryS2.r+")";
+        }else if(bandImmature){
+          
+          
+          
+          s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+          s2.gainMemory.applied=false;s2.gainMemory.role="immature-band";
+          s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory band n="+memoryS2.bandN+" < 3: immature band cannot move the base";
+        }else{
+          
+          
+          
+          const c=Number.isFinite(curve)?curve:Number(memoryS2.commandMlS);
+          const wide=Number.isFinite(c)&&c>0&&Math.abs(Number(memoryS2.commandMlS)-c)/c>.30;
+          const hi=Math.max(c*(wide?1.5:1.25),c+0.35),lo=Math.min(c*(wide?0.5:0.75),c-0.35);
+          const bounded=snapCommandFlow(clampCommandFlow(Math.max(lo,Math.min(hi,Number(memoryS2.commandMlS)))));
+          if(Number.isFinite(bounded)&&Math.abs(bounded-c)>=.005){
+            s2.usable=true;s2.action=s2.action==="LUT COMPENSATE"?"LUT COMPENSATE":"ADJUST";
+            s2.suggestedCommandMlS=round(bounded,4);s2.gainMemory.applied=true;s2.gainMemory.role="base";
+            s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory "+memoryS2.bucketId+" maps "+memoryS2.targetGS+" g/s to "+memoryS2.commandMlS+" ml/s (r="+memoryS2.r+", n="+memoryS2.bucketSamples+", "+memoryS2.confidence+"); damped transition "+formatCommandFlow(c)+" -> "+formatCommandFlow(bounded)+" ml/s";
+          }else{
+            s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+            s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"gain memory damped transition retains the curve command";
+          }
+        }
+      }
+    }
+    if(memoryS3){
+      s3.gainMemory={...memoryS3,applied:false};
+      s3.reason=(s3.reason?String(s3.reason)+"; ":"")+"S3 level memory recorded (r="+memoryS3.r+", n="+memoryS3.bucketSamples+"); shape application remains the separate S3 drift step";
+    }
+    
+    
+    
+    
+    
+    if(String(run.config&&run.config.stage2CommandOrigin||"")==="manual"&&s2.action!=="HOLD"){
+      s2.usable=true;s2.action="HOLD";delete s2.suggestedCommandMlS;
+      if(s2.gainMemory){s2.gainMemory.applied=false;s2.gainMemory.role="manual-anchor";}
+      s2.reason=(s2.reason?String(s2.reason)+"; ":"")+"manual origin: user-set base retained; memory/scalar advise only";
+    }
+    s1.evidenceBasis=s1ev&&s1ev.measurementBasis||"startup 20–80%";
+    s1.historySearch=searchAudit(s1Search);s2.historySearch=searchAudit(s2Search);s3.historySearch=searchAudit(s3Search);
+    const actuatorGuards={stage1:stageActuatorEvidence(run,"stage1"),stage2:stageActuatorEvidence(run,"stage2"),stage3:stageActuatorEvidence(run,"stage3")};
+    for (const [key,guard] of [["s1",actuatorGuards.stage1],["s2",actuatorGuards.stage2],["s3",actuatorGuards.stage3]]) {
+      const decision=key==="s1"?s1:key==="s2"?s2:s3;
+      if (!guard.eligible) {
+        const relaxed=decision.gainMemory?gainMemoryQualityGuard(run,key==="s2"?"stage2":key==="s3"?"stage3":"stage1"):null;
+        if(relaxed&&relaxed.eligible){
+          decision.memoryGuardBypass={hard:guard,relaxed};
+          decision.reason=(decision.reason?String(decision.reason)+"; ":"")+"gain memory kept by relaxed quality guard";
+        }else{
+          Object.assign(decision,{usable:false,action:"LIMITED / HOLD",confidence:"INSUFFICIENT",reason:guard.reason,actuatorGuard:guard});
+          if(decision.gainMemory)decision.gainMemory.applied=false;
+        }
+      }
+    }
+    if(liveS2.applicable)s2.outputQuality=liveS2.outputQuality;
+    if(liveS3.applicable){s3.outputQuality=liveS3.outputQuality;s3.evidenceBasis=liveS3.basis;if(liveS3.eligible)s3.reason=liveS3.reason+"; "+s3.reason;}
+    if(manualS3ShapeLocked()){
+      s3.manualLocked=true;s3.usable=false;s3.action="MANUAL DRIFT LOCK";
+      delete s3.suggestedShape;delete s3.driftShape;if(s3.gainMemory)s3.gainMemory.applied=false;
+      s3.reason="Manual S3 drift shape is locked; automatic S3 updates withheld";
+    }
+    
+    
+    
+    
+    
+    const curveCommands=curveCommandsForRun(run);
+    const hold={s1:reconcileStageWithCurve(s1,curveCommands.s1,"S1"),s2:reconcileStageWithCurve(s2,curveCommands.s2,"S2"),s3:reconcileStageWithCurve(s3,curveCommands.s3,"S3",true)};
+    const actionable=!!((s1.usable&&s1.action==="ADJUST"&&Number.isFinite(Number(s1.suggestedCommandMlS)))||(s2.usable&&(s2.action==="ADJUST"||s2.action==="LUT COMPENSATE")&&Number.isFinite(Number(s2.suggestedCommandMlS)))||(s3.usable&&(s3.suggestedShape||s3.driftShape)));
+    hold.all=!actionable;
+    return {usable:!!(s1.usable||s2.usable||s3.usable),actionable,curveCommands,hold,basketContext:run.config.basketContext||"unknown",actuatorGuards,runId:run.runId,mode:"SHOT-TO-SHOT ONLY",learningLevel:policy.name,s1,s2,s3,note:run.config.experimentalLiveTrim?"Experimental live trim ran in this shot. This table proposes NEXT-SHOT changes only; normalized response is a local model. Actual RAW tracking metrics remain separate; LUT unchanged.":"All three stages use completed-shot evidence only. No running-shot scale control, no extra skipStep calls, and the calibration LUT is never rewritten."};
+  }
+
+
+  async function applyNextShotAdaptiveSuggestion(run, source) {
+    if(state.curveApplyBusy||manualCurveBlocksRun(run))throw new Error("手动曲线已替代旧杯建议，下一杯完成后继续学习");
+    if (state.phase !== "idle" || state.calibrationActive) throw new Error("Next-shot adaptation can only be applied while HyperEx is idle");
+    recomputeCalibrationUsability();
+    if (!state.calibrationMapUsable && !state.lutBootstrapMode) throw new Error(`Calibration LUT is not usable: ${state.calibrationMapStaleReason || "not ready"}`);
+    const suggestion = nextShotAdaptiveSuggestion(run);
+    if (!suggestion || !suggestion.actionable) throw new Error("No actionable bounded next-shot suggestion is available from the latest HyperEx run");
+    const binding = testOverrideBinding();
+    const os = testOverrideStatus();
+    const prevStages = os.valid && state.testOverrides && state.testOverrides.stages ? state.testOverrides.stages : {};
+    const sourceCfg = run && run.config && typeof run.config === "object" ? run.config : {};
+
+    const preserveStage = (stage) => {
+      const n = stage === "stage1" ? "1" : stage === "stage2" ? "2" : "3";
+      const sourceMode = String(sourceCfg[`stage${n}CommandMode`] || "").toLowerCase();
+      const sourceCommand = Number(sourceCfg[`stage${n}CommandMlS`]);
+      if (sourceMode === "manual" && Number.isFinite(sourceCommand)) {
+        return { mode:"manual",origin:sourceCfg[`stage${n}CommandOrigin`]||stageCommandOrigin(stage,false), command:snapCommandFlow(clampCommandFlow(sourceCommand)) };
+      }
+      const q = prevStages[stage] && typeof prevStages[stage] === "object" ? prevStages[stage] : {};
+      if (String(q.mode) === "manual" && Number.isFinite(Number(q.command))) {
+        const scale = Number(os.targetScale && os.targetScale[stage]);
+        return { mode:"manual",origin:stageCommandOrigin(stage,false), command:snapCommandFlow(clampCommandFlow(Number(q.command)*(Number.isFinite(scale)&&scale>0?scale:1))) };
+      }
+      return { mode:"auto", command:null };
+    };
+    const stages = {
+      stage1: preserveStage("stage1"),
+      stage2: preserveStage("stage2"),
+      stage3: preserveStage("stage3")
+    };
+    if (suggestion.s1 && suggestion.s1.usable && suggestion.s1.action === "ADJUST" && Number.isFinite(Number(suggestion.s1.suggestedCommandMlS))) {
+      stages.stage1 = { mode:"manual",origin:"adaptive", command:snapCommandFlow(clampCommandFlow(Number(suggestion.s1.suggestedCommandMlS))) };
+    }
+    if (suggestion.s2 && suggestion.s2.usable && (suggestion.s2.action === "ADJUST" || suggestion.s2.action === "LUT COMPENSATE") && Number.isFinite(Number(suggestion.s2.suggestedCommandMlS))) {
+      stages.stage2 = { mode:"manual",origin:"adaptive", command:snapCommandFlow(clampCommandFlow(Number(suggestion.s2.suggestedCommandMlS))) };
+    }
+
+    const sourceShape = sourceCfg.stage3Shape && typeof sourceCfg.stage3Shape === "object" ? sourceCfg.stage3Shape : null;
+    let s3Shape = sourceShape && sourceShape.enabled === true
+      ? JSON.parse(JSON.stringify(sourceShape))
+      : (os.valid && state.testOverrides && state.testOverrides.s3Shape ? JSON.parse(JSON.stringify(state.testOverrides.s3Shape)) : { enabled:false });
+    if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.driftShape) {
+      const q = suggestion.s3.driftShape, mid = snapCommandFlow(clampCommandFlow(Number(q.midCommand)));
+      const earlyFactor = Math.max(.50, Math.min(2.00, Number(q.earlyFactor))), driftIn = Math.max(.50, Math.min(2.00, Number(q.drift)));
+      
+      
+      const lateLimit = Math.max(mid + .25, mid * 1.35);
+      let lateCommand = snapCommandFlow(clampCommandFlow(mid * driftIn));
+      if (lateCommand > lateLimit + 1e-9) lateCommand = Math.floor((lateLimit + 1e-9) * 16) / 16;
+      const drift = round(lateCommand / mid, 4);
+      s3Shape = { enabled:true, model:"drift", origin:"adaptive", midCommand:mid, midSeconds:round(Math.max(3,Math.min(30,Number(q.midSeconds))),1), earlySeconds:round(Math.max(3,Math.min(30,Number(q.earlySeconds))),1), earlyFactor:round(earlyFactor,4), drift, earlyCommand:snapCommandFlow(clampCommandFlow(mid*earlyFactor)), lateCommand };
+    } else if (run.config.s3DriftModel !== true && suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape) {
+      const q = suggestion.s3.suggestedShape;
+      s3Shape = { enabled:true,origin:"adaptive", earlyCommand:snapCommandFlow(clampCommandFlow(Number(q.earlyCommand))), earlySeconds:round(Math.max(3,Math.min(30,Number(q.earlySeconds))),1), midCommand:snapCommandFlow(clampCommandFlow(Number(q.midCommand))), midSeconds:round(Math.max(3,Math.min(30,Number(q.midSeconds))),1), lateCommand:snapCommandFlow(clampCommandFlow(Number(q.lateCommand))) };
+    }
+    if(s3Shape.enabled&&!s3Shape.origin)s3Shape.origin=sourceCfg.stage3CommandOrigin||stageCommandOrigin("stage3",true);
+    const previousOverrides = state.testOverrides ? JSON.parse(JSON.stringify(state.testOverrides)) : null;
+    try {
+      state.testOverrides = { schema:3, writerVersion:PLUGIN_VERSION, savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, activeRelease:binding.activeRelease, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape, adaptiveSource:{ runId:suggestion.runId, appliedAt:new Date().toISOString(), mode:String(source || "manual") } };
+      storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
+
+      const verifyStatus = testOverrideStatus();
+      if (!verifyStatus.valid) throw new Error(`adaptive override readback rejected: ${verifyStatus.reason}`);
+      if (suggestion.s1 && suggestion.s1.usable && suggestion.s1.action === "ADJUST") {
+        const expectedS1 = snapCommandFlow(clampCommandFlow(Number(suggestion.s1.suggestedCommandMlS)));
+        const actualS1 = manualTestCommand("stage1");
+        if (!Number.isFinite(actualS1) || !sameCommandFlow(Number(actualS1), expectedS1)) {
+          throw new Error(`S1 adaptive readback mismatch: expected ${expectedS1}, got ${actualS1}`);
+        }
+      }
+      if (suggestion.s2 && suggestion.s2.usable && (suggestion.s2.action === "ADJUST" || suggestion.s2.action === "LUT COMPENSATE")) {
+        const expectedS2 = snapCommandFlow(clampCommandFlow(Number(suggestion.s2.suggestedCommandMlS)));
+        const actualS2 = manualTestCommand("stage2");
+        if (!Number.isFinite(actualS2) || !sameCommandFlow(Number(actualS2), expectedS2)) {
+          throw new Error(`S2 adaptive readback mismatch: expected ${expectedS2}, got ${actualS2}`);
+        }
+      }
+      if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.driftShape) {
+        const actual = s3ShapeStatus();
+        const same = actual.enabled === true && actual.model === "drift" &&
+          Math.abs(Number(actual.midCommand) - Number(s3Shape.midCommand)) <= 0.001 &&
+          Math.abs(Number(actual.earlyFactor) - Number(s3Shape.earlyFactor)) <= 0.001 &&
+          Math.abs(Number(actual.drift) - Number(s3Shape.drift)) <= 0.001 &&
+          Math.abs(Number(actual.earlySeconds) - Number(s3Shape.earlySeconds)) <= 0.01 &&
+          Math.abs(Number(actual.midSeconds) - Number(s3Shape.midSeconds)) <= 0.01;
+        if (!same) throw new Error("S3 drift shape readback mismatch: " + JSON.stringify(actual));
+      } else if (run.config.s3DriftModel !== true && suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape) {
+        const expected = suggestion.s3.suggestedShape;
+        const actual = s3ShapeStatus();
+        const same = actual.enabled === true &&
+          sameCommandFlow(actual.earlyCommand, expected.earlyCommand) &&
+          sameCommandFlow(actual.midCommand, expected.midCommand) &&
+          sameCommandFlow(actual.lateCommand, expected.lateCommand) &&
+          Math.abs(Number(actual.earlySeconds) - Number(expected.earlySeconds)) <= 0.01 &&
+          Math.abs(Number(actual.midSeconds) - Number(expected.midSeconds)) <= 0.01;
+        if (!same) throw new Error(`S3 adaptive shape readback mismatch: ${JSON.stringify(actual)}`);
+      }
+
+      await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle));
+      const commandFlows = commandFlowSummary();
+      if (suggestion.s3 && suggestion.s3.usable && suggestion.s3.suggestedShape && commandFlows.stage3Mode !== "shape") {
+        throw new Error(`S3 profile verification failed: effective mode is ${commandFlows.stage3Mode}`);
+      }
+      recordNextShotApplied(run, commandFlows);
+      log(`Next-shot adaptive suggestion VERIFIED (${source || "manual"}) from ${suggestion.runId}: ${JSON.stringify(commandFlows)}`);
+      return { verified:true, suggestion, commandFlows };
+    } catch (applyError) {
+      state.testOverrides = previousOverrides;
+      storageWrite(STORAGE_TEST_OVERRIDES, previousOverrides || '');
+      try { await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle)); } catch (_) {}
+      throw applyError;
+    }
+  }
+
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  function scheduleAutoApplyGrace(run, delayMs) {
+    state.autoApplyTimer = setTimeout(() => {
+      state.autoApplyTimer = null;
+      if (state.phase !== "idle" || !profileSyncIsIdle()) {
+        scheduleAutoApplyGrace(run, AUTO_APPLY_DEFER_MS);
+        return;
+      }
+      const pending = autoApplyNextShotIfEligible(run);
+      if (state.cupVerificationRunId !== run.runId) return pending;
+      return Promise.resolve(pending).finally(() => {
+        if (state.cupVerificationRunId !== run.runId) return;
+        state.cupVerificationRunId = null;
+        scheduleProfileVerification('post-cup verification');
+      });
+    }, delayMs);
+  }
+
+  async function autoApplyNextShotIfEligible(run) {
+    if (!state.autoApplyNextShot || !run || state.curveApplyBusy || manualCurveBlocksRun(run)) return;
+    if (run.observationOnly === true) {
+      state.autoApplyLastStatus = { runId: run.runId, status: "observation-only", at: new Date().toISOString(), message: "Algorithm intervention off; automatic next-shot adaptation withheld" };
+      emitSkinChanged();
+      return;
+    }
+    if (state.autoApplyLastStatus && state.autoApplyLastStatus.runId === run.runId &&
+        ["applying","applied","manual-applied"].includes(state.autoApplyLastStatus.status)) return;
+    const suggestion = nextShotAdaptiveSuggestion(run);
+    if (!suggestion || !suggestion.actionable) {
+      state.autoApplyLastStatus = {
+        runId: run.runId, status: "waiting", at: new Date().toISOString(),
+        message: suggestion ? `S1 ${suggestion.s1&&suggestion.s1.action||"—"} · S2 ${suggestion.s2&&suggestion.s2.action||"—"} · S3 ${suggestion.s3&&suggestion.s3.action||"—"}` : "No actionable suggestion; current settings retained"
+      };
+      emitSkinChanged();
+      log(`AUTO APPLY waiting after ${run.runId}: ${state.autoApplyLastStatus.message}.`);
+      refreshLearningStage();
+      return;
+    }
+    state.autoApplyLastStatus = {runId:run.runId,status:"applying",at:new Date().toISOString(),message:"Applying proposal; awaiting workflow readback and machine upload acknowledgement"};
+    emitSkinChanged();
+    try {
+      const result = await applyNextShotAdaptiveSuggestion(run, "auto");
+      state.autoApplyLastStatus = {
+        runId: run.runId, status: "applied", at: new Date().toISOString(),
+        message: "Verified next-shot adaptive override applied automatically",
+        commandFlows: result.commandFlows
+      };
+      emitSkinChanged();
+      log(`AUTO APPLY completed for ${run.runId}.`);
+      refreshLearningStage();
+    } catch (error) {
+      state.autoApplyLastStatus = {
+        runId: run.runId, status: "error", at: new Date().toISOString(),
+        message: String(error.message || error)
+      };
+      emitSkinChanged();
+      log(`AUTO APPLY failed safely for ${run.runId}: ${error.message || error}`);
+    }
+  }
+
+  async function adaptiveAuditPayload() {
+    const revision=state.workflowSelectionRevision;
+    const basketContext=state.cfg.basketContext;
+    const fingerprint=adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint());
+    const expected=profileObject();
+    const response=await api("/workflow",{method:"GET"});
+    const body=await response.json();
+    const actual=body && body.profile && typeof body.profile==="object" ? body.profile : null;
+    const contextStable=revision===state.workflowSelectionRevision && basketContext===state.cfg.basketContext && fingerprint===adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint()) && profileExecutionEquivalent(expected,profileObject());
+    const proposal=nextShotAdaptiveSuggestion(state.diagnosticLast);
+    const commands=actual?profileCommandSummaryFromProfile(actual):null;
+    const close=(a,b)=>finiteOrNull(a)!==null && finiteOrNull(b)!==null && Math.abs(Number(a)-Number(b))<=0.001;
+    let proposalMatchesWorkflow=null;
+    if (proposal && proposal.actionable) {
+      proposalMatchesWorkflow=!!(contextStable && commands);
+      for (const [key,field] of [["s1","stage1CommandMlS"],["s2","stage2CommandMlS"]]) {
+        const q=proposal[key];
+        if (q && q.usable && (q.action==="ADJUST"||q.action==="LUT COMPENSATE")) proposalMatchesWorkflow=proposalMatchesWorkflow && close(commands&&commands[field],q.suggestedCommandMlS);
+      }
+      if (proposal.s3 && proposal.s3.usable && proposal.s3.driftShape) {
+        const shape=commands && commands.s3Shape,q=proposal.s3.driftShape;
+        proposalMatchesWorkflow=proposalMatchesWorkflow && !!(shape&&shape.enabled&&shape.model==="drift") &&
+          close(shape.midCommand,q.midCommand) && close(shape.earlyFactor,q.earlyFactor) && close(shape.drift,q.drift) &&
+          close(shape.earlySeconds,q.earlySeconds) && close(shape.midSeconds,q.midSeconds);
+      } else if (proposal.s3 && proposal.s3.usable && proposal.s3.suggestedShape) {
+        const shape=commands && commands.s3Shape;
+        proposalMatchesWorkflow=proposalMatchesWorkflow && !!(shape&&shape.enabled) &&
+          ["earlyCommand","earlySeconds","midCommand","midSeconds","lateCommand"].every(k=>close(shape[k],proposal.s3.suggestedShape[k]));
+      }
+    }
+    
+    
+    return {serverTime:new Date().toISOString(),basketContext,
+      contextStable,rawWorkflowProfile:actual,actualCommands:actual?profileCommandSummaryFromProfile(actual):null,
+      expectedCommands:profileCommandSummaryFromProfile(expected),
+      workflowMatchesExpected:contextStable && profileExecutionEquivalent(actual,expected),
+      differences:profileExecutionDifferences(actual,expected),
+      proposal,proposalMatchesWorkflow,baselinePrior:baselineFeedForwardPayload(),
+      autoApply:state.autoApplyLastStatus,cachedProfileTruth:runtimeProfileTruthPayload(),
+      machineProfileIndependentlyReadBack:false};
+  }
+
+  function diagnosticRunCommandSnapshot(run) {
+    const c = run && run.config && typeof run.config === "object" ? run.config : null;
+    if (!c) return null;
+    const shape = c.stage3Shape && c.stage3Shape.enabled === true ? c.stage3Shape : null;
+    return {
+      stage1: { desiredGS: round(c.stage1Flow,3), lutCommandMlS: round(c.stage1LutCommandMlS,3), commandMlS: round(c.stage1CommandMlS,3), mode: String(c.stage1CommandMode || "auto"),origin:c.stage1CommandOrigin||null },
+      stage2: { desiredGS: round(c.stage2Flow,3), lutCommandMlS: round(c.stage2LutCommandMlS,3), commandMlS: round(c.stage2CommandMlS,3), mode: String(c.stage2CommandMode || "auto"),origin:c.stage2CommandOrigin||null },
+      stage3: shape ? {
+        desiredGS: round(c.stage3Flow,3), lutCommandMlS: round(c.stage3LutCommandMlS,3), mode:"shape",origin:c.stage3CommandOrigin||null,
+        shape: {
+          enabled:true, earlyCommand:round(shape.earlyCommand,3), earlySeconds:round(shape.earlySeconds,1),
+          midCommand:round(shape.midCommand,3), midSeconds:round(shape.midSeconds,1), lateCommand:round(shape.lateCommand,3)
+        }
+      } : {
+        desiredGS: round(c.stage3Flow,3), lutCommandMlS: round(c.stage3LutCommandMlS,3), mode:String(c.stage3CommandMode || "auto"),origin:c.stage3CommandOrigin||null,
+        flatCommandMlS: round(c.stage3CommandMlS,3), shape:{ enabled:false }
+      }
+    };
+  }
+
+  
+  
+  
+  function grindAdvisory(run) {
+    
+    
+    
+    const integrity=assessRunLearningIntegrity(run);
+    const fault=integrity&&(integrity.reasons||[]).find(x=>x&&x.code==="execution-fault");
+    if(fault){
+      return {available:false,status:"aborted",direction:"hold",reason:"shot-aborted",label:"本杯压力异常中止：先查滤纸/粉层是否堵塞，再谈研磨",detail:fault.detail?String(fault.detail):"本杯未完成，研磨建议不适用",confidence:"LOW"};
+    }
+    
+    if(!/^completed at /i.test(String(run&&run.result||""))){
+      return {available:false,status:"incomplete",direction:"hold",reason:"shot-incomplete",label:"本杯未完成：研磨建议不适用，先查执行/压力/通道",detail:"result="+String(run&&run.result||"无")+"，非完成杯不给研磨建议",confidence:"LOW"};
+    }
+    const q2=controlOutputQuality(run,"stage2"),q3=controlOutputQuality(run,"stage3");
+    const samples=(run.samples||[]).filter(x=>x.phase==="stage2"&&x.machineTelemetryValid!==false&&Number(x.machineFlowMlS)>0);
+    const tail=samples.slice(Math.floor(samples.length*.6));
+    const p=median(tail.map(x=>Number(x.pressureBar))),q=median(tail.map(x=>Number(x.machineFlowMlS)));
+    const pq=p>0&&q>0?p/q:null;
+    const gm=gainMemorySuggestion(run,"s2");
+    const center=gm&&Number(gm.center)>0?Number(gm.center):null;
+    const s2Err=q2&&q2.available&&Number.isFinite(q2.tailErrorPct)?Number(q2.tailErrorPct):null;
+    const s2Cv=q2&&q2.available&&Number.isFinite(q2.tailRippleCVPct)?Number(q2.tailRippleCVPct):null;
+    const s3Err=q3&&q3.available&&Number.isFinite(q3.tailErrorPct)?Number(q3.tailErrorPct):null;
+    const s3=stage3StabilityDiagnostics(run)||{},lateRatio=Number(s3.lateToEarlyRatio);
+    if(!pq||!center)return {available:false,status:"no-usable",reason:"no usable S2 pressure/flow or gain reference"};
+    const rel=(pq/center-1)*100;
+    const high=(s2Err!=null&&s2Err>=4)||(s3Err!=null&&s3Err>=5);
+    const low=(s2Err!=null&&s2Err<=-4)||(s3Err!=null&&s3Err<=-5);
+    const uneven=(s2Cv!=null&&s2Cv>=15)||(Number.isFinite(lateRatio)&&lateRatio<.80);
+    
+    
+    const s2HitHigh=s2Err!=null&&s2Err>=4,s2HitLow=s2Err!=null&&s2Err<=-4;
+    const hint=rel<0?"finer":"coarser";
+    const near=Math.abs(rel)>=8&&Math.abs(rel)<12;
+    let status="hold",direction="hold",label="接近合适：先保持",subtype=null,suggestedDirection=null;
+    
+    
+    if(uneven&&high){status="uneven";label="粉饼不均匀/通道：先检查布粉；连续两杯仍高再调细半档";if(rel<=-8)subtype="coarse-uneven";}
+    else if(rel<=-12&&high&&s2HitHigh){status="coarse";direction="finer";label=Math.abs(rel)<=20?"研磨偏粗：建议调细约半档":(Math.abs(rel)<=35?"研磨偏粗：建议调细约 1 档":"阻力偏差过大：先确认纸/豆/桶匹配，再谈研磨");}
+    else if(rel>=12&&low&&s2HitLow){status="fine";direction="coarser";label=rel<=20?"研磨偏细：建议调粗约半档":(rel<=35?"研磨偏细：建议调粗约 1 档":"阻力偏差过大：先确认纸/豆/桶匹配，再谈研磨");}
+    else if(high){status="flow-high";label=near?"流量偏高，阻力"+(rel<0?"略低":"略高")+"（"+round(rel,1)+"%，接近 12% 阈值）：先查粉量/指令；连续两杯同向再调"+(hint==="finer"?"细":"粗")+"半档":"流量偏高但阻力接近参考：先查粉量/指令，不急于改研磨";}
+    else if(low){status="flow-low";label=near?"流量偏低，阻力"+(rel<0?"略低":"略高")+"（"+round(rel,1)+"%，接近 12% 阈值）：先查粉量/指令；连续两杯同向再调"+(hint==="finer"?"细":"粗")+"半档":"流量偏低但阻力接近参考：先查粉量/指令，不急于改研磨";}
+    else if(Math.abs(rel)>=12){status="resistance-shift";direction=hint;label=rel<0?"阻力偏低、流量还在带内：先保持，连续两杯再调细":"阻力偏高、流量还在带内：先保持，连续两杯再调粗";}
+    if(near&&(status==="flow-high"||status==="flow-low"))suggestedDirection=hint;
+    
+    const gmN=gm&&gm.bucketSamples!=null?Number(gm.bucketSamples):null;
+    const gconf=gm?gm.confidence:null;
+    const immature=!gm||(gmN!=null&&gmN<3)||gconf==="LOW";
+    const regimeBad=!!(gm&&(gm.stale||gm.fallback));
+    const extreme=Math.abs(rel)>50;
+    const localDev=!!(gm&&gm.local&&Number(gm.deviationPct)>=15);
+    let confidence=(status==="uneven"||immature||regimeBad||extreme||localDev)?"LOW":"MEDIUM";
+    
+    const notes=[];
+    if(subtype==="coarse-uneven")notes.push("偏粗且不均匀（rel "+round(rel,1)+"%）：先查布粉，再谈调细半档");
+    if(localDev)notes.push("本杯指令偏离学习中心 "+gm.deviationPct+"%（base 纠正中），流量偏差优先归因指令/base；下一杯纠正后再评估研磨");
+    if(high||low){
+      const s2hit=high?s2HitHigh:s2HitLow,s3hit=s3Err!=null&&(high?s3Err>=5:s3Err<=-5);
+      if(s2hit&&!s3hit)notes.push("阶段归因：S2 尾 "+round(s2Err,1)+"% 触发（S3 "+(s3Err==null?"—":round(s3Err,1)+"%")+"）");
+      else if(s3hit&&!s2hit)notes.push("阶段归因：S3 尾 "+round(s3Err,1)+"% 触发（S2 平直 "+(s2Err==null?"—":round(s2Err,1)+"%")+"）：先查 S3 形状/指令，研磨嫌疑低");
+      else if(s2hit&&s3hit)notes.push("阶段归因：S2/S3 同向（"+round(s2Err,1)+"% / "+round(s3Err,1)+"%）");
+    }
+    if(regimeBad||extreme){
+      const parts=[];if(gm&&gm.stale)parts.push("stale");if(gm&&gm.fallback)parts.push(String(gm.fallback));if(extreme)parts.push("rel "+round(rel,1)+"%");
+      notes.push("参考桶可能不匹配当前纸/豆 regime（"+parts.join("/")+"），阻力对比仅供参考，先核 regime");
+    }
+    if(uneven&&!high){
+      const ev=Number.isFinite(lateRatio)&&lateRatio<.80?"S3 late/early "+round(lateRatio,3)+"<0.80":"S2 尾 CV "+round(s2Cv,1)+"≥15";
+      notes.push(ev+"，布粉可能不均；流量未偏高，先观察");
+    }
+    if(status==="flow-high"||status==="flow-low")notes.push("若本杯 TDS 命中 3.5±0.2，研磨大概率合适，流量偏差先查粉量/指令（TDS 联合判定见 HEC 总结页·确认重算）");
+    
+    let confirmation=null;
+    const rows=(state.persistentHistoryFile&&state.persistentHistoryFile.shots)||[];
+    let idx=-1;for(let i=rows.length-1;i>=0;i--){if(rows[i]&&rows[i].runId===run.runId){idx=i;break;}}
+    const prev=idx>0?rows[idx-1]:(idx===-1&&rows.length?rows[rows.length-1]:null);
+    const pg=prev&&prev.grindAdvice,pgm=prev&&prev.adaptiveDecision&&prev.adaptiveDecision.s2&&prev.adaptiveDecision.s2.gainMemory;
+    const prevOk=!!(pg&&pg.available&&["uneven","coarse-uneven","aborted"].indexOf(pg.status)<0&&prev.s2&&prev.s2.status!=="MISS"&&(!prev.learningIntegrity||prev.learningIntegrity.eligible!==false));
+    const sameBucket=!!(gm&&pgm&&gm.bucketId===pgm.bucketId);
+    const prevRel=pg&&pg.relPct!=null&&Number.isFinite(Number(pg.relPct))?Number(pg.relPct):null;
+    const prevHint=prevRel==null?null:(prevRel<0?"finer":"coarser");
+    const confirmable=(status==="flow-high"||status==="flow-low"||status==="resistance-shift")&&prevHint===hint
+      &&Math.abs(rel)>=8&&Math.abs(rel)<=35&&prevRel!=null&&Math.abs(prevRel)>=8&&Math.abs(prevRel)<=35
+      &&!regimeBad&&!(pgm&&(pgm.stale||pgm.fallback));
+    if(confirmable&&prevOk&&sameBucket){
+      confirmation={confirmed:true,prevRunId:prev.runId,prevRelPct:round(prevRel,1),relPct:round(rel,1),bucketId:gm.bucketId};
+      label+="；连续两杯同向（"+round(prevRel,1)+"%→"+round(rel,1)+"%，桶 "+gm.bucketId+"），建议微调半档";
+      if(!immature&&!regimeBad&&!localDev&&gmN!=null&&gmN>=8&&gconf==="HIGH")confidence="HIGH";
+    }
+    const evidence=(gm?("桶 "+gm.bucketId+" n"+(gmN==null?"—":gmN)+" "+gconf+(gm.local?" local dev"+gm.deviationPct+"%":"")+(gm.stale?" stale":"")+(gm.fallback?" "+gm.fallback:"")):"无桶证据")+" · "+(confirmation?"两杯确认":"单杯");
+    let detail="S2尾 p/q "+round(pq,3)+" vs 桶中心 "+round(center,3)+"（"+(rel<0?"低":"高")+round(Math.abs(rel),1)+"%）；S2尾偏差 "+(s2Err==null?"—":round(s2Err,1))+"%，S2尾CV "+(s2Cv==null?"—":round(s2Cv,1))+"%，S3偏差 "+(s3Err==null?"—":round(s3Err,1))+"%"+(Number.isFinite(lateRatio)?"，S3 late/early "+round(lateRatio,3):"")+"。";
+    if(notes.length)detail+=notes.join("；")+"。";
+    return {available:true,status,direction,label,confidence,subtype,suggestedDirection,confirmation,evidence,s2Pq:round(pq,3),referencePq:round(center,3),relPct:round(rel,1),s2TailErrorPct:s2Err,s2TailCvPct:s2Cv,s3TailErrorPct:s3Err,s3LateToEarlyRatio:Number.isFinite(lateRatio)?round(lateRatio,3):null,detail,basis:"S2 tail pressure / machine flow vs active gain-memory bucket centre; S2/S3 tail errors; S2 tail CV; S3 late/early"};
+  }
+  function diagnosticSummary(run) {
+    if (!run) return null;
+    return {
+      runId: run.runId,
+      kind: run.kind || "hyperex",
+      profileTitle: run.profileTitle || "",
+      startedAt: run.startedAt,
+      endedAt: run.endedAt,
+      result: run.result,
+      liveFlowTrim: run.liveFlowTrim || null,
+      controlReview: controlRunReview(run),
+      historyPersistence:historyPersistenceAudit(run.runId),
+      learningPolicy:learningPolicy(run.config&&run.config.adaptiveLearningLevel),
+      learningEvidence: {stage1:stage1LiveLearning(run),stage2:controlLearningAssessment(run,"stage2"),stage3:controlLearningAssessment(run,"stage3")},
+      activeRelease:activeReleaseEnabled(run.config),
+      algorithmIntervention:algorithmInterventionForRun(run),
+      observationOnly:run.observationOnly===true,
+      shotCommands: diagnosticRunCommandSnapshot(run),
+      sampleCount: Array.isArray(run.samples) ? run.samples.length : 0,
+      rawScaleSampleCount: Array.isArray(run.rawScaleSamples) ? run.rawScaleSamples.length : 0,
+      eventCount: Array.isArray(run.events) ? run.events.length : 0,
+      learningIntegrity:assessRunLearningIntegrity(run),
+      learningReview:run.learningReview||null,
+      lastRawScaleWeightG: Array.isArray(run.rawScaleSamples) && run.rawScaleSamples.length ? round(run.rawScaleSamples[run.rawScaleSamples.length - 1].weightG, 3) : null,
+      lastRawScaleDwDtGS: Array.isArray(run.rawScaleSamples) && run.rawScaleSamples.length ? round(run.rawScaleSamples[run.rawScaleSamples.length - 1].rawDwDtGS, 3) : null,
+      lastDecaidWeightFlowGS: Array.isArray(run.rawScaleSamples) && run.rawScaleSamples.length ? round(run.rawScaleSamples[run.rawScaleSamples.length - 1].decaidWeightFlowGS, 3) : null,
+      stage1: diagnosticPhaseSummary(run, "stage1"),
+      stage2: diagnosticPhaseSummary(run, "stage2"),
+      stage2CupOnset:stage2CupOnset(run),
+      s2RefillTimeline:s2RefillTimeline(run),
+      stage3: diagnosticPhaseSummary(run, "stage3"),
+      stage2Startup: stage2StartupMetrics(run),
+      stage2StartupNext: stage2StartupPlan(),
+      stage1Startup: stage1StartupMetrics(run),
+      stage1Volume: stage1VolumeMetrics(run),
+      stage3Stability: stage3StabilityDiagnostics(run),
+      advisory: {
+        stage1: referenceAdvisory(run, "stage1"),
+        stage2: referenceAdvisory(run, "stage2"),
+        stage3: referenceAdvisory(run, "stage3")
+      },
+      nextShotAdaptive: nextShotAdaptiveSuggestion(run),
+      grindAdvice: grindAdvisory(run),
+      legacyStage1StartupFactor: round(stage1StartupFactor(), 4)
+    };
+  }
+
+  function finalizeDiagnostics(result) {
+    const run = state.diagnosticCurrent;
+    if (!run) return;
+    diagnosticSample("final", true);
+    run.endedAt = new Date().toISOString();
+    run.result = String(result || "ended");
+    run.summary = diagnosticSummary(run);
+    state.diagnosticLast = run;
+    rememberAdaptiveEvidence(run);
+    run.summary.stage2StartupNext=stage2StartupPlan();
+    state.diagnosticCurrent = null;
+    
+    
+    
+    
+    state.settled={runId:run.runId,at:new Date().toISOString()};
+    state.diagnosticLastSampleAtMs = 0;
+    const s2 = run.summary && run.summary.stage2;
+    const s3 = run.summary && run.summary.stage3;
+    log(`Diagnostic capture saved: ${run.samples.length} samples; stage2 GFlow/Flow=${s2 && s2.ratioMedian !== null ? s2.ratioMedian : "n/a"}, stage3=${s3 && s3.ratioMedian !== null ? s3.ratioMedian : "n/a"}.`);
+    return run;
+  }
+
+  function csvEscape(value) {
+    if (value === null || value === undefined) return "";
+    const s = String(value);
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  function diagnosticCsv(run) {
+    if (!run) return "No diagnostic run captured yet.\n";
+    const headers = ["runId","tMs","source","phase","machineState","substate","profileFrame","physicalProfileFrame","targetFlowMlS","desiredRealFlowGS","targetPressureBar","machineFlowMlS","pressureBar","machineWeightFlowGS","rawScaleWeightG","rawScaleDwDtGS","decaidWeightFlowGS","scaleWeightG","scaleFlowGS","cumulativeWeightG","scaleAgeMs","gflowToMachineFlow"];
+    const rows = [headers.join(",")];
+    for (const s of run.samples || []) {
+      const obj = { runId: run.runId, ...s };
+      rows.push(headers.map(h => csvEscape(obj[h])).join(","));
+    }
+    rows.push("");
+    rows.push("raw_scale_runId,raw_scale_tMs,raw_scale_phase,profileFrame,physicalProfileFrame,targetFlow_ml_s,machineFlow_ml_s,pressure_bar,raw_scale_timestamp,raw_scale_timestamp_seconds,raw_scale_weight_g,raw_scale_dWdt_g_s,decaid_weightFlow_g_s,raw_scale_tare_reset");
+    for (const r of run.rawScaleSamples || []) {
+      rows.push([
+        run.runId,
+        r.tMs,
+        r.phase,
+        r.profileFrame,
+        r.physicalProfileFrame,
+        r.targetFlowMlS,
+        r.machineFlowMlS,
+        r.pressureBar,
+        r.scaleTimestamp,
+        r.scaleTimestampSeconds,
+        r.weightG,
+        r.rawDwDtGS,
+        r.decaidWeightFlowGS,
+        r.tareReset ? 1 : 0
+      ].map(csvEscape).join(","));
+    }
+    rows.push("");
+    rows.push("event_tMs,event_name,event_phase,event_data");
+    for (const e of run.events || []) {
+      rows.push([e.tMs,e.name,e.phase,JSON.stringify(e.data || {})].map(csvEscape).join(","));
+    }
+    if(run.liveFlowTrim){
+      rows.push("");rows.push("live_trim_tMs,kind,frame,decision,command_ml_s,previous_ml_s,raw_g_s,target_g_s,reason,retry,details");
+      for(const x of run.liveFlowTrim.trace||[])rows.push([x.tMs,x.kind,x.frame,x.decision,x.commandMlS,x.previousMlS,x.rawGS,x.targetGS,x.reason,x.retry?1:0,JSON.stringify(x)].map(csvEscape).join(","));
+    }
+    if ((run.kind || "hyperex") === "hyperex") {
+      const summary = diagnosticSummary(run);
+      rows.push("");
+      rows.push("validation_stage,target_real_g_s,machine_flow_avg_ml_s,decaid_weightFlow_avg_g_s,raw_weight_regression_g_s,regression_r2,regression_window_s,error_pct,status");
+      for (const [label, p] of [["S1", summary.stage1],["S2", summary.stage2],["S3", summary.stage3]]) {
+        rows.push([label,p && p.desiredRealFlowGS,p && p.machineFlowAvg,p && p.gflowAvg,p && p.rawRegressionGS,p && p.rawRegressionR2,p && p.rawRegressionSeconds,p && p.rawErrorPct,p && p.validationStatus].map(csvEscape).join(","));
+      }
+      rows.push("");
+      rows.push("advisory_stage,confidence,action,current_command_ml_s,reference_command_ml_s,reference_range_min_ml_s,reference_range_max_ml_s,ratio,error_pct,message");
+      for (const [label, a] of [["S1", summary.advisory && summary.advisory.stage1],["S2", summary.advisory && summary.advisory.stage2],["S3", summary.advisory && summary.advisory.stage3]]) {
+        const rr = a && Array.isArray(a.referenceRangeMlS) ? a.referenceRangeMlS : [null,null];
+        rows.push([label,a && a.confidence,a && a.action,a && a.currentCommandMlS,a && a.referenceCommandMlS,rr[0],rr[1],a && a.ratio,a && a.errorPct,a && a.message].map(csvEscape).join(","));
+      }
+      rows.push("");
+      rows.push("s1_startup_confidence,first_rise_delay_s,transit_20_80_s,mid_flow_g_s,mid_r2,active_flow_g_s,active_seconds,gain_g,error_pct");
+      const s1m = summary.stage1Startup || {};
+      rows.push([s1m.confidence,s1m.firstRiseDelayS,s1m.transit20to80S,s1m.midFlowGS,s1m.midR2,s1m.activeFlowGS,s1m.activeSeconds,s1m.gainG,s1m.errorPct].map(csvEscape).join(","));
+      rows.push("");
+      rows.push("s3_segment,raw_regression_g_s,r2,window_s,samples");
+      const s3s = summary.stage3Stability || {};
+      for (const seg of [s3s.early,s3s.mid,s3s.late]) if (seg) rows.push([seg.name,seg.slope,seg.r2,seg.seconds,seg.samples].map(csvEscape).join(","));
+      rows.push("s3_stability_status,late_to_early_ratio,stall_suspected,stall_start_s,stall_end_s,stall_raw_g_s,stall_machine_ml_s,stall_threshold_g_s");
+      const st = s3s.stall || {};
+      rows.push([s3s.status,s3s.lateToEarlyRatio,st.suspected?1:0,st.startS,st.endS,st.rawSlopeGS,st.machineFlowMlS,st.thresholdGS].map(csvEscape).join(","));
+      if (Array.isArray(s3s.shapeFrames) && s3s.shapeFrames.length) {
+        rows.push("s3_shape_frame,command_ml_s,raw_regression_g_s,r2,window_s,samples,planned_seconds");
+        for (const x of s3s.shapeFrames) rows.push([x.name,x.commandMlS,x.slope,x.r2,x.seconds,x.samples,x.plannedSeconds].map(csvEscape).join(","));
+      }
+      const nx = summary.nextShotAdaptive || {};
+      rows.push("");
+      rows.push("next_shot_stage,usable,confidence,current_command_ml_s,suggested_command_ml_s,early_command_ml_s,early_seconds,mid_command_ml_s,mid_seconds,late_command_ml_s,reason");
+      const nx1 = nx.s1 || {};
+      rows.push(["S1",nx1.usable?1:0,nx1.confidence,nx1.currentCommandMlS,nx1.suggestedCommandMlS,null,null,null,null,null,nx1.reason].map(csvEscape).join(","));
+      const nx2=nx.s2||{};rows.push(["S2",nx2.usable?1:0,nx2.confidence,nx2.currentCommandMlS,nx2.suggestedCommandMlS,null,null,null,null,null,nx2.reason].map(csvEscape).join(","));
+      const nx3 = nx.s3 || {}, q3 = nx3.suggestedShape || {};
+      rows.push(["S3",nx3.usable?1:0,nx3.confidence,null,null,q3.earlyCommand,q3.earlySeconds,q3.midCommand,q3.midSeconds,q3.lateCommand,nx3.reason].map(csvEscape).join(","));
+    }
+    rows.push("");rows.push("shot_command_stage,origin,internal_mode");
+    const snapshot=diagnosticRunCommandSnapshot(run)||{};for(const key of ["stage1","stage2","stage3"]){const x=snapshot[key]||{};rows.push([key,x.origin||"retained",x.mode].map(csvEscape).join(","));}
+    rows.push("learning_level,history_status");rows.push([learningPolicy(run.config&&run.config.adaptiveLearningLevel).name,historyPersistenceAudit(run.runId).status].map(csvEscape).join(","));
+    return rows.join("\n") + "\n";
+  }
+
+  function emitGhcPrompt(status, secondsRemaining, message) {
+    try {
+      host.emit("ghcPrompt", {
+        status: String(status || ""),
+        secondsRemaining: Math.max(0, Math.ceil(Number(secondsRemaining) || 0)),
+        message: String(message || "")
+      });
+    } catch (error) {
+      log(`GHC prompt event failed: ${error.message || error}`);
+    }
+  }
+
+  function stopGhcPrompt(status, message) {
+    clearTimer("ghcCountdownTimer");
+    state.ghcPromptStartedAtMs = 0;
+    state.ghcSecondsRemaining = 0;
+    emitGhcPrompt(status, 0, message);
+    emitSkinChanged();
+  }
+
+  function perfNow() { try { return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now(); } catch (_) { return Date.now(); } }
+  function perfRecord(name, ms) {
+    ms = Math.max(0, Number(ms) || 0);
+    const s = state.perfTiming[name] || (state.perfTiming[name] = { count: 0, maxMs: 0, lastMs: 0, over50Ms: 0 });
+    s.count++; s.lastMs = +ms.toFixed(1); if (ms > s.maxMs) s.maxMs = +ms.toFixed(1); if (ms > 50) s.over50Ms++;
+    if (ms > 50) { try { console.log("[HXPERF] " + name + " " + ms.toFixed(1) + "ms"); } catch (_) {} }
+  }
+  function emptyStatusTiming(enabled) {
+    return {
+      enabled: enabled !== false,
+      status: { totalMs: [], buildMs: [], diagnosticMs: [], calibrationMs: [], serializeMs: [], bytes: [] },
+      diagnostics: { totalMs: [], diagnosticMs: [], serializeMs: [], bytes: [] },
+      summaryReuse: 0, summaryFallback: 0, summaryNoRun: 0,
+      fallbackReasons: {}, lastFallback: null, last: null
+    };
+  }
+  function statusTimingOn() { return !!(state.statusTiming && state.statusTiming.enabled); }
+  function statusTimingPush(kind, key, value) {
+    if (!statusTimingOn()) return;
+    const bucket = state.statusTiming[kind];
+    if (!bucket || !Array.isArray(bucket[key])) return;
+    const arr = bucket[key];
+    arr.push(Math.max(0, Number(value) || 0));
+    if (arr.length > STATUS_TIMING_SAMPLES) arr.splice(0, arr.length - STATUS_TIMING_SAMPLES);
+  }
+  function statusTimingStats(values) {
+    if (!Array.isArray(values) || !values.length) return { samples: 0 };
+    const sorted = values.slice().sort((a, b) => a - b);
+    const at = p => sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1))];
+    const sum = sorted.reduce((a, b) => a + b, 0);
+    return { samples: sorted.length, p50: +at(0.50).toFixed(2), p95: +at(0.95).toFixed(2), max: +sorted[sorted.length - 1].toFixed(2), avg: +(sum / sorted.length).toFixed(2) };
+  }
+  function statusTimingReport() {
+    const t = state.statusTiming;
+    if (!t) return null;
+    const out = { enabled: !!t.enabled, sampleCap: STATUS_TIMING_SAMPLES,
+      summaryReuse: t.summaryReuse || 0, summaryFallback: t.summaryFallback || 0, summaryNoRun: t.summaryNoRun || 0,
+      fallbackReasons: { ...(t.fallbackReasons || {}) }, lastFallback: t.lastFallback || null, last: t.last || null,
+      status: {}, diagnostics: {} };
+    for (const kind of ["status", "diagnostics"]) {
+      const bucket = t[kind] || {};
+      for (const key of Object.keys(bucket)) out[kind][key] = statusTimingStats(bucket[key]);
+    }
+    return out;
+  }
+  
+  
+  
+  function diagnosticSummaryForStatus(run) {
+    if (!run) {
+      if (statusTimingOn()) state.statusTiming.summaryNoRun++;
+      return null;
+    }
+    if (run.summary && typeof run.summary === "object" && !Array.isArray(run.summary) && Object.keys(run.summary).length) {
+      if (statusTimingOn()) state.statusTiming.summaryReuse++;
+      return run.summary;
+    }
+    if (statusTimingOn()) {
+      const reason = run.summary ? "invalid-summary" : "missing-summary";
+      const key = reason + "|" + String(run.runId || "");
+      state.statusTiming.summaryFallback++;
+      state.statusTiming.fallbackReasons[reason] = (state.statusTiming.fallbackReasons[reason] || 0) + 1;
+      if (!state.statusTiming.lastFallback || state.statusTiming.lastFallback.key !== key) {
+        state.statusTiming.lastFallback = { key, at: new Date().toISOString(), runId: run.runId || null, reason };
+        log(`Status diagnostic summary fallback: ${reason} (run ${run.runId || "unknown"}).`);
+      }
+    }
+    const summary = diagnosticSummary(run);
+    
+    try { run.summary = summary; } catch (_) {}
+    return summary;
+  }
+  function timedStatusPart(timing, key, fn) {
+    if (!timing) return fn();
+    const start = perfNow();
+    const value = fn();
+    timing[key] = perfNow() - start;
+    return value;
+  }
+  function recordStatusTiming(kind, sample) {
+    if (!statusTimingOn()) return;
+    for (const key of ["totalMs", "buildMs", "diagnosticMs", "calibrationMs", "serializeMs", "bytes"]) {
+      if (sample[key] != null) statusTimingPush(kind, key, sample[key]);
+    }
+    state.statusTiming.last = { endpoint: kind, at: new Date().toISOString(), ...sample };
+  }
+  function emitSkinChanged() {
+    const t0 = perfNow();
+    try { host.emit("changed", { what: "skin" }); } catch (_) {}
+    perfRecord("skinChanged", perfNow() - t0);
+  }
+
+  
+  
+  function startFlowStripTicker() {
+    clearTimer("flowStripTimer");
+    clearTimer("historyWriteDeferred");
+    clearTimer("historyTrimWriteTimer");
+    const tick = () => {
+      state.flowStripTimer = null;
+      if (state.phase !== "stage2" && state.phase !== "stage3") return;
+      const t0 = perfNow();
+      emitSkinChanged();
+      perfRecord("flowStrip", perfNow() - t0);
+      state.flowStripTimer = setTimeout(tick, 500);
+    };
+    state.flowStripTimer = setTimeout(tick, 500);
+  }
+
+  function startSoakCountdown() {
+    clearTimer("soakCountdownTimer");
+    state.soakPromptStartedAtMs = Date.now();
+    const total = Math.max(0, state.cfg.soakSeconds);
+    let last = null;
+    const tick = () => {
+      if (state.phase !== "soak") return;
+      const elapsed = (Date.now() - state.soakPromptStartedAtMs) / 1000;
+      const remaining = Math.max(0, Math.ceil(total - elapsed));
+      state.soakSecondsRemaining = remaining;
+      if (remaining !== last) {
+        const t0 = perfNow();
+        last = remaining;
+        emitGhcPrompt("soak", remaining, `SOAK — ${remaining}s remaining`);
+        emitSkinChanged();
+        perfRecord("soak", perfNow() - t0);
+      }
+      if (remaining > 0 && state.phase === "soak") {
+        state.soakCountdownTimer = setTimeout(tick, 250);
+      }
+    };
+    tick();
+  }
+
+  function pluginHttpJson(request, status, body) {
+    return { requestId: request.requestId, status, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  }
+
+  function pluginHttpHtml(request, status, body) {
+    return { requestId: request.requestId, status, headers: { "Content-Type": "text/html; charset=utf-8" }, body };
+  }
+
+  function pluginHttpText(request, status, contentType, body, extraHeaders) {
+    return { requestId: request.requestId, status, headers: { "Content-Type": contentType, ...(extraHeaders || {}) }, body };
+  }
+
+  function uiStatusPayload(options) {
+    const timing = options && options.timing;
+    return {
+      phase: state.phase,
+      activeRelease:activeReleaseEnabled(state.cfg),
+      releaseMode: releaseMode(state.cfg),
+      releaseModeLabel: releaseModeLabel(releaseMode(state.cfg)),
+      profileTitle: profileTitleForMode(),
+      liveFlowTrimTest: liveTrimPayload(),
+      directStartTest: directStartTestPayload(),
+      soakSecondsRemaining: state.soakSecondsRemaining,
+      ghcSecondsRemaining: state.ghcSecondsRemaining,
+      armRequestCount: state.armRequestCount,
+      cumulativeWeight: Math.round(state.cumulativeWeight * 100) / 100,
+      stage2Flow: state.cfg ? state.cfg.stage2Flow : 5,
+      diagnosticAvailable: !!state.diagnosticLast,
+      diagnosticSummary: timedStatusPart(timing, "diagnosticMs", () => diagnosticSummaryForStatus(state.diagnosticLast)),
+      calibrationActive: state.calibrationActive,
+      calibration: timedStatusPart(timing, "calibrationMs", () => calibrationStatusPayload()),
+      commandFlows: commandFlowSummary()
+    };
+  }
+
+  function algorithmInterventionPayload() {
+    return {
+      activeRelease: activeReleaseEnabled(state.cfg),
+      releaseMode: releaseMode(state.cfg),
+      releaseModeLabel: releaseModeLabel(releaseMode(state.cfg)),
+      profileTitle: profileTitleForMode(),
+      algorithmIntervention: normalizeAlgorithmIntervention(state.algorithmIntervention),
+      algorithmInterventionActive: activeAlgorithmIntervention(),
+      algorithmInterventionLoaded: state.algorithmInterventionStorageLoaded,
+      canEdit: state.phase === "idle" && !state.calibrationActive && !state.curveApplyBusy && (!state.autoApplyLastStatus || state.autoApplyLastStatus.status !== "applying"),
+      hec: hecStatusPayload()
+    };
+  }
+  
+  
+  function hecStatusPayload() {
+    const now = Date.now(), run = state.diagnosticCurrent;
+    const ageMs = state.hecLastContactAtMs > 0 ? Math.max(0, now - state.hecLastContactAtMs) : null;
+    return {
+      heartbeatTimeoutMs: HEC_HEARTBEAT_MS,
+      lastContactAtMs: state.hecLastContactAtMs || null,
+      ageMs,
+      ok: hecHeartbeatFresh(now),
+      client: state.hecClient,
+      takeover: run && run.config && run.config.hecTakeover ? run.config.hecTakeover : null,
+      externalWrites: state.hecExternalWrites,
+      externalRejects: state.hecExternalRejects,
+      watchdogs: state.hecWatchdogs
+    };
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  function hecSoakSourceFromObs(run, obs) {
+    const band = obs && obs.available === true ? viBandFor(Number(obs.soakP2sRatio)) : null;
+    return { runId: run && run.runId || null, atMs: Date.now(),
+      available: !!(obs && obs.available === true), reason: obs && obs.reason || null,
+      samples: obs && obs.samples || 0, windowS: obs && obs.windowS != null ? obs.windowS : null,
+      soakP0Bar: obs && obs.soakP0Bar != null ? obs.soakP0Bar : null,
+      soakP2sBar: obs && obs.soakP2sBar != null ? obs.soakP2sBar : null,
+      soakP2sRatio: obs && obs.soakP2sRatio != null ? obs.soakP2sRatio : null,
+      soakTauES: obs && obs.soakTauES != null ? obs.soakTauES : null,
+      soakSeconds: obs && obs.soakSeconds != null ? obs.soakSeconds : null,
+      bandLo: band ? band[0] : null, bandHi: band ? band[1] : null };
+  }
+  
+  
+  
+  
+  
+  function hecSoakSourceFor(run) {
+    const cached = state.hecSoakSource;
+    if (run && run.runId) {
+      if (cached && cached.runId === run.runId) return cached;
+      if (state.phase === "stage2" || state.phase === "stage3") {
+        state.hecSoakSource = hecSoakSourceFromObs(run, soakWettingObservation(run));
+        return state.hecSoakSource;
+      }
+      return null;
+    }
+    return cached || null;
+  }
+  function externalStatusPayload() {
+    const t = state.liveTrim, run = state.diagnosticCurrent;
+    const frame = finiteOrNull(state.lastFrame);
+    const layout = run ? runProfileLayout(run) : currentProfileLayout();
+    const physicalFrame = frame === null ? null : physicalFrameForLogical(frame, layout);
+    const step = t && physicalFrame !== null && t.profile.steps[physicalFrame] ? t.profile.steps[physicalFrame] : null;
+    const phase = state.phase;
+    const targetGS = phase === "stage1" ? (state.cfg ? state.cfg.stage1Flow : null) : phase === "stage2" ? (state.cfg ? state.cfg.stage2Flow : null) : phase === "stage3" ? (state.cfg ? state.cfg.stage3Flow : null) : null;
+    const baseCommandMlS = step && step.pump === "flow" ? Math.floor(Number(step.flow) * 16 + 0.5) / 16 : null;
+    const lastCommandMlS = t && frame !== null && Number.isFinite(t.commands[frame]) ? t.commands[frame] : baseCommandMlS;
+    const reg = t && t.active ? liveTrimRegression(t) : null;
+    
+    
+    
+    const fp = adaptiveHistoryFingerprint();
+    const fpKey = fp ? adaptiveHistoryFingerprintKey(fp) : "";
+    const numericFpKey = fp ? numericLearningFingerprintKey(fp) : "";
+    
+    
+    const truthVerified = run ? !!(run.config && run.config.profileTruthVerified) : !!state.runtimeProfileVerified;
+    const learning = learningRevisionPayload();
+    return {
+      pluginVersion: PLUGIN_VERSION,
+      mode: run ? algorithmInterventionForRun(run) : normalizeAlgorithmIntervention(state.algorithmIntervention),
+      phase,
+      extracting: phase === "stage1" || phase === "stage2" || phase === "stage3",
+      logicalFrame: frame,
+      physicalFrame,
+      layout,
+      targetGS,
+      baseCommandMlS,
+      lastCommandMlS,
+      pending: t && t.pending ? { frame: t.pending.frame, command: t.pending.command, ack: !!t.pending.ack } : null,
+      pressureBar: finiteOrNull(state.lastPressure),
+      limiterBar: step && step.limiter ? finiteOrNull(step.limiter.value) : null,
+      machineAgeMs: state.lastMachineAtMs ? Math.max(0, Date.now() - state.lastMachineAtMs) : null,
+      scaleAgeMs: state.latestScaleAtMs ? Math.max(0, Date.now() - state.latestScaleAtMs) : null,
+      rawGS: reg ? round(reg.slope, 3) : null,
+      writes: t ? t.report.writes : 0,
+      maxWrites: t ? t.report.maxWrites : 0,
+      heartbeat: hecStatusPayload(),
+      takeover: run && run.config && run.config.hecTakeover ? run.config.hecTakeover : null,
+      runId: run ? run.runId : null,
+      fpKey: fpKey || null,
+      numericFpKey: numericFpKey || null,
+      settledRunId: state.settled && state.settled.runId ? String(state.settled.runId) : null,
+      
+      
+      
+      settlingBusy: !!(
+        (state.autoApplyLastStatus && state.autoApplyLastStatus.status === "applying") ||
+        state.runtimeProfileRepairBusy || profileSyncInFlight()),
+      
+      
+      runtimeProfileVerified: !!state.runtimeProfileVerified,
+      profileTruthVerified: truthVerified,
+    profileTruthSchema: truthVerified ? 3 : 0,
+    
+    
+    learningRevision: learning.revision,
+    learningStateAt: learning.stateAt,
+    
+    
+    soakSource: hecSoakSourceFor(run),
+    
+    lutOrigin: lutOriginOf(state.calibrationMap),
+    lutBootstrapMode: !!state.lutBootstrapMode
+    };
+  }
+  
+  
+  
+  
+  function gainMemoryMirrorPayload() {
+    const file = state.persistentHistoryFile;
+    if (!file || !file.gainMemory) return null;
+    return normalizeGainMemory(file.gainMemory);
+  }
+  
+  
+  
+  
+  const MIRROR_STRIP_KEYS = new Set(["samples", "rawScaleSamples", "fullRecord", "events"]);
+  function mirrorStrip(value) {
+    if (Array.isArray(value)) return value.map(mirrorStrip);
+    if (value && typeof value === "object") {
+      const out = {};
+      for (const k of Object.keys(value)) if (!MIRROR_STRIP_KEYS.has(k)) out[k] = mirrorStrip(value[k]);
+      return out;
+    }
+    return value;
+  }
+  function adaptiveHistoryMirrorPayload() {
+    if (!Array.isArray(state.adaptiveHistory)) return [];
+    return state.adaptiveHistory.slice(-8).map(row => {
+      const copy = mirrorStrip(row);
+      
+      
+      
+      copy.numericFp = row && row.fingerprint ? numericLearningFingerprintKey(row.fingerprint) : "";
+      return copy;
+    });
+  }
+  function diagnosticLastMirrorPayload() {
+    const run = state.diagnosticLast;
+    if (run) return compactDiagnosticMirror(run, (Array.isArray(state.adaptiveHistory) ? state.adaptiveHistory : []).find(x => x && x.runId === run.runId) || null);
+    
+    
+    
+    
+    
+    return diagnosticMirrorFromHistory();
+  }
+  function compactDiagnosticMirror(run, evidence) {
+    const cfg = run.config || {};
+    const fp = cfg.adaptiveFingerprint;
+    const fpKey = fp ? adaptiveHistoryFingerprintKey(fp) : "";
+    const numericFpKey = fp ? numericLearningFingerprintKey(fp) : "";
+    return {
+      runId: run.runId,
+      startedAt: run.startedAt,
+      result: run.result,
+      completed: /^completed at /i.test(String(run.result || "")),
+      evidenceRow: !!evidence,
+      fpKey: fpKey || null,
+      numericFpKey: numericFpKey || null,
+      cfg: {
+        stage1Flow: cfg.stage1Flow, stage2Flow: cfg.stage2Flow, stage3Flow: cfg.stage3Flow,
+        stage1CommandMlS: cfg.stage1CommandMlS, stage2CommandMlS: cfg.stage2CommandMlS, stage3CommandMlS: cfg.stage3CommandMlS,
+        stage2LutCommandMlS: cfg.stage2LutCommandMlS, stage3LutCommandMlS: cfg.stage3LutCommandMlS,
+        basketContext: cfg.basketContext, releaseMode: cfg.releaseMode,
+        profileTruthSchema: cfg.profileTruthSchema, profileTruthVerified: cfg.profileTruthVerified,
+        adaptiveLearningLevel: cfg.adaptiveLearningLevel
+      },
+      stage2Evidence: evidence && evidence.s2 ? mirrorStrip(evidence.s2) : null,
+      oqTail: mirrorStrip(compactOqTail(run, evidence))
+    };
+  }
+  function compactOqTail(run, evidence) {
+    let oq = null;
+    try { oq = controlOutputQuality(run, "stage2"); } catch (_) { oq = null; }
+    if (!oq || oq.available !== true) {
+      const tail = evidence && evidence.s2 && evidence.s2.tailGain;
+      if (tail && Number(tail.tailMeanGS) > 0 && Number.isFinite(Number(tail.tailRippleCVPct))) {
+        return { available: true, targetGS: evidence.s2.targetGS, tailMeanGS: tail.tailMeanGS, tailErrorPct: tail.tailErrorPct,
+          tailRippleCVPct: tail.tailRippleCVPct, reducedWindow: false, basis: "evidence tailGain (compact fallback)" };
+      }
+    }
+    return oq || { available: false, reason: "unavailable" };
+  }
+  function diagnosticMirrorFromHistory() {
+    const row = diagnosticMirrorSourceRow();
+    if (!row) return null;
+    if (row.diagnosticMirror && row.diagnosticMirror.runId === row.runId) return mirrorStrip(row.diagnosticMirror);
+    return compactDiagnosticMirrorFromRow(row);
+  }
+  function diagnosticMirrorSourceRow() {
+    if (!state.cfg || !state.persistentHistoryFile || !Array.isArray(state.persistentHistoryFile.shots)) return null;
+    const currentKey = numericLearningFingerprintKey(adaptiveHistoryFingerprint());
+    if (!currentKey) return null;
+    const basket = String(state.cfg.basketContext || "");
+    const shots = state.persistentHistoryFile.shots;
+    for (let i = shots.length - 1; i >= 0; i--) {
+      const row = shots[i];
+      if (!row || !row.runId) continue;
+      if (row.profileTruthSchema !== 3 || row.profileTruthVerified !== true) continue;
+      if (row.observationOnly === true || String(row.algorithmIntervention || "full") === "off") continue;
+      if (!historyLearningStatus(row).eligible) continue;
+      if (String(row.basketContext || "") !== basket) continue;
+      if (numericLearningFingerprintKey(row.fingerprint) !== currentKey) continue;
+      return row;
+    }
+    return null;
+  }
+  function compactDiagnosticMirrorFromRow(row) {
+    const ev = row.evidence || null;
+    const fp = row.fingerprint || null;
+    const cmd = row.commands || {};
+    const c1 = cmd.stage1 || {}, c2 = cmd.stage2 || {}, c3 = cmd.stage3 || {};
+    let oq = null;
+    const fr = row.fullRecord;
+    if (fr && Array.isArray(fr.samples) && fr.samples.length) {
+      try {
+        oq = compactOqTail({
+          runId: String(row.runId), kind: "hyperex", result: row.result,
+          config: {
+            basketContext: row.basketContext, profileTruthVerified: row.profileTruthVerified === true,
+            profileTruthSchema: row.profileTruthSchema, adaptiveFingerprint: fp,
+            stage1Flow: c1.desiredGS, stage2Flow: c2.desiredGS, stage3Flow: c3.desiredGS,
+            stage1CommandMlS: c1.commandMlS, stage2CommandMlS: c2.commandMlS,
+            stage3CommandMlS: c3.mode === "shape" && c3.shape ? c3.shape.midCommand : c3.flatCommandMlS,
+            stage2LutCommandMlS: c2.lutCommandMlS, stage3LutCommandMlS: c3.lutCommandMlS,
+            releaseMode: row.releaseMode,
+            adaptiveLearningLevel: state.cfg && state.cfg.adaptiveLearningLevel
+          },
+          samples: fr.samples, rawScaleSamples: fr.rawScaleSamples || [], liveFlowTrim: fr.liveFlowTrim || null
+        }, ev);
+      } catch (_) { oq = null; }
+    }
+    if (!oq) {
+      const tail = ev && ev.s2 && ev.s2.tailGain;
+      if (tail && Number(tail.tailMeanGS) > 0 && Number.isFinite(Number(tail.tailRippleCVPct))) {
+        oq = { available: true, targetGS: ev.s2.targetGS, tailMeanGS: tail.tailMeanGS, tailErrorPct: tail.tailErrorPct,
+          tailRippleCVPct: tail.tailRippleCVPct, reducedWindow: false, basis: "evidence tailGain (full record trimmed)" };
+      }
+    }
+    return {
+      runId: String(row.runId),
+      startedAt: row.startedAt,
+      result: row.result,
+      completed: /^completed at /i.test(String(row.result || "")),
+      evidenceRow: !!ev,
+      fpKey: fp ? adaptiveHistoryFingerprintKey(fp) : null,
+      numericFpKey: fp ? numericLearningFingerprintKey(fp) : null,
+      cfg: {
+        stage1Flow: c1.desiredGS, stage2Flow: c2.desiredGS, stage3Flow: c3.desiredGS,
+        stage1CommandMlS: c1.commandMlS, stage2CommandMlS: c2.commandMlS,
+        stage3CommandMlS: c3.mode === "shape" && c3.shape ? c3.shape.midCommand : c3.flatCommandMlS,
+        stage2LutCommandMlS: c2.lutCommandMlS, stage3LutCommandMlS: c3.lutCommandMlS,
+        basketContext: row.basketContext, releaseMode: row.releaseMode,
+        profileTruthSchema: row.profileTruthSchema, profileTruthVerified: row.profileTruthVerified,
+        adaptiveLearningLevel: state.cfg && state.cfg.adaptiveLearningLevel
+      },
+      stage2Evidence: ev && ev.s2 ? mirrorStrip(ev.s2) : null,
+      oqTail: oq ? mirrorStrip(oq) : { available: false, reason: "full-record-trimmed" }
+    };
+  }
+  
+  
+  
+  
+  const LEARNING_HASH_TIME_KEYS = new Set(["at", "updatedAt", "createdAt", "startedAt", "endedAt", "savedAt", "exportedAt",
+    "profileReadbackAt", "lastReadbackAt", "historyLastReadbackAt", "atMs", "updatedAtMs", "createdAtMs", "startedAtMs", "endedAtMs"]);
+  function learningHashCanonical(value) {
+    if (Array.isArray(value)) return value.map(learningHashCanonical);
+    if (value && typeof value === "object") {
+      const out = {};
+      for (const key of Object.keys(value).sort()) {
+        if (LEARNING_HASH_TIME_KEYS.has(key)) continue;
+        out[key] = learningHashCanonical(value[key]);
+      }
+      return out;
+    }
+    return value;
+  }
+  function learningRevisionHash(text) {
+    let h1 = 0x811c9dc5, h2 = 0x9e3779b9;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+      h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+    }
+    return h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+  }
+  function learningDiagnosticIdentity() {
+    const run = state.diagnosticLast;
+    if (run) {
+      const fp = run.config && run.config.adaptiveFingerprint;
+      return { runId: run.runId || null, numericFpKey: fp ? numericLearningFingerprintKey(fp) : null };
+    }
+    const row = diagnosticMirrorSourceRow();
+    return row ? { runId: row.runId || null, numericFpKey: row.fingerprint ? numericLearningFingerprintKey(row.fingerprint) : null } : null;
+  }
+  function learningRevisionPayload() {
+    const file = state.persistentHistoryFile;
+    const gm = file && file.gainMemory;
+    const history = Array.isArray(state.adaptiveHistory) ? state.adaptiveHistory.slice(-8) : [];
+    const diag = learningDiagnosticIdentity();
+    let revision = "0000000000000000";
+    try { revision = learningRevisionHash(JSON.stringify(learningHashCanonical({ gainMemory: gm || null, adaptiveHistory: history, diagnosticLast: diag }))); } catch (_) {}
+    return { revision, stateAt: gm && gm.updatedAt || null };
+  }
+  function learningExcludedRunIds() {
+    const shots = state.persistentHistoryFile && Array.isArray(state.persistentHistoryFile.shots) ? state.persistentHistoryFile.shots : [];
+    return shots.filter(row => row && row.learningReview && row.learningReview.excluded).slice(-20).map(row => String(row.runId));
+  }
+  
+  
+  
+  async function externalFlowCommand(request) {
+    const reject = (status, reason) => { state.hecExternalRejects++; return pluginHttpJson(request, status, { ok: false, reason, ...externalStatusPayload() }); };
+    const run = state.diagnosticCurrent;
+    if (!run || algorithmInterventionForRun(run) !== "hec") return reject(409, "hec-mode-required");
+    if (hecTakeoverActive(run)) return reject(409, "hec-takeover");
+    const t = state.liveTrim;
+    if (!t || !t.active || !t.handle) return reject(409, "not-extracting");
+    if (!liveTrimPhaseAllowed(t)) return reject(409, "not-extracting");
+    const body = request.body && typeof request.body === "object" ? request.body : {};
+    
+    
+    
+    
+    
+    
+    const externalAction = body.startupAction === undefined || body.startupAction === null ? null : String(body.startupAction);
+    if (externalAction !== null && externalAction !== "boost" && externalAction !== "bleed" && externalAction !== "return") return reject(400, "startup-action-invalid");
+    const raw = Number(body.command);
+    if (!Number.isFinite(raw)) return reject(400, "command-invalid");
+    if (raw < LIMITS.commandFlowMin || raw > LIMITS.commandFlowMax) return reject(400, "command-out-of-bounds");
+    const frame = finiteOrNull(state.lastFrame);
+    if (frame === null || !Number.isInteger(frame)) return reject(409, "frame-not-confirmed");
+    if (body.frame !== undefined && body.frame !== null && Number(body.frame) !== frame) return reject(409, "frame-mismatch");
+    const layout = runProfileLayout(run);
+    const logicalS3Max = 2 + Math.max(0, t.profile.steps.length - layout.s3 - 1);
+    if (state.phase === "stage1" ? frame !== 0 : state.phase === "stage2" ? frame !== 1 : frame < 2 || frame > logicalS3Max) return reject(409, "frame-mismatch");
+    if (t.pending || t.retry) return reject(409, "write-pending");
+    if (state.commandBusy) return reject(409, "command-busy");
+    if (t.report.writes >= t.report.maxWrites) return reject(409, "write-budget");
+    const now = Date.now();
+    if (!state.lastMachineTelemetryValid || now - state.lastMachineAtMs > 600 || now - state.latestScaleAtMs > 600 || state.lastMachineState !== "espresso" || !["preinfusion", "pouring"].includes(state.lastSubstate)) return reject(409, "telemetry-stale");
+    const physicalFrame = physicalFrameForLogical(frame, layout);
+    const step = t.profile.steps[physicalFrame];
+    if (!step || step.pump !== "flow" || step.exit) return reject(409, "frame-not-writable");
+    const command = snapCommandFlow(raw);
+    const previous = Number.isFinite(t.commands[frame]) ? t.commands[frame] : Math.floor(Number(step.flow) * 16 + 0.5) / 16;
+    const limiter = Number(step.limiter && step.limiter.value);
+    if (command > previous && Number.isFinite(limiter) && limiter > 0 && Number.isFinite(state.lastPressure) && state.lastPressure >= limiter * .90) return reject(409, "pressure-upward-blocked");
+    const payload = encodeLiveFlowFrame(step, physicalFrame, command);
+    const p = { frame, command, at: now, ack: false, targetSeen: false, flowAtWrite: finiteOrNull(state.lastFlow), slopeAtWrite: null, sourceStamp: null, external: true };
+    t.pending = p;
+    t.lastWriteAt = now;
+    t.commands[frame] = command;
+    if (!t.sentCommands) t.sentCommands = {};
+    t.sentCommands[frame] = { command, at: now, sample: null };
+    t.report.writes++;
+    state.hecExternalWrites++;
+    state.liveTrimDirty = true;
+    hecTouchContact(null);
+    liveTrimRecord("write", { frame, commandMlS: command, previousMlS: previous, retry: false, external: true, payload, ...(externalAction ? { startupAction: externalAction } : {}) });
+    await host.transport.send(t.handle, { type: "text", data: JSON.stringify({ type: "request", operation: "write", characteristicUUID: "A010", payload }) });
+    return pluginHttpJson(request, 200, { ok: true, commandMlS: command, frame, writes: t.report.writes, maxWrites: t.report.maxWrites, ack: false });
+  }
+
+  function stripRealFlowText() {
+    const gs = Number(state.liveTrim && state.liveTrim.lastCheckGS);
+    const at = Number(state.liveTrim && state.liveTrim.lastCheckAtMs);
+    if (Number.isFinite(gs) && at > 0 && Date.now() - at <= 1500) return `${gs.toFixed(2)} g/s`;
+    
+    
+    
+    const run = state.diagnosticCurrent;
+    const raw = run && Array.isArray(run.rawScaleSamples)
+      ? run.rawScaleSamples.filter(x => (x.phase === "stage2" || x.phase === "stage3") && Number.isFinite(Number(x.weightG))).slice(-16)
+      : [];
+    if (raw.length >= 6) {
+      const fit = regressionForRawSamples(raw);
+      if (fit && Number.isFinite(fit.slope) && fit.seconds >= 0.8) return `${fit.slope.toFixed(2)} g/s`;
+    }
+    const d = Number(state.latestRawDwDt), dAt = Number(state.latestScaleAtMs);
+    if (Number.isFinite(d) && dAt > 0 && Date.now() - dAt <= 1200) return `${d.toFixed(2)} g/s`;
+    return "—";
+  }
+
+  function buildSkinSurfaceAnswer() {
+    const surfaces = [];
+    const live = { endpoint: "changed" };
+    if (state.phase === "dumping") {
+      surfaces.push({
+        id: "hyperex-release-header", kind: "header-button", label: "RELEASING", text: isAutoRelease(state.cfg) ? "AUTO · 0 BAR RELEASE FRAME" : "ACTIVE PRESSURE RELEASE",
+        action: { type: "open", view: "ghc", presentation: "overlay", fit: true, closeOnShot: true }
+      });
+      surfaces.push({
+        id: "hyperex-release-strip", kind: "shot-strip", show: "always", cells: [
+          { label: "HYPEREX", text: isAutoRelease(state.cfg) ? "AUTO RELEASE" : "ACTIVE RELEASE", color: "amber", col: 1, span: 4 },
+          { label: "STATUS", text: isAutoRelease(state.cfg) ? "0 BAR SOAK NEXT" : "WAITING FOR SETTLE", color: "accent", col: 5, span: 5 }
+        ]
+      });
+    } else if (state.phase === "soak") {
+      const sec = Math.max(0, state.soakSecondsRemaining);
+      const auto = isAutoRelease(state.cfg);
+      surfaces.push({
+        id: "hyperex-soak-header", kind: "header-button", label: `SOAK ${sec}s`, text: auto ? "AUTO · S2 AFTER 0" : "WAIT — PINK LIGHT AFTER 0",
+        action: { type: "open", view: "ghc", presentation: "overlay", fit: true, closeOnShot: true }
+      });
+      surfaces.push({
+        id: "hyperex-soak-strip", kind: "shot-strip", show: "always", cells: [
+          { label: "SOAK", text: `${sec} s`, color: sec <= 5 ? "amber" : "accent", col: 1, span: 2 },
+          { label: "STATUS", text: auto ? "0 BAR SOAK" : "ACTIVE RELEASE COMPLETE", color: "accent", col: 3, span: 4 },
+          { label: "NEXT", text: auto ? "S2 AUTO" : "WAIT FOR PINK", color: "flow", col: 7, span: 3 }
+        ]
+      });
+
+    } else if (state.phase === "restart_wait") {
+      const sec = Math.max(0, state.ghcSecondsRemaining);
+      const sinceArm = state.lastArmRequestAtMs ? (Date.now() - state.lastArmRequestAtMs) / 1000 : 999;
+      const waitingPink = sinceArm < 2.5;
+      surfaces.push({
+        id: "hyperex-ghc-header", kind: "header-button",
+        label: waitingPink ? `ARMING ${sec}s` : "RE-ARM",
+        text: waitingPink ? "WAIT FOR PINK LIGHT" : `PINK OFF? TAP HERE · ${sec}s`,
+        action: { type: "open", view: waitingPink ? "ghc" : "rearm", presentation: "overlay", fit: true, closeOnShot: true }
+      });
+      surfaces.push({
+        id: "hyperex-ghc-strip", kind: "shot-strip", show: "always", cells: waitingPink ? [
+          { label: "HYPEREX", text: "WAIT FOR PINK", color: "amber", col: 1, span: 5 },
+          { label: "TIME", text: `${sec} s`, color: sec <= 5 ? "red" : sec <= 10 ? "amber" : "accent", col: 6, span: 2 },
+          { label: "NEXT", text: "PRESS GHC", color: "flow", col: 8, span: 2 }
+        ] : [
+          { label: "PINK ON", text: "PRESS GHC", color: "flow", col: 1, span: 3 },
+          { label: "PINK OFF", text: "TAP RE-ARM", color: "accent", col: 4, span: 4 },
+          { label: "TIME", text: `${sec} s`, color: sec <= 5 ? "red" : sec <= 10 ? "amber" : "accent", col: 8, span: 2 }
+        ]
+      });
+    } else if (state.phase === "stage2" || state.phase === "stage3") {
+      surfaces.push({
+        id: "hyperex-flow-strip", kind: "shot-strip", show: "always", cells: [
+          { label: "REAL", text: stripRealFlowText(), color: "weight", col: 1, span: 3 },
+          { cell: "weightFlow", color: "weight", col: 4, span: 3 },
+          { cell: "flow", color: "flow", col: 7, span: 3 }
+        ]
+      });
+    } else if (state.calibrationActive) {
+      surfaces.push({
+        id: "hyperex-cal-header", kind: "header-button", label: "FLOW CAL", text: "EMPTY BASKET · RUNNING",
+        action: { type: "open", view: "diag-dashboard", presentation: "page" }
+      });
+    } else if (state.phase === "idle" && state.cfg && state.cfg.diagnosticEnabled && state.cfg.idleDashboardShortcut) {
+      const ds = diagnosticSummary(state.diagnosticLast);
+      const r2 = ds && ds.kind === "hyperex" && ds.stage2 && ds.stage2.rawRegressionGS !== null ? `S2 ${ds.stage2.rawRegressionGS}g/s` : (state.calibrationMapUsable ? "CAL READY" : "FLOW CAL / DIAG");
+      surfaces.push({
+        id: "hyperex-diag-header", kind: "header-button",
+        label: state.learningStage && state.learningStage.stage === "READY FOR COFFEE · AUTO" ? "READY · ADD COFFEE" : "DIAG / CAL",
+        text: (activeReleaseEnabled(state.cfg)?"Active release":"Continuous extraction")+" · "+(state.learningStage && state.learningStage.stage === "READY FOR COFFEE · AUTO" ? "EMPTY BASELINE COMPLETE" : r2),
+        action: { type: "open", view: "diag-dashboard", presentation: "page" }
+      });
+    }
+    for(const surface of surfaces){for(const key of ["label","text"])if(typeof surface[key]==="string")surface[key]=translateUiText(surface[key],state.uiLanguage);for(const cell of surface.cells||[])for(const key of ["label","text"])if(typeof cell[key]==="string")cell[key]=translateUiText(cell[key],state.uiLanguage);}
+    return { version: 1, surfaces, live };
+  }
+
+  function buildGhcOverlayHtml() {
+    const endpointBase = `/api/v1/plugins/${ID}`;
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;width:100%;min-height:100%;background:transparent;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f3f0ea;font-synthesis:none;text-rendering:optimizeLegibility;overflow-x:hidden}
+.card{width:860px;max-width:96vw;box-sizing:border-box;padding:24px;border-radius:24px;background:linear-gradient(145deg,rgba(62,54,50,.97),rgba(36,31,29,.97));outline:1px solid rgba(255,255,255,.08);outline-offset:-1px;box-shadow:0 24px 70px rgba(0,0,0,.5)}
+html.diagview,body.diagview{background:radial-gradient(circle at 14% 6%,#241f1c 0,#171514 40%,transparent 66%),linear-gradient(126deg,#1b1918 32%,#4a3d34 100%);background-attachment:fixed;background-color:#171514;min-width:100%;min-height:100vh}
+body.diagview .card{width:100vw;max-width:none;min-height:100vh;border-radius:0;box-shadow:none;background:transparent;outline:0;padding:26px 34px 40px}
+body.diagview .chart{height:250px}body.diagview #flowchart,body.diagview #anglechart,body.diagview #weightchart{contain:paint;will-change:transform}
+body.diagview textarea{height:190px}body.diagview #title,body.diagview #detail{display:none}
+.k{font-size:12px;line-height:16px;font-weight:600;letter-spacing:.16em;color:#a89f94;opacity:1}
+.t{font-size:28px;line-height:1.25;font-weight:600;letter-spacing:-.01em;margin:8px 0;color:#f6f3ee}
+.d{font-size:15px;line-height:1.55;color:#cfc8bd}
+.row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;align-items:center}
+.b{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid transparent;border-radius:999px;padding:11px 18px;font-size:14px;line-height:18px;font-weight:600;letter-spacing:.01em;color:#ece7e0;background:rgba(105,101,98,.3);cursor:pointer;transition:background-color .18s ease,border-color .18s ease,color .18s ease,transform .18s ease;-webkit-tap-highlight-color:transparent}
+.b:hover{background:rgba(124,118,113,.44)}
+.b:active{transform:scale(.97)}
+.b:focus-visible{outline:2px solid #53d68e;outline-offset:3px}
+.p{background:#efad56;color:#241a10}
+.p:hover{background:#f4bd74}
+.s{background:rgba(105,101,98,.3);color:#ece7e0}
+.warn{background:rgba(216,184,77,.14);border-color:rgba(216,184,77,.38);color:#f0d793}
+.danger{background:rgba(222,97,97,.14);border-color:rgba(222,97,97,.36);color:#f49393}
+.primaryAction{background:#efad56;color:#241a10;padding:14px 24px;font-size:15px;font-weight:700;box-shadow:0 10px 26px rgba(239,173,86,.16)}
+.primaryAction:hover{background:#f4bd74}
+.secondaryAction{background:rgba(105,101,98,.32);color:#ece7e0;border:1px solid rgba(255,255,255,.1);padding:11px 16px;font-size:13px}
+.tertiaryAction{background:transparent;color:#c9c2b8;border:1px solid rgba(255,255,255,.16);padding:11px 16px;font-size:13px}
+.tertiaryAction:hover{background:rgba(255,255,255,.06)}
+.actionBadge{display:inline-block;margin-left:8px;padding:4px 9px;border-radius:999px;background:rgba(239,173,86,.16);color:#f0bd7f;font-size:9px;font-weight:700;letter-spacing:.1em;vertical-align:middle}
+.manualPanel{margin-top:12px;padding:14px 16px;border-radius:18px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.08)}
+.manualPanel>summary{cursor:pointer;font-weight:600}
+.hxfold{padding:0;overflow:hidden}
+.hxfold>summary{display:flex;align-items:center;gap:12px;min-height:48px;padding:0 16px;list-style:none}
+.hxfold>summary::-webkit-details-marker{display:none}
+.hxfold>summary::marker{content:''}
+.hxfold>summary::after{content:'›';color:#7a726a;font-size:14px;line-height:1;transition:transform .16s ease}
+.hxfold[open]>summary::after{transform:rotate(90deg)}
+.hxfold[open]>summary{border-bottom:1px solid rgba(255,255,255,.06)}
+.hxfold .fnum{flex:none;width:24px;font:10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:#6f675e;letter-spacing:.06em}
+.hxfold .fttl{flex:1 1 auto;min-width:0;font-size:14px;font-weight:600;color:#f6f3ee;letter-spacing:-.005em}
+.hxfold .fst{flex:0 1 auto;max-width:60%;text-align:right;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:#9a9287;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.hxfold .fbody{padding:14px 16px 16px;font-size:13px;line-height:1.55;color:#cfc8bd}
+.hxfold .fbody .small{font-size:12px;line-height:1.5;color:#9a9287}
+.hxfold .fbody table{font-size:12.5px}
+.hxfold .fbody h3{margin:0 0 8px;font-size:13px;line-height:1.4;font-weight:600;letter-spacing:.01em;color:#f6f3ee}
+.hxsum{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;padding:10px 2px 2px;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#8f877d}
+.hxsum b{color:#d8d2c9;font-weight:600;font-variant-numeric:tabular-nums}
+.hxsum i{font-style:normal;color:#4f4841}
+.refillSeg{display:flex;gap:6px;margin-top:10px}
+.refillseg{flex:1;min-width:0}
+.refillseg input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.refillseg span{display:flex;align-items:center;justify-content:center;padding:9px 8px;border-radius:12px;border:1px solid rgba(255,255,255,.09);background:rgba(255,255,255,.03);color:#b8b0a5;font:12px/1.2 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer;text-align:center}
+.refillseg input:checked+span{border-color:rgba(239,173,86,.55);background:rgba(239,173,86,.12);color:#f4c48c;font-weight:600}
+.refillGrid{display:grid;gap:16px;margin:16px 0 0}
+.refillRow{display:grid;grid-template-columns:1fr 1fr}
+.refillRow.single{grid-template-columns:1fr}
+.refillField{display:flex;flex-direction:column;gap:7px;min-width:0;padding:0 16px}
+.refillField:first-child{padding-left:0}
+.refillField:last-child{padding-right:0}
+.refillRow:not(.single) .refillField:last-child{border-left:1px solid rgba(255,255,255,.07)}
+.refillRow.single .refillField{padding:0}
+.refillLbl{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:12px;line-height:1.3;color:#9a9287}
+.refillLbl b{font:600 12px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfc8bd;font-variant-numeric:tabular-nums}
+.refillField input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:36px;margin:0;padding:0;border:0;background:transparent;cursor:pointer}
+.refillField input[type=range]::-webkit-slider-runnable-track{height:2px;border-radius:2px;background:rgba(255,255,255,.14)}
+.refillField input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-5px;border-radius:50%;background:#efad56;box-shadow:0 0 0 4px rgba(239,173,86,.12)}
+.refillField input[type=range]::-moz-range-track{height:2px;border-radius:2px;background:rgba(255,255,255,.14)}
+.refillField input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#efad56}
+.refillActions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:16px}
+@media(max-width:560px){.refillRow{grid-template-columns:1fr}.refillRow .refillField{padding:0}.refillRow:not(.single) .refillField:last-child{border-left:0}}
+.active{outline:2px solid #efad56;outline-offset:2px}
+.m{margin-top:12px;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c3bcb2;opacity:1}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}
+.stat{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:12px 14px}
+.stat b{display:block;margin-top:6px;font-size:20px;line-height:1.2;font-weight:300;letter-spacing:-.01em;color:#f6f3ee}
+.small{font-size:11.5px;line-height:1.5;color:#9a9287;opacity:1}
+.section{margin-top:18px;padding-top:16px;border-top:1px solid rgba(255,255,255,.075)}
+.section h3{margin:0 0 10px;font-size:17px;line-height:1.3;font-weight:600;letter-spacing:-.01em;color:#f6f3ee}
+.good{color:#53d68e}
+.bad{color:#f49090}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+textarea{width:100%;height:150px;box-sizing:border-box;background:rgba(0,0,0,.32);color:#d6d0c6;border:1px solid rgba(255,255,255,.09);border-radius:16px;padding:12px 14px;font:11px/1.6 ui-monospace,monospace;resize:vertical}
+textarea:focus-visible{outline:2px solid rgba(239,173,86,.6);outline-offset:1px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:right;padding:8px;border-bottom:1px solid rgba(255,255,255,.06)}
+th{color:#9a9287;font-weight:600}
+th:first-child,td:first-child{text-align:left}
+.chart{width:100%;height:205px;background:rgba(0,0,0,.26);border:1px solid rgba(255,255,255,.07);border-radius:18px;margin-top:10px}
+.legend{font-size:11.5px;line-height:1.6;color:#a89f94}
+.stepHead{margin-top:20px;padding:15px 18px;border-radius:18px;background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.02));border:1px solid rgba(255,255,255,.08)}
+.stepHead b{font-size:19px;font-weight:600;letter-spacing:-.01em;color:#f6f3ee}
+.stepBadge{float:right;padding:5px 10px;border-radius:999px;background:rgba(255,255,255,.08);color:#d8d2c9;font-size:10px;font-weight:700;letter-spacing:.08em}
+.stepBadge.good{background:rgba(83,214,142,.16);color:#7ee6ac}
+.stepBadge.bad{background:rgba(222,97,97,.18);color:#f49090}
+.stepHint{margin-top:6px;font-size:12.5px;line-height:1.55;color:#a89f94}
+.presetslot{min-width:34px;padding:8px 10px;font-size:13px;font-weight:700;letter-spacing:.02em}
+.presetslot--on{background:#efad56;color:#241a10;border-color:transparent}
+.presetslot--off{background:transparent;color:#8a837a;border:1px solid rgba(255,255,255,.14);cursor:default;opacity:.8}
+.presetslot:disabled{cursor:default}
+
+summary{outline:none}
+summary:focus-visible{outline:2px solid rgba(239,173,86,.55);outline-offset:3px;border-radius:12px}
+select,input[type="number"],input[type="text"]{font-family:inherit;color:#ece7e0;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:7px 10px;font-size:13px}
+/* 2026-11-05: external brew-mode card. The single-line #brewingmode stays as
+   the compact GHC-overlay status; the diagnostics page uses this card. */
+body.diagview #brewingmode{display:none}
+#modecard{position:relative;margin:4px 0 18px;padding:17px 20px 13px;border-radius:20px;
+  background:linear-gradient(135deg,rgba(239,173,86,.11),rgba(255,255,255,.028) 46%,rgba(255,255,255,.018));
+  border:1px solid rgba(239,173,86,.26);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 18px 44px rgba(0,0,0,.18);
+  transition:background .25s ease,border-color .25s ease}
+#modecard::before{content:"";position:absolute;left:0;top:16px;bottom:16px;width:3px;border-radius:0 3px 3px 0;
+  background:linear-gradient(180deg,#efad56,rgba(239,173,86,.12));transition:background .25s ease}
+#modecard.state-off{background:linear-gradient(135deg,rgba(127,143,163,.09),rgba(255,255,255,.025) 46%,rgba(255,255,255,.015));border-color:rgba(127,143,163,.24)}
+#modecard.state-off::before{background:linear-gradient(180deg,#7f8fa3,rgba(127,143,163,.12))}
+#modecard .mode-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:0 4px 7px}
+#modecard .mode-kicker{font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.17em;color:#a89f94}
+#modecard .head-status{display:flex;align-items:center;gap:11px;white-space:nowrap}
+#modecard .head-sep{width:1px;height:10px;background:rgba(255,255,255,.12)}
+#modecard .latch{display:flex;align-items:center;gap:7px;font:11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;color:#b8b0a5;white-space:nowrap}
+#modecard .latch .dot{width:6px;height:6px;border-radius:50%;background:#53d68e;box-shadow:0 0 0 3px rgba(83,214,142,.12)}
+#modecard.state-off .latch .dot{background:#7f8fa3;box-shadow:0 0 0 3px rgba(127,143,163,.12)}
+#modecard.state-hec{background:linear-gradient(135deg,rgba(110,168,254,.10),rgba(255,255,255,.028) 46%,rgba(255,255,255,.018));border-color:rgba(110,168,254,.30)}
+#modecard.state-hec::before{background:linear-gradient(180deg,#6ea8fe,rgba(110,168,254,.12))}
+#modecard.state-hec .latch .dot{background:#6ea8fe;box-shadow:0 0 0 3px rgba(110,168,254,.14)}
+#modecard .hec-status{display:flex;align-items:center;gap:9px;margin:8px 4px 2px;padding:8px 12px;border-radius:12px;background:rgba(110,168,254,.07);border:1px solid rgba(110,168,254,.18);font:11.5px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;color:#b8c6dd;flex-wrap:wrap}
+#modecard .hec-status .dot{width:6px;height:6px;border-radius:50%;background:#53d68e;box-shadow:0 0 0 3px rgba(83,214,142,.12);flex:none}
+#modecard .hec-status .dot.bad{background:#f49090;box-shadow:0 0 0 3px rgba(244,144,144,.14)}
+#modecard .hec-status .sep{width:1px;height:10px;background:rgba(255,255,255,.12)}
+#modecard .mode-grid{display:grid;grid-template-columns:minmax(0,1fr) 1px minmax(0,1fr);gap:18px;align-items:stretch;margin:2px 4px 4px}
+#modecard .mode-cell{display:flex;align-items:center;gap:11px;min-width:0;padding:6px 4px}
+#modecard .mode-sep{width:1px;background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.09),rgba(255,255,255,.02))}
+#modecard .mode-copy{flex:1 1 auto;min-width:0}
+#modecard .mode-label{font-size:14.5px;font-weight:600;line-height:1.3;color:#f6f3ee;letter-spacing:-.005em}
+#modecard .mode-sub{margin-top:3px;font-size:11px;line-height:1.4;color:#9a9287}
+#modecard .switch{position:relative;flex:none;display:grid;grid-template-columns:1fr 1fr;width:210px;padding:4px;border-radius:14px;
+  background:rgba(0,0,0,.30);border:1px solid rgba(255,255,255,.07);
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.35),inset 0 -1px 0 rgba(255,255,255,.03)}
+#modecard .switch.locked{opacity:.55;pointer-events:none}
+#modecard .switch-thumb{position:absolute;top:4px;bottom:4px;left:4px;width:calc(50% - 4px);border-radius:10px;
+  background:linear-gradient(180deg,#f2b968,#e8a244);
+  box-shadow:0 4px 12px rgba(239,173,86,.22),inset 0 1px 0 rgba(255,255,255,.34);
+  transition:transform .26s cubic-bezier(.2,.75,.25,1),background .2s ease,box-shadow .2s ease}
+#modecard .switch[data-on="false"] .switch-thumb{transform:translateX(100%);
+  background:linear-gradient(180deg,#6f7c8c,#596574);
+  box-shadow:0 4px 12px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.16)}
+#modecard .switch-opt{position:relative;z-index:1;border:0;background:transparent;padding:9px 6px;border-radius:9px;
+  font:600 12px/1.2 Inter,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:.01em;color:#8f877d;cursor:pointer;transition:color .2s ease}
+#modecard .switch[data-on="true"] .switch-opt.on{color:#241a10}
+#modecard .switch[data-on="false"] .switch-opt.off{color:#f1eee8}
+#modecard .switch-opt:hover{color:#cfc8bd}
+#modecard .switch[data-on="true"] .switch-opt.on:hover{color:#241a10}
+#modecard .switch[data-on="false"] .switch-opt.off:hover{color:#fff}
+#modecard .switch-opt:focus-visible{outline:2px solid rgba(239,173,86,.65);outline-offset:2px}
+/* 2026-11-08: three-position release switch (auto / on / off).
+   2.2.48: the algorithm switch joins it as three-position (full / hec / off). */
+#modecard .algo-switch{grid-template-columns:1fr 1fr 1fr;width:252px}
+#modecard .algo-switch .switch-thumb{width:calc(33.333% - 2.667px)}
+#modecard .algo-switch[data-mode="full"] .switch-opt.full{color:#241a10}
+#modecard .algo-switch[data-mode="hec"] .switch-thumb{transform:translateX(100%);background:linear-gradient(180deg,#8dbaff,#5b93e8);box-shadow:0 4px 12px rgba(110,168,254,.26),inset 0 1px 0 rgba(255,255,255,.30)}
+#modecard .algo-switch[data-mode="hec"] .switch-opt.hec{color:#0e1a2c}
+#modecard .algo-switch[data-mode="off"] .switch-thumb{transform:translateX(200%);background:linear-gradient(180deg,#6f7c8c,#596574);box-shadow:0 4px 12px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.16)}
+#modecard .algo-switch[data-mode="off"] .switch-opt.off{color:#f1eee8}
+#modecard .release-switch{grid-template-columns:1fr 1fr 1fr;width:276px}
+#modecard .release-switch .switch-thumb{width:calc(33.333% - 2.667px)}
+#modecard .release-switch[data-mode="on"] .switch-thumb{transform:translateX(100%)}
+#modecard .release-switch[data-mode="off"] .switch-thumb{transform:translateX(200%);background:linear-gradient(180deg,#6f7c8c,#596574);box-shadow:0 4px 12px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.16)}
+#modecard .release-switch[data-mode="auto"] .switch-opt.auto,
+#modecard .release-switch[data-mode="on"] .switch-opt.on{color:#241a10}
+#modecard .release-switch[data-mode="off"] .switch-opt.off{color:#f1eee8}
+@media(max-width:820px){
+  #modecard .mode-grid{grid-template-columns:1fr;gap:8px}
+  #modecard .mode-sep{width:auto;height:1px;background:linear-gradient(90deg,rgba(255,255,255,.02),rgba(255,255,255,.09),rgba(255,255,255,.02))}
+}
+@media(max-width:680px){
+  #modecard .mode-cell{flex-wrap:wrap}
+  #modecard .switch{width:100%;max-width:320px}
+  #modecard .mode-head{flex-wrap:wrap;row-gap:6px}
+  #modecard .head-status{flex-wrap:wrap;white-space:normal;row-gap:6px}
+}
+</style></head><body><div class="card"><div class="row" style="justify-content:space-between;align-items:center;gap:10px;margin:0 0 10px"><div class="row" style="gap:9px;flex:none"><button id="close-top" class="b s" type="button">CLOSE / HOME</button><button id="jump-weight" class="b s" type="button">REAL SCALE CURVES</button><div id="presetbar" class="row" style="gap:6px;margin:0;flex:none"></div></div><div id="hx-language" data-no-i18n class="row" style="justify-content:flex-end;margin:0;gap:9px"><button class="b s" data-language="zh" lang="zh-CN" aria-pressed="true">中文</button><button class="b s" data-language="en" lang="en" aria-pressed="false">English</button><span id="hx-language-status" style="align-self:center" aria-live="polite"></span></div></div><div class="k">HYPEREX v${PLUGIN_VERSION}</div><div id="brewingmode" class="m" role="status" style="margin:10px 0 14px;padding:12px 16px;border:1px solid rgba(239,173,86,.42);border-radius:16px;background:rgba(239,173,86,.10);font-weight:600;letter-spacing:.02em">${releaseMode(state.cfg)==="auto"?"Release: AUTO · 0 bar release / soak → S2":releaseMode(state.cfg)==="on"?"Release: ON · Release / soak / GHC restart":"Release: OFF · Continuous S1 → S2 → S3"}</div><div id="title" class="t">Checking…</div><div id="detail" class="d"></div>
+<div id="diag" style="display:none">
+  <div id="modecard"${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?' class="state-off"':normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"?' class="state-hec"':''}>
+    <div class="mode-head">
+      <span class="mode-kicker">萃取模式</span>
+      <div class="head-status">
+        <span class="latch"><span class="dot"></span><span id="mode-latch">本杯 算法${activeAlgorithmIntervention()==="off"?"全关":activeAlgorithmIntervention()==="hec"?"HEC":"全开"}</span></span>
+        <span class="head-sep" aria-hidden="true"></span>
+        <span class="latch"><span class="dot"></span><span>本杯锁定</span></span>
+        <span class="head-sep" aria-hidden="true"></span>
+        <span class="latch"><span class="dot"></span><span id="mode-next">下一杯 算法${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?"全关":normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"?"HEC":"全开"} · 已保存</span></span>
+      </div>
+    </div>
+    <div class="mode-grid">
+      <div class="mode-cell">
+        <div class="mode-copy">
+          <div class="mode-label">泄压模式</div>
+          <div class="mode-sub" id="mode-release-sub">${releaseMode(state.cfg)==="auto"?"Auto · 0 bar 泄压 / 浸泡 → S2":releaseMode(state.cfg)==="on"?"泄压 · 浸泡 · GHC 重启":"连续 S1 → S2 → S3"}</div>
+        </div>
+        <div class="switch release-switch" id="mode-release" data-mode="${releaseMode(state.cfg)}" role="group" aria-label="泄压模式">
+          <span class="switch-thumb" aria-hidden="true"></span>
+          <button class="switch-opt auto" type="button" data-release="auto" aria-pressed="${releaseMode(state.cfg)==="auto"}">Auto</button>
+          <button class="switch-opt on" type="button" data-release="on" aria-pressed="${releaseMode(state.cfg)==="on"}">泄压重启</button>
+          <button class="switch-opt off" type="button" data-release="off" aria-pressed="${releaseMode(state.cfg)==="off"}">连续</button>
+        </div>
+      </div>
+      <div class="mode-sep" aria-hidden="true"></div>
+      <div class="mode-cell">
+        <div class="mode-copy">
+          <div class="mode-label">算法介入</div>
+          <div class="mode-sub" id="mode-algo-sub">${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"?"只检测 · 不写入":normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"?"HEC：APK 调流 · 插件监护 + 学习":"全开：插件调流 · HEC：APK 调流 · 全关：只检测"}</div>
+        </div>
+        <div class="switch algo-switch" id="mode-algo" data-mode="${normalizeAlgorithmIntervention(state.algorithmIntervention)}" role="group" aria-label="算法介入">
+          <span class="switch-thumb" aria-hidden="true"></span>
+          <button class="switch-opt full" type="button" data-algo="full" aria-pressed="${normalizeAlgorithmIntervention(state.algorithmIntervention)==="full"}">全开</button>
+          <button class="switch-opt hec" type="button" data-algo="hec" aria-pressed="${normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"}">HEC</button>
+          <button class="switch-opt off" type="button" data-algo="off" aria-pressed="${normalizeAlgorithmIntervention(state.algorithmIntervention)==="off"}">全关</button>
+        </div>
+      </div>
+    </div>
+    <div class="hec-status" id="hec-status" style="display:${normalizeAlgorithmIntervention(state.algorithmIntervention)==="hec"?"flex":"none"}">
+      <span class="dot" id="hec-dot"></span><span id="hec-conn">APK 未连接</span>
+      <span class="sep"></span><span id="hec-counts">外部写入 0 · 拒绝 0 · 看门狗 0</span>
+      <span class="sep"></span><span id="hec-budget">本杯预算 0 / 0</span>
+      <span class="sep" id="hec-takeover-sep" style="display:none"></span><span id="hec-takeover" style="display:none">HEC：本杯插件已接管</span>
+    </div>
+  </div>
+  <div class="d" style="margin:2px 0 14px;padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.04)"><b>ENTRY</b> · Dashboard <b>DIAG / CAL</b> is enabled by default. If another plugin occupies the reserved header slot, open <b>Plugins → HyperEx Pulse Filter</b>.</div>
+
+  <div class="sech" id="calsechead" style="display:flex;align-items:center;gap:10px;margin:6px 2px 12px;"><b style="color:#f6f3ee;font-size:16px;font-weight:600;">校准 · CALIBRATION</b><span id="calstagebadge" class="stepBadge" style="padding:5px 11px;border-radius:999px;font-size:10.5px;font-weight:700;background:rgba(83,214,142,.16);color:#7ee6ac;">—</span><span id="callutorigin" style="margin-left:auto;color:#9a9287;font-size:11.5px;">—</span></div>
+  <details class="manualPanel" id="step1"><summary class="stepHead"><span id="step1badge" class="stepBadge">OPTIONAL</span><b>空碗 Flow Cal</b><span style="color:#9a9287;font-size:12px;font-weight:500;">（可选）</span></summary><div class="stepHint">机器侧锚点验证 / multiplier 诊断。咖啡引导建图为主路径；空碗校准不再作为 arming 前置，可随时重跑，合并保留增益。</div>
+  <details class="manualPanel hxfold" id="fold-calstatus">
+    <summary><span class="fnum">01</span><b class="fttl">校准状态</b><span class="fst" id="st-calstatus">—</span></summary>
+    <div class="fbody"><div id="calstatus" class="d"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-waterpreflight">
+    <summary><span class="fnum">02</span><b class="fttl">水量／容器／水箱检查</b><span class="fst" id="st-waterpreflight">—</span></summary>
+    <div class="fbody"><div id="waterwarn" class="d" style="margin-top:12px;padding:12px 14px;border-radius:16px;background:rgba(216,184,77,.12);color:#f0d793"><b>WATER / VESSEL / TANK PREFLIGHT</b><br>Waiting for live DE1 tank level…</div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-calmode">
+    <summary><span class="fnum">03</span><b class="fttl">校准模式与作用域</b><span class="fst" id="st-calmode">—</span></summary>
+    <div class="fbody"><div id="calmode" class="row"></div><div id="scope" class="row"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-calprepare">
+    <summary><span class="fnum">04</span><b class="fttl">执行校准</b><span class="fst" id="st-calprepare">—</span></summary>
+    <div class="fbody"><div class="row"><button id="prepare" class="b p">PREPARE FLOW CAL</button><button id="sync" class="b s">SYNC HYPEREX</button><button id="suggested" class="b s">USE SUGGESTED FOR NEXT CAL</button><button id="importlut" class="b s">IMPORT LUT JSON</button><input id="importlutfile" type="file" accept=".json,application/json" style="display:none"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-callut">
+    <summary><span class="fnum">05</span><b class="fttl">校准表 LUT</b><span class="fst" id="st-callut">—</span></summary>
+    <div class="fbody"><div id="map" class="m"></div><div id="lutimportstatus" class="small"></div><div class="row"><button id="global" class="b danger">APPLY SUGGESTED GLOBALLY</button><button id="restore" class="b warn">RESTORE PREVIOUS GLOBAL</button><button id="clearcal" class="b s">CLEAR CAL MAP</button></div></div>
+  </details>
+</details>
+
+  <details class="manualPanel" id="step2"><summary class="stepHead"><span id="step2badge" class="stepBadge">WAITING</span><b>STEP 2 · SHOT-TO-SHOT AUTO ADAPTIVE</b></summary><div class="stepHint">Normal daily workflow after calibration. Every completed HyperEx shot is measured with RAW scale weight + timestamp regression. S1, S2 and S3 are evaluated separately; verified changes apply only to the <b>next shot</b>. Live flow trim is enabled by default at level 3; its independent switch and diagnostics are below. Shot-to-shot proposals still affect only future shots. No extra skipStep calls.</div>
+  <div id="step2summary" class="hxsum"><span>上一杯 <b id="sum-last">—</b></span><i>·</i><span>S2 实测 <b id="sum-s2">—</b></span><i>·</i><span>下一杯状态 <b id="sum-next">—</b></span><i>·</i><span>历史 <b id="sum-history">—</b></span></div>
+  <details class="manualPanel hxfold" id="fold-validation">
+    <summary><span class="fnum">01</span><b class="fttl">上一杯 · 验证结果</b><span class="fst" id="st-validation">—</span></summary>
+    <div class="fbody"><div class="small">RAW real flow is a multi-second linear regression of unmodified scale weight vs scale timestamp. Instantaneous RAW dW/dt is not the acceptance reference.</div><div id="livetrimstatus" class="m"></div><div id="validation" class="grid"></div><div id="validationtable" class="m"></div><div id="learningintegrity" class="manualPanel"></div><div id="nextdecision" class="manualPanel"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-stability">
+    <summary><span class="fnum">02</span><b class="fttl">S1 启动 / S3 稳定性</b><span class="fst" id="st-stability">—</span></summary>
+    <div class="fbody"><div class="small">S1 separates first-rise delay from active cup flow. S3 tracks EARLY / MID / LATE stability and stall/decay behavior.</div><div id="stability" class="m"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-adaptive">
+    <summary><span class="fnum">03</span><b class="fttl">下一杯 · 学习建议</b><span class="fst" id="st-adaptive">—</span></summary>
+    <div class="fbody"><div id="basketcontext" class="m"></div><div id="autoapplybox" class="m"></div><div class="small">S1 startup, S2 level and S3 LEVEL + SHAPE use repeated completed-shot evidence and bounded corrections. Calibration LUT is never rewritten by adaptive history.</div><div id="adaptive" class="m"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-applied">
+    <summary><span class="fnum">04</span><b class="fttl">下一杯 · 已应用曲线</b><span class="fst" id="st-profile">—</span></summary>
+    <div class="fbody"><div class="section"><div class="small">Actual workflow commands below come from GET /workflow. Real g/s targets and LUT commands remain reference values. VERIFIED also requires successful machine upload acknowledgement.</div><div id="appliedcommands" class="m"></div><div id="auditstatus" class="small"></div><button id="readworkflow" class="b s">READ RAW WORKFLOW</button><details><summary>Raw workflow / adaptive audit JSON</summary><textarea id="auditjson" readonly></textarea></details></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="curveEditor">
+    <summary><span class="fnum">05</span><b class="fttl">下一杯 · 曲线编辑</b><span class="fst" id="st-curve">—</span></summary>
+    <div class="fbody"><div class="small">选择 S1、S2 或 S3 前／中／后控制点，上下拖动或按按钮调整。橙线是下一杯机器流量指令草稿（ml/s），灰虚线是当前设置；杯中实测 g/s 见下方曲线，预览不代表实际出液保证。</div><div class="row"><label><input id="curveshowcurrent" type="checkbox" checked>当前设置</label><label><input id="curveshowdraft" type="checkbox" checked>草稿指令</label><label><input id="curveshape" type="checkbox">S3 三段曲线</label></div><canvas id="curveeditorchart" class="chart" style="height:280px;touch-action:none" tabindex="0" aria-label="下一杯机器流量曲线编辑器"></canvas><div id="curvepoints" class="row"></div><div class="row"><button id="curvedown" class="b s">↓ 下调一档</button><span id="curveselected" style="align-self:center"></span><label>流量输入 ml/s <input id="curvevalue" type="number" inputmode="decimal" step="0.0001" min="0.10" max="8.00" style="width:125px" aria-label="流量输入 ml/s"></label><span id="curvequantum" class="small" style="align-self:center"></span><button id="curveup" class="b s">↑ 上调一档</button></div><div class="small">一档 = 1/16 ml/s。S3 允许前段高于中段、后段低于中段；只限制相邻增幅。到边界时停止调整。</div><div id="curvetimes" class="row"></div><div id="curveparams" class="m"></div><div class="row"><button id="curveapply" class="b primaryAction" disabled>应用到下一杯</button><button id="curvereset" class="b tertiaryAction">重新载入当前曲线</button></div><div id="curvestatus" class="m" aria-live="polite">正在读取当前曲线…</div></div>
+  </details>
+  <details class="manualPanel hxfold" id="refill-settings">
+    <summary><span class="fnum">06</span><b class="fttl">S2 补水</b><span class="fst" id="refillstatus" data-no-i18n>—</span></summary>
+    <div class="fbody"><div id="curverefill" class="m"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-history">
+    <summary><span class="fnum">07</span><b class="fttl">学习历史 · 排除 / 恢复</b><span class="fst" id="st-history">—</span></summary>
+    <div class="fbody">  <div id="historystatus" class="d" style="margin-top:12px;padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.04)"><b>ADAPTIVE HISTORY</b> · checking persistent storage…</div><div class="small">Exclude known operator mistakes or plugin faults from future learning. Original records, LUT and already-applied settings are retained. Restore removes only your exclusion; automatic fault and stage-quality gates still apply. Legacy records without raw fault evidence cannot be fully audited automatically.</div><div class="row"><label>Shot <select id="historyrun"></select></label><label>Reason <select id="historyreason"><option value="operator-mistake">Operator mistake</option><option value="plugin-fault">Plugin fault</option><option value="scale-or-cup-disturbance">Scale / cup disturbed</option><option value="other">Other</option></select></label></div><div class="row"><button id="historyexclude" class="b secondaryAction">Exclude from learning</button><button id="historyrestore" class="b tertiaryAction">Restore automatic eligibility</button></div><div class="row"><button id="importhistory" class="b s">IMPORT HISTORY JSON</button><input id="importhistoryfile" type="file" accept=".json,application/json" style="display:none"></div><div id="historyimportstatus" class="small"></div><div class="row"><input id="importurl" type="text" autocomplete="off" spellcheck="false" style="flex:1;min-width:240px" aria-label="Import URL"><button id="importurlbtn" class="b s">IMPORT FROM URL</button></div><div id="importurlstatus" class="small"></div><div id="historysavestatus" class="m"></div><div id="learninghistorytable" class="m" style="overflow:auto;max-height:360px"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-presets">
+    <summary><span class="fnum">08</span><b class="fttl">预设 · 目标 → 指令</b><span class="fst" id="st-presets">—</span></summary>
+    <div class="fbody"><div class="small">Save the current targets and effective commands into a slot. Applying a slot writes its targets back to plugin settings and re-applies its commands as the next-shot override.</div><div id="presets" class="m"></div><div id="presetstatus" class="small"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-snapshot">
+    <summary><span class="fnum">09</span><b class="fttl">上一杯 · 启动指令快照</b><span class="fst" id="st-snapshot">—</span></summary>
+    <div class="fbody"><div class="section"><div class="small">Historical command snapshot captured at shot start. It may differ from NEXT SHOT after adaptation.</div><div id="runcommands" class="m"></div></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-telemetry">
+    <summary><span class="fnum">10</span><b class="fttl">实时 / 结束数据</b><span class="fst" id="st-telemetry">—</span></summary>
+    <div class="fbody"><div id="stats" class="grid"></div></div>
+  </details>
+  </details>
+  <div class="section" id="weight-curves"><h3>REAL SCALE CURVES</h3><div class="row" style="margin:0 0 10px"><button id="chartengine" class="b s" type="button">CANVAS 2D</button></div><div class="small">萃取图在停止萃取处结束；泄压浸泡间隔按实际时长补零，仅为显示示意，原始记录仍可导出。</div><div class="legend">Machine target / machine flow: ml/s. Cup target / Decaid weightFlow / RAW-scale slope: g/s. Weight chart is the unmodified scale weight stream.<br>LIVE TEST: green circles = check RAW g/s; gray circles on baseline = check without usable regression; orange ↑/↓ = write vector drawn on the previous-check → this-write trend line (arrow up/down = command increase/decrease in absolute terms; divergence from the target line is shown as-is, length = step amplitude ml/s); the vector angle is that trend line vs the target line (0° = trend lying on the target); ↻ = fresh vector on an unresponsive trend; pale blue = smoothed trend trajectory (check → write points joined); pale squares = machine target/trend response ml/s. Tap/hover markers for details.</div><div id="flowseries" class="row"></div><svg id="flowchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg><div class="small">CONTROL LAW CURVE: the angle between the check-to-check trend line (previous check → current regression) and the target line; 0° = trend lies on the target, 90° = parallel offset, above 90° = diverging.</div><svg id="anglechart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg><div id="flowpointdetail" class="small"></div><svg id="weightchart" class="chart" viewBox="0 0 800 205" preserveAspectRatio="none"></svg></div>
+
+  <details class="manualPanel" id="step3"><summary class="stepHead"><span class="stepBadge">OPTIONAL</span><b>STEP 3 · MANUAL / ENGINEERING</b></summary><div class="stepHint">可选的精确数值和工程设置。日常可在 STEP 2 直接编辑下一杯曲线；AUTO APPLY 保持开启时，新杯完成后继续学习。</div>
+  <details class="manualPanel hxfold" id="fold-advisory">
+    <summary><span class="fnum">01</span><b class="fttl">参考建议</b><span class="fst" id="st-advisory">—</span></summary>
+    <div class="fbody"><div class="small">Manual reference ranges derived from the latest shot. These are not LUT rewrites.</div><div id="advisory" class="m"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-testedit">
+    <summary><span class="fnum">02</span><b class="fttl">精确数值编辑</b><span class="fst" id="st-testedit">—</span></summary>
+    <div class="fbody"><div class="small"><b>EDITOR ONLY.</b> ORIGINAL / LUT is the calibration baseline. ADAPTIVE applies the latest learned command - select it to return from MANUAL to plugin learning. MANUAL is explicitly edited by the user. S3 shape advances by profile time only.</div><div id="testcommands" class="m"></div><div id="s3shape" class="m" style="margin-top:10px"></div><div class="row"><button id="applytest" class="b secondaryAction">APPLY SELECTED MODES & COMMANDS</button><button id="returnlut" class="b tertiaryAction">RETURN ALL TO LUT</button></div></div>
+  </details>
+<div id="advancedsettings">
+  <details class="manualPanel hxfold" id="fold-modecards">
+    <summary><span class="fnum">03</span><b class="fttl">泄压模式与学习强度</b><span class="fst" id="st-modecards">—</span></summary>
+    <div class="fbody"><div style="display:none;margin:14px 0;padding:16px 18px;border:1px solid rgba(239,173,86,.38);border-radius:18px;background:rgba(239,173,86,.06)"><label style="font-size:19px;font-weight:600"><select id="adv_activeRelease" style="font-size:18px"><option value="auto" ${releaseMode(state.cfg)==="auto"?"selected":""}>Auto · 0 bar release frame</option><option value="on" ${releaseMode(state.cfg)==="on"?"selected":""}>On · Idle / soak / GHC restart</option><option value="off" ${releaseMode(state.cfg)==="off"?"selected":""}>Off · Continuous</option></select></label></div><div class="m" style="padding:14px 16px;border:1px solid rgba(120,179,230,.35);border-radius:18px;background:rgba(120,179,230,.06)"><b>Shot-to-shot learning strength</b><br><select id="adv_adaptiveLearningLevel" style="font-size:18px"><option value="保守">保守</option><option value="温和">温和</option><option value="正常" selected>正常</option><option value="激进">激进</option></select><div class="small">Normal: one clean shot can adjust the next. Different historical responses damp the step instead of blocking it. Live-trim level is a separate setting.</div></div><div class="row"><button class="b secondaryAction" data-save-advanced>SAVE TO PLUGIN SETTINGS</button><span class="small">保存提交以上所有折叠的当前值</span></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-targets">
+    <summary><span class="fnum">04</span><b class="fttl">目标与压力保护</b><span class="fst" id="st-targets">—</span></summary>
+    <div class="fbody"><div class="m"><b>REAL-FLOW TARGETS</b></div><table><tr><th>Parameter</th><th>Value</th><th>Parameter</th><th>Value</th></tr><tr><td>S1 target (g/s)</td><td><input id="adv_stage1Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td>S2 target (g/s)</td><td><input id="adv_stage2Flow" type="number" step="0.1" min="0.3" max="6.5"></td></tr><tr><td>S3 target (g/s)</td><td><input id="adv_stage3Flow" type="number" step="0.1" min="0.3" max="6.5"></td><td></td><td></td></tr></table><div class="m"><b>TEMPERATURE / PRESSURE SAFETY</b></div><table><tr><td>Temperature (°C)</td><td><output id="adv_temperature">—</output><div class="small">当前曲线温度 · 在首页调整</div></td><td>Emergency pressure (bar)</td><td><input id="adv_hardPressureLimit" type="number" step="0.1" min="1" max="12"></td></tr><tr><td>S1 pressure limiter (bar)</td><td><input id="adv_stage1PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td>S2 pressure limiter (bar)</td><td><input id="adv_stage2PressureLimit" type="number" step="0.1" min="0.5" max="12"></td></tr><tr><td>S3 pressure limiter (bar)</td><td><input id="adv_stage3PressureLimit" type="number" step="0.1" min="0.5" max="12"></td><td></td><td></td></tr></table><div class="row"><button class="b secondaryAction" data-save-advanced>SAVE TO PLUGIN SETTINGS</button><span class="small">保存提交以上所有折叠的当前值</span></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-livetrim">
+    <summary><span class="fnum">05</span><b class="fttl">杯内调流试验</b><span class="fst" id="st-livetrim">—</span></summary>
+    <div class="fbody"><div class="m"><b>EXPERIMENTAL S2/S3 LIVE FLOW TRIM · DEFAULT ON / LEVEL 3</b><br><label><input id="adv_liveFlowTrimTest" type="checkbox" checked> Enable live flow trim</label><br><label>Level <input id="adv_liveFlowTrimLevel" type="range" min="1" max="4" step="1" value="3" aria-label="杯内调流档位" style="width:260px;max-width:90%;vertical-align:middle;accent-color:#53d68e"><output id="adv_liveFlowTrimLevelLabel" for="adv_liveFlowTrimLevel">三档 · 250 ms / 最多200次写入</output></label><br>All levels: max 2000 checks per shot; continuous mode also includes S1. Write budget is separate and shown by level; retries count as writes. ACK + matching target releases waiting after at least50ms; new writes occur only at level checks with fresh scale data. Missing responses retain the2s fault timeout. After 3 consecutive ACK-without-target misses, continue checks with recoverable same-target retries spaced at least3s apart. Unconfirmed targets retry without accumulating commands. Level 1 defaults to 944 ms. Level 4 is an experimental software cap, not a proven hardware maximum. Target band ±2% (native quantization and response dynamics may prevent reaching it); bounded raw A010 changes, no extra skips. Normal shot-to-shot learning remains ON; confirmed target windows are pooled and normalized to the starting seed with a labelled local response model. Original profile restored afterwards.</div><div class="row"><button class="b secondaryAction" data-save-advanced>SAVE TO PLUGIN SETTINGS</button><span class="small">保存提交以上所有折叠的当前值</span></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-releaseparams">
+    <summary><span class="fnum">06</span><b class="fttl">泄压／秤／重试／诊断</b><span class="fst" id="st-releaseparams">—</span></summary>
+    <div class="fbody"><div class="small" style="margin-top:8px">Same source of truth as <b>Plugins → HyperEx Pulse Filter</b>. Saving here writes normal plugin Settings; there is no second settings store.</div><div id="advancedmeta" class="m"></div><div class="m"><b>RELEASE / SCALE / RETRY / DIAGNOSTICS</b></div><table><tr><td>Release flow threshold (ml/s)</td><td><input id="adv_dumpFlowThreshold" type="number" step="0.05" min="0" max="2"></td><td>Low-flow stable samples</td><td><input id="adv_dumpFlowStableSamples" type="number" step="1" min="1" max="20"></td></tr><tr><td>Release fallback (s)</td><td><input id="adv_dumpFallbackSeconds" type="number" step="0.1" min="0.2" max="15"></td><td>Release timeout (s)</td><td><input id="adv_dumpTimeoutSeconds" type="number" step="0.1" min="1" max="30"></td></tr><tr><td>Scale tare threshold (g)</td><td><input id="adv_scaleResetThreshold" type="number" step="0.1" min="0.5" max="20"></td><td>No-scale timeout (s)</td><td><input id="adv_noScaleTimeoutSeconds" type="number" step="0.5" min="1" max="30"></td></tr><tr><td>Auto-arm retry 1 (s)</td><td><input id="adv_autoArmRetry1Seconds" type="number" step="0.5" min="0" max="30"></td><td>Auto-arm retry 2 (s)</td><td><input id="adv_autoArmRetry2Seconds" type="number" step="0.5" min="0" max="60"></td></tr><tr><td>Diagnostic sample (ms)</td><td><input id="adv_diagnosticSampleIntervalMs" type="number" step="10" min="50" max="1000"></td><td>Maximum sequence (s)</td><td><input id="adv_maxRunSeconds" type="number" step="10" min="30" max="600"></td></tr></table><div class="row"><button id="saveadvanced" class="b secondaryAction">SAVE TO PLUGIN SETTINGS</button><span class="small">保存提交以上所有折叠的当前值</span></div><div id="startupbox" class="d" style="margin-top:10px"></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-directstart">
+    <summary><span class="fnum">07</span><b class="fttl">直接驱动启动试验</b><span class="fst" id="st-directstart">—</span></summary>
+    <div class="fbody"><div class="m"><b>DIRECT DRIVER START TEST · DEFAULT OFF</b><br><label><input id="adv_directDriverStartTest" type="checkbox"> After soak: Espresso request, then raw A002=04 write</label><br>One optional raw write. Original GHC confirmation countdown, re-arm retries and safety guards remain active. Physical GHC confirmation was still required in the 1.54 device test.</div><div class="row"><button class="b secondaryAction" data-save-advanced>SAVE TO PLUGIN SETTINGS</button><span class="small">保存提交以上所有折叠的当前值</span></div></div>
+  </details>
+</div>
+</details>
+
+  <details class="manualPanel" id="step4"><summary class="stepHead"><span class="stepBadge">EXPORT</span><b>STEP 4 · COPY CSV</b></summary><div class="stepHint">Raw engineering export for offline analysis or bug reports. This is intentionally last because it is not needed for normal brewing.</div>
+  <details class="manualPanel hxfold" id="fold-csv">
+    <summary><span class="fnum">01</span><b class="fttl">上一杯 CSV</b><span class="fst" id="st-csv">—</span></summary>
+    <div class="fbody"><h3>LAST RUN CSV</h3><div class="small">Combined DE1/Decaid samples plus RAW scale weight/timestamp/dW-dt and profile-frame markers.</div><textarea id="csv" readonly></textarea><div class="row"><button id="copy" class="b p" style="display:none">COPY CSV</button></div></div>
+  </details>
+  <details class="manualPanel hxfold" id="fold-historyjson">
+    <summary><span class="fnum">02</span><b class="fttl">学习历史 JSON</b><span class="fst" id="st-historyjson">—</span></summary>
+    <div class="fbody"><h3>HISTORY JSON</h3><div class="small">Up to 80 shots; new shots keep the per-shot trace.</div><div id="historyurl" class="small"></div><div class="row"><button id="exporthistory" class="b s">EXPORT HISTORY JSON</button></div></div>
+  </details>
+</details>
+</div>
+<div class="row"><button id="rearm" class="b p">RE-ARM</button><button id="close" class="b s">CLOSE</button></div><div id="meta" class="m"></div></div>
+<script>
+(function(){
+  const translate=(${createUiTranslator.toString()})(${JSON.stringify(UI_LANGUAGE_PAIRS)});
+  let language=${JSON.stringify(state.uiLanguage)},persistedRevision=0,saving=false;
+  const textSources=new WeakMap(),attributeSources=new WeakMap();
+  const bar=document.getElementById('hx-language');
+  const excluded=node=>{const element=node.nodeType===1?node:node.parentElement;return !element||!!element.closest('script,style,textarea,input,pre,code,[data-no-i18n]');};
+  function translateNode(node){
+    if(excluded(node))return;
+    const now=node.nodeValue,record=textSources.get(node),source=record&&record.rendered===now?record.source:now;
+    const rendered=translate(source,language);if(now!==rendered)node.nodeValue=rendered;
+    textSources.set(node,{source,rendered});
+  }
+  function attributes(element){
+    if(excluded(element))return;let saved=attributeSources.get(element);if(!saved){saved={};attributeSources.set(element,saved);}
+    for(const key of ['title','aria-label','aria-valuetext','placeholder']){if(!element.hasAttribute(key))continue;const now=element.getAttribute(key),old=saved[key],source=old&&old.rendered===now?old.source:now;const rendered=translate(source,language);if(rendered!==now)element.setAttribute(key,rendered);saved[key]={source,rendered};}
+  }
+  function visit(root){if(root.nodeType===3){translateNode(root);return;}if(root.nodeType!==1||excluded(root))return;attributes(root);for(const node of [...root.childNodes])visit(node);}
+  const observe=()=>observer.observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['title','aria-label','aria-valuetext','placeholder']});
+  const observer=new MutationObserver(records=>{observer.disconnect();try{for(const r of records){if(r.type==='characterData')translateNode(r.target);else if(r.type==='attributes')attributes(r.target);else for(const node of r.addedNodes)visit(node);}}finally{observe();}});
+  function render(){observer.disconnect();try{document.documentElement.lang=language==='zh'?'zh-CN':'en';visit(document.body);for(const button of bar.querySelectorAll('[data-language]')){const active=button.dataset.language===language;button.setAttribute('aria-pressed',String(active));button.style.background=active?'#efad56':'rgba(255,255,255,.06)';button.style.color=active?'#241a10':'#ece7e0';} }finally{observe();}}
+  function setLanguage(next){if(!['zh','en'].includes(next))return;language=next;render();}
+  const originalAlert=window.alert.bind(window),originalConfirm=window.confirm.bind(window);
+  window.alert=message=>originalAlert(translate(message,language));window.confirm=message=>originalConfirm(translate(message,language));
+  window.HXLang={text:value=>translate(value,language),set:setLanguage,get:()=>language};
+  for(const button of bar.querySelectorAll('[data-language]'))button.onclick=async()=>{
+    const next=button.dataset.language;if(next===language||saving)return;saving=true;for(const item of bar.querySelectorAll("[data-language]"))item.disabled=true;
+    const revision=++persistedRevision,previous=language;setLanguage(next);const status=document.getElementById('hx-language-status');status.textContent=next==='zh'?'正在保存…':'Saving…';
+    try{const r=await fetch(${JSON.stringify(endpointBase+"/language")},{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({language:next})});const result=await r.json();if(!r.ok||result.language!==next)throw Error(result.error||'Language save failed');if(revision===persistedRevision)status.textContent='';}
+    catch(error){if(revision===persistedRevision){setLanguage(previous);status.textContent=previous==='zh'?'语言保存失败，请重试':'Language save failed; try again';}}finally{saving=false;for(const item of bar.querySelectorAll('[data-language]'))item.disabled=false;}
+  };
+  render();
+  fetch(${JSON.stringify(endpointBase+"/language")}).then(r=>r.json()).then(result=>{if(!persistedRevision&&['zh','en'].includes(result.language))setLanguage(result.language);}).catch(()=>{});
+})();
+
+</script>
+<script>
+(function(){
+  function emergencyHomeFallback(){
+    try{if(window.top&&window.top!==window&&window.top.history&&window.top.history.length>1){window.top.history.back();return}}catch(_){}
+    if(window.history&&window.history.length>2){window.history.go(-2);return}
+    if(window.history&&window.history.length>1){window.history.back();return}
+  }
+  function emergencyClose(){
+    try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:'streamline:close'},'*')}catch(_){}
+    setTimeout(emergencyHomeFallback,280);
+  }
+  const c=document.getElementById('close');
+  if(c){c.textContent='CLOSE / HOME';c.onclick=emergencyClose}
+  window.addEventListener('error',function(e){
+    const t=document.getElementById('title'),d=document.getElementById('detail');
+    if(t)t.textContent='DIAGNOSTICS UI ERROR';
+    if(d)d.textContent='The diagnostics script failed to initialize. CLOSE / HOME remains available. '+String((e&&e.message)||'Unknown UI error');
+  });
+})();
+</script>
+<script>
+const base=${JSON.stringify(endpointBase)};const coreSettings='/api/v1/plugins/'+${JSON.stringify(ID)}+'/settings';const requestedView=new URLSearchParams(location.search).get('view');const view=requestedView||${JSON.stringify(state.phase === 'idle' ? 'diag' : 'ghc')};const dashboardEntry=view==='diag-dashboard';const diagView=view==='diag'||dashboardEntry;if(diagView){document.documentElement.classList.add('diagview');document.body.classList.add('diagview')}window.parent.postMessage({type:'streamline:ready'},'*');const sw=Math.max(1000,Math.min(1800,Number((window.screen&&window.screen.width)||window.innerWidth||1200)));const sh=Math.max(780,Math.min(1400,Number((window.screen&&window.screen.height)||window.innerHeight||900)));window.parent.postMessage({type:'streamline:size',width:diagView?sw:520,height:diagView?sh:300},'*');
+let latestAdvisorySummary=null;let latestStage3Stability=null;let latestNextShotAdaptive=null;let latestAdaptiveSummary=null;let latestAutoApplyEnabled=true;let latestAutoApplyStatus=null;const $=id=>document.getElementById(id),t=$('title'),d=$('detail'),m=$('meta'),b=$('rearm'),copy=$('copy'),diag=$('diag'),stats=$('stats'),appliedcommands=$('appliedcommands'),runcommands=$('runcommands'),validation=$('validation'),validationtable=$('validationtable'),stability=$('stability'),adaptive=$('adaptive'),advisory=$('advisory'),testcommands=$('testcommands'),s3shape=$('s3shape'),csv=$('csv'),calstatus=$('calstatus'),waterwarn=$('waterwarn'),scope=$('scope'),calmode=$('calmode'),map=$('map'),startupbox=$('startupbox');
+let curveLatest=null,curveDraft=null,curveSelected=1,curveDirty=false,curveBusy=false,curveDrag=null,curveYmax=4,curveInputInvalid=false,latestManualCurveSource=null,lastChartRun=null,chartEngine="canvas";
+const curveNames=['S1','S2','S3 前段','S3 中段','S3 后段'],curveKeys=['stage1','stage2','early','mid','late'];
+const flowSeriesVisible={cup:true,target:true,machine:true,decaid:true,raw:true,trend:true,writes:true};
+function curveSame(a,b){return !!a&&!!b&&a.shaped===b.shaped&&JSON.stringify(a.values)===JSON.stringify(b.values)&&JSON.stringify(a.refill)===JSON.stringify(b.refill)}
+function curveReset(){if(!curveLatest)return;curveInputInvalid=false;if($('curvevalue'))$('curvevalue').setCustomValidity('');curveDraft=JSON.parse(JSON.stringify(curveLatest));curveDirty=false;renderCurveEditor(curveLatest)}
+// L-6: no EARLY ≤ MID ≤ LATE ordering. A drift shape may place EARLY above
+// MID or LATE below MID, so only an adjacent rise is bounded.
+function curveLimits(i,v){let lo=.10,hi=8;if(curveDraft.shaped&&i===3)hi=Math.min(8,Math.max(v.early+.25,v.early*1.35));if(curveDraft.shaped&&i===4)hi=Math.min(8,Math.max(v.mid+.25,v.mid*1.35));return [lo,hi]}
+function curveSetValue(value){if(!curveDraft||curveBusy||!Number.isFinite(value))return;const v=curveDraft.values,k=curveKeys[curveSelected],old=v[k];const shapeBefore=curveDraft.shaped;if(curveSelected>=2)curveDraft.shaped=true;const bounds=curveLimits(curveSelected,v);let next=Math.round(value*16)/16;next=Math.max(Math.ceil((bounds[0]-1e-9)*16)/16,Math.min(Math.floor((bounds[1]+1e-9)*16)/16,next));if(bounds[0]>bounds[1]||next<bounds[0]-1e-9||next>bounds[1]+1e-9||(value>old&&next<old)||(value<old&&next>old))next=old;v[k]=next;if(next===old)curveDraft.shaped=shapeBefore;curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)}
+function curveEnterValue(raw){
+ if(!curveDraft||curveBusy)return;
+ const value=Number(raw),input=$('curvevalue'),previousShape=curveDraft.shaped;
+ if(curveSelected>=2)curveDraft.shaped=true;
+ const bounds=curveLimits(curveSelected,curveDraft.values);curveDraft.shaped=previousShape;
+ const rounded=Math.round(value*10000)/10000;
+ if(String(raw).trim()===''||!Number.isFinite(value)||value<bounds[0]-1e-9||value>bounds[1]+1e-9||rounded<bounds[0]-1e-9||rounded>bounds[1]+1e-9){
+  curveInputInvalid=true;const message='当前控制点允许范围 '+bounds[0].toFixed(3)+'–'+bounds[1].toFixed(3)+' ml/s；请保持在 S3 相邻增幅上限内。';if(input)input.setCustomValidity(message);if($('curvestatus'))$('curvestatus').textContent=message;if($('curveapply'))$('curveapply').disabled=true;return;
+ }
+ curveInputInvalid=false;if(input)input.setCustomValidity('');curveSetValue(rounded);
+}
+function curveNudge(sign){if(!curveDraft||curveBusy)return;const v=curveDraft.values[curveKeys[curveSelected]],candidate=(Math.round(v*16)+sign)/16,oldShape=curveDraft.shaped;if(curveSelected>=2)curveDraft.shaped=true;const bounds=curveLimits(curveSelected,curveDraft.values);curveDraft.shaped=oldShape;if(candidate<bounds[0]-1e-9||candidate>bounds[1]+1e-9)return;curveInputInvalid=false;if($('curvevalue'))$('curvevalue').setCustomValidity('');curveSetValue(candidate)}
+function curveTime(key,sign){if(!curveDraft||curveBusy)return;curveDraft.shaped=true;curveDraft.values[key]=Math.max(3,Math.min(30,curveDraft.values[key]+sign));curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)}
+function curveShapeToggle(enabled){if(!curveDraft||curveBusy)return;curveDraft.shaped=enabled;if(!enabled){const v=curveDraft.values;v.early=v.late=v.mid}curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)}
+const refillControlFields=[['startDelayMs','启动延时','s'],['targetPercent','补水指令上限','%'],['cutoffPercent','收回 / 收口起点','%'],['maxDurationMs','最长补水','s'],['approachMs','接管渐进时间','s']];
+function curveRefillFloodModeChange(value){if(!curveDraft||curveBusy)return;const mode=String(value);if(mode!=='fixed'&&mode!=='adaptive')return;curveDraft.refill.floodMode=mode;curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)}
+function curveRefillBasisChange(value){if(!curveDraft||curveBusy)return;const basis=String(value);if(basis!=="pump-command"&&basis!=="cup-target")return;curveDraft.refill.basis=basis;curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)}
+function curveRefillChange(key,value){
+ if(!curveDraft||curveBusy||!curveLatest.refillLimits||!curveLatest.refillLimits[key])return;
+ const limits=curveLatest.refillLimits[key],n=Number(value);if(!Number.isFinite(n))return;
+ curveDraft.refill[key]=Math.max(limits[0],Math.min(limits[1],limits[0]+Math.round((n-limits[0])/limits[2])*limits[2]));
+ curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest);
+}
+function refillSettingsText(settings,basis){
+ if(!settings)return '该记录未保存完整补水参数';
+ return (basis==='cup-target'?'目标折算倍率 ':basis==='pump-command'?'基础泵倍率 ':'旧版称流目标倍率 ')+esc(settings.targetPercent)+'% · 启动 '+esc(settings.startDelayMs/1000)+' s · 收回 / 收口起点 '+esc(settings.cutoffPercent)+'% · 最长 '+esc(settings.maxDurationMs/1000)+' s · 渐进 '+esc(settings.approachMs/1000)+' s';
+}
+function renderRefillHistory(){
+ const box=$('refillprevious');if(!box||!curveLatest)return;const previous=curveLatest.refillPrevious,last=curveLatest.refillLastShot;
+ let h='<b>上一次补水参数</b><div class="small">当前滑块是草稿；以下显示已保存的修改记录和上一杯启动快照。</div>';
+ h+='<div class="m"><b>当前已保存</b><br>'+refillSettingsText(curveLatest.refill,curveLatest.refill.basis)+'</div>';
+ if(previous)h+='<div class="m"><b>上次修改前 → 修改后</b> · '+esc(previous.at)+'<br>'+refillSettingsText(previous.before,previous.before.basis)+'<br>→ '+refillSettingsText(previous.after,previous.after.basis)+'</div>';
+ else h+='<div class="m">尚无已保存的补水修改记录</div>';
+ if(last&&last.available){h+='<div class="m"><b>上一杯实际采用的参数</b> · '+esc(last.runId)+'<br>'+refillSettingsText(last.settings,last.basis)+'<br>基础指令 '+esc(last.baseCommandMlS==null?'—':last.baseCommandMlS)+' ml/s · 计划增强 '+esc(last.plannedBoostMlS==null?'—':last.plannedBoostMlS)+' ml/s<br>'+(last.executedBoostMlS==null?'该杯未记录增强写入':'已发送增强指令 '+esc(last.executedBoostMlS)+' ml/s')+(last.execution?'<br>'+esc(last.execution.reason||last.execution.status||''):'')+'</div>';}
+ else h+='<div class="m">上一杯补水参数尚未记录；不使用当前设置代替历史值。</div>';
+ box.innerHTML=h;
+}
+function refillAdaptiveLine(ad,law){
+ if(!ad)return '';
+ const num=(v,d)=>Number.isFinite(Number(v))?Number(v).toFixed(d==null?2:d):'—';
+ const obs=ad.observation||{};
+ const src=ad.viSource==='cold-start-fallback'
+  ?'冷启动默认（无 soak 信号'+(obs.reason?'：'+esc(String(obs.reason)):'')+'）→ Vi '+num(ad.viMl,1)+' ml'
+  :'soak 残余压力比 '+num(obs.soakP2sRatio,3)+' → Vi '+num(ad.viMl,1)+' ml';
+ const band='区间 '+num(law&&law.floodMin,2)+'–8.00 ml/s · holdMs '+num(law&&law.holdMsMin,0)+'–'+num(law&&law.holdMsMax,0)+' ms';
+ if(ad.applied===false){
+  return '<b>上一杯润湿观测（固定挡 · 仅记录不介入）</b> '+src
+   +' · 若走自适应会给 '+num(ad.floodMlS,3)+' ml/s（'+band+'）'
+   +' · 预测 潜伏 '+num(ad.predictedWetLatencyS)+' s ＋ 上升 '+num(ad.predictedRiseS)+' s ＝ 断流 '+num(ad.predictedBoostToBleedS)+' s vs 设定 holdMs '+num(Number(ad.holdMsConfigured)/1000)+' s'
+   +(ad.budgetInfeasible===true?' · <span class="bad">按律预算不可行</span>':'');
+ }
+ const extra=ad.viExtrapolated===true?'<br><span class="bad">soak 残余压力比 '+num(obs.soakP2sRatio,3)+' 超出标定域 '+num((ad.viRatioSupport||[])[0],2)+'–'+num((ad.viRatioSupport||[])[1],2)+'，Vi 已按边界截断（'+num(ad.viMl,1)+' ml）；本杯粉饼异常，请核对研磨/布粉</span>':'';
+ const warn=ad.boostVolumeWarn===true?'<br><span class="bad">灌水量 '+num(ad.boostVolumeMl,1)+' ml 超过历史包线 '+num(ad.boostVolumeWarnMl,0)+' ml'+(ad.s2WeightBudgetG!=null?'（S2 重量预算 '+num(ad.s2WeightBudgetG,1)+' g）':'')+'，请核对粉量与杯量</span>':'';
+ if(ad.budgetInfeasible===true){
+  return '<span class="bad"><b>补水预算不可行</b> '+esc(String(ad.budgetInfeasibleReason||''))
+   +'（已顶满 flood '+num(ad.floodMlS,3)+' ml/s · holdMs '+num(ad.holdMs,0)+' ms）· '+src+'</span>'+extra+warn;
+ }
+ return '<b>上一杯自适应灌水</b> '+num(ad.floodMlS,3)+' ml/s · holdMs '+num(ad.holdMs,0)+' ms'
+  +(ad.holdAdjusted?'（'+(ad.holdAdjusted==='raised'?'由设定 '+num(Number(ad.holdMsConfigured)/1000,1)+' s 抬高':'由设定 '+num(Number(ad.holdMsConfigured)/1000,1)+' s 缩短')+'）':'')
+  +' · '+src+' · 绑定 '+esc(String(ad.binding||'—'))
+  +' · F_rise '+num(ad.fRiseMlS)+' / F_budget '+num(ad.fBudgetMlS)+'（上升目标 '+num(ad.riseTargetS)+' s）'
+  +' · 预测 潜伏 '+num(ad.predictedWetLatencyS)+' s ＋ 上升 '+num(ad.predictedRiseS)+' s ＝ 断流 '+num(ad.predictedBoostToBleedS)+' s'
+  +' · 灌水量 '+num(ad.boostVolumeMl,1)+' ml'+extra+warn;
+}
+
+function refillLearningLine(tl){
+ const l=tl&&tl.learning;if(!l||!l.refill)return '';
+ if(!l.confirmed)return '<br>学习窗口：补水收回未确认 → 本杯不学 S2 稳态';
+ const start=tl.stage2StartMs!=null&&l.startMs!=null?((l.startMs-tl.stage2StartMs)/1000).toFixed(2)+' s':'—';
+ const settle=(Number(l.settleMs)||0)/1000,chain=(Number(l.chainSettleMs)||0)/1000;
+ return '<br>学习窗口：'+start+' 起 · 排除补水 '+Math.round(settle*1000)+' ms（链路 '+Math.round(chain*1000)+' ms）后 · 末 60% 回归';
+}
+function floodCapHtml(){
+ return '<div class="m" style="margin-top:16px"><b>灌水上限</b>'
+  +'<div class="refillSeg">'
+  +'<label class="refillseg"><input type="radio" name="refill-flood-mode" value="fixed" data-refill-flood-mode><span>固定</span></label>'
+  +'<label class="refillseg"><input type="radio" name="refill-flood-mode" value="adaptive" data-refill-flood-mode><span>自适应</span></label>'
+  +'</div>'
+  +'<div id="refillvalue-floodMode" class="small" style="margin-top:8px"></div>'
+  +'<div id="refillfloodfield" class="refillGrid" style="margin-top:10px"><div class="refillRow single"><div class="refillField">'
+  +'<div class="refillLbl"><span>灌水上限</span><b id="refillvalue-floodMaxMlS"></b></div>'
+  +'<input type="range" data-refill-key="floodMaxMlS" min="3.5" max="8" step="0.0625" aria-label="灌水上限">'
+  +'</div></div></div></div>';
+}
+function renderRefillEditor(){
+ const box=$('curverefill');if(!box||!curveDraft||!curveDraft.refill||!curveLatest.refillLimits)return;
+ if(!box.querySelector('[data-refill-key]')){
+  box.innerHTML='<div class="small">启动延时从确认进入S2后计；滑块只修改草稿；请点击保存补水参数，下一杯生效。</div>'+'<div class="m"><b>补水基准</b><div class="refillSeg"><label class="refillseg"><input type="radio" name="refill-basis" value="pump-command" data-refill-basis><span>基础泵倍率</span></label><label class="refillseg"><input type="radio" name="refill-basis" value="cup-target" data-refill-basis><span>目标折算</span></label></div><div id="refillvalue-basis" class="small" style="margin-top:8px"></div></div>'+floodCapHtml()+(()=>{const f=k=>{const x=refillControlFields.find(q=>q[0]===k),l=curveLatest.refillLimits[k];return '<div class="refillField"><div class="refillLbl"><span>'+x[1]+'</span><b id="refillvalue-'+k+'"></b></div><input type="range" data-refill-key="'+k+'" min="'+l[0]+'" max="'+l[1]+'" step="'+l[2]+'" aria-label="'+x[1]+'">'+(k==='cutoffPercent'?'<div id="refillderived" class="small" data-no-i18n></div>':'')+'</div>'},r=(keys,single)=>'<div class="refillRow'+(single?' single':'')+'">'+keys.map(f).join('')+'</div>';return '<div class="refillGrid">'+r(['startDelayMs','targetPercent'])+r(['cutoffPercent'],true)+r(['maxDurationMs','approachMs'])+'</div>'})()+'<div class="refillActions"><button id="refillsave" class="b p">保存补水参数</button><span id="refillsavestatus" class="small"></span><button id="refilldefaults" class="b s">恢复补水默认值</button></div><div id="refillnote" class="small"></div><div id="refillpreviewlabels" class="small" data-no-i18n style="margin-top:4px"></div><canvas id="refillpreview" class="chart" style="height:200px" aria-label="S2补水指令预览"></canvas><div id="refillsafety" class="small"></div><div id="refillnodes" class="m"></div><div id="refilladaptive" class="small" data-no-i18n style="margin-top:4px"></div><div id="refillprevious" class="manualPanel"></div>';
+  box.querySelectorAll('[data-refill-key]').forEach(q=>q.oninput=()=>curveRefillChange(q.dataset.refillKey,q.value));
+  box.querySelectorAll('[data-refill-basis]').forEach(q=>q.onchange=()=>curveRefillBasisChange(q.value));
+  box.querySelectorAll('[data-refill-flood-mode]').forEach(q=>q.onchange=()=>curveRefillFloodModeChange(q.value));
+  $('refillsave').onclick=saveRefillDraft;
+  $('refilldefaults').onclick=()=>{if(curveBusy)return;curveDraft.refill=JSON.parse(JSON.stringify(curveLatest.refillDefaults));curveDirty=!curveSame(curveDraft,curveLatest);renderCurveEditor(curveLatest)};
+ }
+ const r=curveDraft.refill,plan=curveLatest.refillPreview||{},baseCommand=Math.round(Number(curveDraft.values.stage2)*16)/16,goal=Number(curveLatest.targetGS.stage2),bounded=curveLatest.refillBoundedModel===true,planEstimate=plan.settings&&plan.settings.basis==="cup-target"?Number(plan.refillPumpBaseMlS):NaN,refillBase=r.basis==="cup-target"&&Number.isFinite(planEstimate)?planEstimate:baseCommand,upper=bounded?Math.min(8,Number(plan.floodCommandMlS)||8):Math.min(8,refillBase*1.6);
+ const request=bounded?upper:refillBase*r.targetPercent/100;
+ const boost=Math.max(refillBase,Math.floor((Math.min(upper,Math.max(refillBase,request))+1e-9)*16)/16);
+ const holding=Math.floor((Math.min(boost,Math.max(0.1,Number(plan.returnCommandMlS)||baseCommand))+1e-9)*16)/16;
+ for(const x of refillControlFields){const input=box.querySelector('[data-refill-key="'+x[0]+'"]');if(bounded&&x[0]==='targetPercent'){input.value=r[x[0]];input.disabled=true;$('refillvalue-'+x[0]).textContent='100% · 仅上限';continue;}input.value=r[x[0]];input.disabled=curveBusy||!curveLatest.canApply;const text=x[0]==='cutoffPercent'?(r[x[0]]+' %'):x[2]==='s'?(r[x[0]]/1000).toFixed(2)+' s':r[x[0]]+'%'+(x[0]==='targetPercent'?' · '+boost.toFixed(4)+' ml/s':'');$('refillvalue-'+x[0]).textContent=text;if(x[0]==='cutoffPercent'){const floorPct=Math.round(r.cutoffPercent*.6);$('refillderived').textContent='派生：实测 ≥ '+floorPct+'% 目标（≈ '+(Number.isFinite(goal)?(goal*floorPct/100).toFixed(2):'—')+' g/s）+ 预测 ≥ 目标（'+(Number.isFinite(goal)?goal.toFixed(2):'—')+' g/s）才收回；下调会同时提前离开满灌（可能拖慢 90° 上升）、降低补水跳过阈值、降低实测噪声底';}}
+ const floodMode=r.floodMode==="adaptive"?"adaptive":"fixed",floodFloor=Number((curveLatest.refillLimits.floodMaxMlS||[1/16,8,1/16])[0])||1/16,law=curveLatest.refillAdaptiveLaw||{};
+ const floodInput=box.querySelector('[data-refill-key="floodMaxMlS"]');
+ if(floodInput){floodInput.min=floodFloor;floodInput.max=8;floodInput.step=1/16;floodInput.value=r.floodMaxMlS;floodInput.disabled=curveBusy||!curveLatest.canApply||!bounded;}
+ box.querySelectorAll('[data-refill-flood-mode]').forEach(q=>{q.checked=q.value===floodMode;q.disabled=curveBusy||!curveLatest.canApply||!bounded;});
+ if($('refillvalue-floodMaxMlS'))$('refillvalue-floodMaxMlS').textContent=r.floodMaxMlS.toFixed(2)+' ml/s';
+ const floodField=$('refillfloodfield');if(floodField&&floodField.style)floodField.style.display=floodMode==="adaptive"?"none":"";
+ if($('refillvalue-floodMode'))$('refillvalue-floodMode').textContent=!bounded?'仅 bounded 模式可调':(floodMode==="adaptive"?'自适应 · stage2 入口按 soak 泄压形状定灌水（上升目标 '+(Number.isFinite(Number(law.riseTargetS))?Number(law.riseTargetS).toFixed(2):'—')+' s · 绝对区间 '+floodFloor.toFixed(2)+'–8.00 ml/s · holdMs '+(law.holdMsMin||2000)+'–'+(law.holdMsMax||7000)+' ms 双向动态）· 出液后 u = 平台 + (目标 − 预测) / r，只降不升':'固定 · 下限 '+floodFloor.toFixed(2)+' ml/s，上限 8.00');
+ box.querySelectorAll('[data-refill-basis]').forEach(q=>{q.checked=r.basis===q.value;q.disabled=curveBusy||!curveLatest.canApply;});
+ const planBasis=plan.settings&&plan.settings.basis;
+ const cupBase=Number.isFinite(planEstimate)?planEstimate:baseCommand;const pumpBase=baseCommand;const otherBasis=r.basis==="cup-target"?"pump-command":"cup-target";const otherBase=otherBasis==="cup-target"?cupBase:pumpBase;const otherUpper=Math.min(8,otherBase*1.6);const otherBoost=Math.max(otherBase,Math.floor((Math.min(otherUpper,Math.max(otherBase,otherBase*r.targetPercent/100))+1e-9)*16)/16);$('refillvalue-basis').textContent=(r.basis==="cup-target"?("目标折算 · 设置值 S2 "+(goal||"—")+" g/s → 估算基础 "+(Number.isFinite(planEstimate)?planEstimate.toFixed(4):(planBasis==="cup-target"?"无合格实测尾段，用 "+baseCommand.toFixed(4)+" ml/s":"保存后按实测尾段折算"))+" ml/s → "+(bounded?("补水目标 "+(goal||"—")+" g/s（收口：预测 ≥ 目标）· 泵基准 "+refillBase.toFixed(4)+" ml/s（r "+(Number(plan.controlGain)||0).toFixed(2)+" · "+String(plan.controlSource||"—")+"）· 灌水 "+boost.toFixed(4)+" ml/s（安全包线，可低于平台断流到 0.10）· 平台收回 "+holding.toFixed(4)+" ml/s"):("增强 "+boost.toFixed(4)+" ml/s · 另一基准 "+otherBoost.toFixed(4)+" ml/s"))):("基础泵倍率 · 当前指令 "+pumpBase.toFixed(4)+" ml/s → 增强 "+boost.toFixed(4)+" ml/s · 目标折算基准 "+(Number.isFinite(planEstimate)?"（可用）"+otherBoost.toFixed(4)+" ml/s":"（保存后可用）")));
+ $('refilldefaults').disabled=curveBusy||!curveLatest.canApply;
+ $('refillnote').textContent=(curveLatest.refillActive?'补水已启用':'当前不执行补水：需开启主动泄压、杯内控流和S2起步增强')+(curveLatest.refillLoadWarning?' · '+curveLatest.refillLoadWarning:'');const savedRefill=curveLatest.refill||r,refillDraftDirty=JSON.stringify(r)!==JSON.stringify(savedRefill);if($('refillstatus'))$('refillstatus').textContent='灌水上限 '+(savedRefill.floodMode==="adaptive"?"自适应":savedRefill.floodMaxMlS.toFixed(2))+' · 收回 / 收口起点 '+savedRefill.cutoffPercent+'% · 实测门槛 ≈ '+Math.round(savedRefill.cutoffPercent*.6)+'% 目标 · 启动 '+(savedRefill.startDelayMs/1000)+' s'+(refillDraftDirty?' · 草稿未保存':'');
+ const horizon=(r.startDelayMs+r.maxDurationMs+r.approachMs)/1000,xx=t=>34+690*t/Math.max(1,horizon),max=Math.max(baseCommand,boost)*1.2,yy=v=>118-80*v/Math.max(.1,max),start=r.startDelayMs/1000,end=start+r.maxDurationMs/1000;
+ const l1=(bounded?'≤ ':'')+boost.toFixed(4)+' ml/s · '+(bounded?'灌水上限 ':r.targetPercent+'% ')+(r.basis==="cup-target"?'目标折算基值':'基础泵流量')+'（r '+(Number(plan.controlGain)||0).toFixed(2)+' '+(plan.controlSource==="gain-memory"?'实测':plan.controlSource==="observed-tail"?'实测尾段':plan.controlSource==="lut"?'空粉碗 LUT':plan.controlSource==="high-flow-direct"?'高流量直给':'曲线')+'） · 接管 '+holding.toFixed(4)+' ml/s';
+ const l2='0s → '+start.toFixed(2)+'s 启动 → 最迟 '+end.toFixed(2)+'s 请求收回';
+ const l3='收回判据：预测 ≥ '+(Number.isFinite(goal)?goal.toFixed(2):'—')+' g/s；'+r.cutoffPercent+'% 同时决定收口起点、跳过阈值、实测噪声底';
+ $('refillpreviewlabels').innerHTML='<b>'+esc(l1)+'</b><br>'+esc(l2)+'<br>'+esc(l3);
+ drawRefillPreview($('refillpreview'),{base:baseCommand,boost,holding,start,end,horizon,max});
+ $('refillsafety').textContent='预览为估算；应用后以校验结果为准。机器指令上限 '+(Math.floor(upper*16)/16).toFixed(4)+' ml/s；原限压90%、数据新鲜度和驱动确认保护固定。'+(bounded?' 灌水在安全包线（设计值）。':(request>upper?' 已触及指令上限。':''));
+ const tl=curveLatest.refillLastShot&&curveLatest.refillLastShot.timeline;
+ if($('refillnodes'))$('refillnodes').innerHTML=tl&&tl.onsetMs!=null?('<b>上一杯补水节点</b><br>帧确认 0.00 s · onset '+((tl.relative&&tl.relative.onsetS)==null?'—':tl.relative.onsetS)+' s（S2 起点）'+(tl.cutoffAtMs!=null?' · 断流 '+((tl.relative&&tl.relative.cutoffS)==null?'—':tl.relative.cutoffS)+' s':'')+(tl.relative&&tl.relative.returnS!=null?' · 收回 '+esc(tl.relative.returnS)+' s':'')+(tl.relative&&tl.relative.completeS!=null?' · 确认 '+esc(tl.relative.completeS)+' s':'')+'<br>'+(tl.overlap?'S2 与补水重叠 '+esc(tl.overlap.seconds)+' s（onset → 收回）':'S2 与补水无重叠')+refillLearningLine(tl)):'';
+ if($('refilladaptive'))$('refilladaptive').innerHTML=typeof refillAdaptiveLine==='function'?refillAdaptiveLine(curveLatest.refillLastShot&&curveLatest.refillLastShot.adaptive,law):'';
+ renderRefillHistory();
+}
+function drawCurveChart(cv,o){
+ if(!cv||!cv.getContext)return;const dpr=typeof window!=='undefined'?Math.max(1,Math.min(2,window.devicePixelRatio||1)):1,w=Math.max(1,cv.clientWidth),h=Math.max(1,cv.clientHeight);
+ if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr)}
+ const ctx=cv.getContext('2d');if(!ctx)return;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+ const sx=w/800,sy=h/232,X=p=>p*sx,Y=p=>p*sy,yOf=n=>190-n/o.ymax*154,b=[34,160,350,490,630,770],xp=[88,250,420,560,700];
+ ctx.lineWidth=1;ctx.font=(11*sy)+'px ui-monospace,SFMono-Regular,Menlo,monospace';ctx.fillStyle='#aeb6c2';ctx.strokeStyle='#303640';ctx.textAlign='right';ctx.textBaseline='middle';
+ for(let n=0;n<=4;n++){const val=o.ymax*n/4,yy=Y(yOf(val));ctx.beginPath();ctx.moveTo(X(34),yy+.5);ctx.lineTo(X(770),yy+.5);ctx.stroke();ctx.fillText(val.toFixed(1),X(30),yy)}
+ ctx.save();ctx.setLineDash([3,5]);ctx.strokeStyle='#717b89';for(const sep of [160,350]){ctx.beginPath();ctx.moveTo(X(sep),Y(32));ctx.lineTo(X(sep),Y(194));ctx.stroke()}ctx.restore();
+ const line=q=>{const p=[];curveKeys.forEach((k,i)=>{const yy=Y(yOf(q[k]));p.push([X(b[i]),yy],[X(b[i+1]),yy])});return p};
+ const stroke=(p,color,dash,width)=>{ctx.save();ctx.setLineDash(dash||[]);ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();p.forEach((pt,i)=>i?ctx.lineTo(pt[0],pt[1]):ctx.moveTo(pt[0],pt[1]));ctx.stroke();ctx.restore()};
+ if(o.showRef)stroke(line(o.ref),'#939fae',[6,5],2);
+ if(o.showDraft)stroke(line(o.v),'#ffb25e',[],3);
+ for(let i=0;i<5;i++){const px=X(xp[i]),py=Y(yOf(o.v[curveKeys[i]])),sel=i===o.selected;
+  ctx.beginPath();ctx.arc(px,py,sel?10:8,0,Math.PI*2);ctx.fillStyle=sel?'#ffcf8a':'#20242b';ctx.fill();ctx.lineWidth=sel?3:2;ctx.strokeStyle='#ffb25e';ctx.stroke();
+  if(sel){ctx.font=(11*sy)+'px ui-monospace,SFMono-Regular,Menlo,monospace';ctx.fillStyle='#f6f3ee';ctx.textAlign='center';ctx.textBaseline='bottom';ctx.fillText(Number(o.v[curveKeys[i]]).toFixed(4),px,py-14)}
+ }
+}
+function drawRefillPreview(cv,o){
+ if(!cv||!cv.getContext)return;const dpr=typeof window!=='undefined'?Math.max(1,Math.min(2,window.devicePixelRatio||1)):1,w=Math.max(1,cv.clientWidth),h=Math.max(1,cv.clientHeight);
+ if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr)}
+ const ctx=cv.getContext('2d');if(!ctx)return;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+ const sx=w/760,sy=h/156,X=p=>p*sx,Y=p=>p*sy;
+ const xx=t=>34+690*t/Math.max(1,o.horizon),yy=v=>118-80*v/Math.max(.1,o.max);
+ ctx.strokeStyle='#657082';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(X(34),Y(118)+.5);ctx.lineTo(X(724),Y(118)+.5);ctx.stroke();
+ ctx.strokeStyle='#b794ff';ctx.lineWidth=3;ctx.beginPath();
+ ctx.moveTo(X(34),Y(yy(o.base)));ctx.lineTo(X(xx(o.start)),Y(yy(o.base)));ctx.lineTo(X(xx(o.start)),Y(yy(o.boost)));ctx.lineTo(X(xx(o.end)),Y(yy(o.boost)));ctx.lineTo(X(xx(o.end)),Y(yy(o.holding)));ctx.lineTo(X(724),Y(yy(o.holding)));ctx.stroke();
+ ctx.save();ctx.setLineDash([4,4]);ctx.strokeStyle='#cdb6ff';ctx.beginPath();ctx.moveTo(X(xx(o.end)),Y(25));ctx.lineTo(X(xx(o.end)),Y(122));ctx.stroke();ctx.restore();
+
+}
+function renderCurveEditor(snapshot){
+ if(snapshot)curveLatest=snapshot;const cv=$('curveeditorchart'),points=$('curvepoints'),params=$('curveparams'),status=$('curvestatus');if(!cv||!curveLatest)return;
+ if(!curveDraft||!curveDirty&&!curveBusy)curveDraft=JSON.parse(JSON.stringify(curveLatest));
+ const v=curveDraft.values,ref=curveLatest.values,stale=curveDraft.revision!==curveLatest.revision;
+ curveYmax=curveDrag?curveDrag.ymax:Math.max(1,Math.min(8,Math.ceil(Math.max(...curveKeys.map(k=>Math.max(v[k],ref[k])))*1.35*2)/2));
+ const y=n=>190-n/curveYmax*154,b=[34,160,350,490,630,770],x=[88,250,420,560,700];
+ const showRef=$('curveshowcurrent'),showDraft=$('curveshowdraft');
+ if(cv.getContext)drawCurveChart(cv,{v,ref,ymax:curveYmax,selected:curveSelected,showRef:!showRef||showRef.checked,showDraft:!showDraft||showDraft.checked});
+ points.innerHTML=curveNames.map((name,i)=>'<button class="b '+(i===curveSelected?'p':'s')+'" data-selectpoint="'+i+'" aria-pressed="'+(i===curveSelected)+'">'+name+'</button>').join('');points.querySelectorAll('[data-selectpoint]').forEach(q=>q.onclick=()=>{curveSelected=Number(q.dataset.selectpoint);renderCurveEditor(curveLatest)});
+ const selected=$('curveselected');if(selected)selected.textContent=curveNames[curveSelected]+' · '+Number(v[curveKeys[curveSelected]]).toFixed(4)+' ml/s';
+ const input=$('curvevalue');if(input){const bounds=curveLimits(curveSelected,v);input.min=bounds[0];input.max=bounds[1];input.disabled=curveBusy||!curveLatest.canApply;if(document.activeElement!==input||input.dataset.point!==String(curveSelected))input.value=Number(v[curveKeys[curveSelected]]).toFixed(4);input.dataset.point=String(curveSelected);}
+ const quantum=$('curvequantum');if(quantum)quantum.textContent='对应驱动档位 ≈ '+(Math.round(v[curveKeys[curveSelected]]*16)/16).toFixed(4)+' ml/s';
+ const shape=$('curveshape');if(shape)shape.checked=curveDraft.shaped;
+ const times=$('curvetimes');if(times)times.innerHTML='<span>S3 前段 '+v.earlySeconds+'s</span> <button class="b s" data-time="earlySeconds" data-sign="-1">−1s</button><button class="b s" data-time="earlySeconds" data-sign="1">+1s</button><span>中段 '+v.midSeconds+'s</span><button class="b s" data-time="midSeconds" data-sign="-1">−1s</button><button class="b s" data-time="midSeconds" data-sign="1">+1s</button>';if(times)times.querySelectorAll('[data-time]').forEach(q=>q.onclick=()=>curveTime(q.dataset.time,Number(q.dataset.sign)));
+ renderRefillEditor();
+ params.innerHTML='<table><tr><th>生成参数</th><th>当前</th><th>草稿 ml/s</th></tr>'+curveKeys.map((k,i)=>'<tr><td>'+curveNames[i]+'</td><td>'+Number(ref[k]).toFixed(4)+'</td><td><b>'+Number(v[k]).toFixed(4)+'</b></td></tr>').join('')+'</table><div class="small">S3 '+(curveDraft.shaped?'前 '+v.earlySeconds+'s → 中 '+v.midSeconds+'s → 后段至结束':'平直')+'；S1、S2仍按累计重量转换，泄压和浸泡在示意图中省略。</div>';
+ const save=$('refillsave');if(save)save.disabled=curveBusy||stale||!curveLatest.canApply||JSON.stringify(curveDraft.refill)===JSON.stringify(curveLatest.refill);
+ const apply=$('curveapply');if(apply)apply.disabled=curveInputInvalid||curveBusy||!curveDirty||stale||!curveLatest.canApply;
+ status.textContent=curveBusy?'正在校验并应用到下一杯…':stale?'当前参数已更新；草稿已保留，请先重新载入当前曲线再编辑。':curveDirty?'草稿未应用 · 点击“应用到下一杯”后生效。':curveLatest.source?'手动曲线已应用到下一杯；新杯完成后继续自动学习。':'点选控制点后上下拖动，或点击上调／下调。';
+ if(!curveBusy&&!curveLatest.canApply)status.textContent+=' 当前运行中或曲线未校验，只能预览。';
+}
+async function saveRefillDraft(){
+ if(!curveDraft||curveBusy)return;const refill=JSON.parse(JSON.stringify(curveDraft.refill)),revision=curveDraft.revision;
+ curveBusy=true;renderCurveEditor(curveLatest);
+ try{const r=await post('refill-settings-save',{refill,revision});if(!r.saved)throw Error('未确认保存');
+ curveBusy=false;curveDraft.refill=JSON.parse(JSON.stringify(r.curveEditor.refill));curveDraft.revision=r.curveEditor.revision;
+ curveDirty=!curveSame(curveDraft,r.curveEditor);renderCurveEditor(r.curveEditor);$('refillsavestatus').textContent='补水参数已保存，下一杯生效';
+ }catch(e){curveBusy=false;renderCurveEditor(curveLatest);$('refillsavestatus').textContent='未保存：'+String(e.message||e);}
+}
+async function applyCurveDraft(){if(!curveDraft||curveBusy||curveInputInvalid||!curveDirty)return;let applied=false;const payload={revision:curveDraft.revision,values:JSON.parse(JSON.stringify(curveDraft.values)),shaped:curveDraft.shaped,refill:JSON.parse(JSON.stringify(curveDraft.refill))};curveBusy=true;renderCurveEditor(curveLatest);try{const r=await post('curve-edit-apply',payload);if(r.verified!==true||!r.profileTruth||r.profileTruth.verified!==true)throw Error('下一杯曲线未校验');applied=true;curveBusy=false;curveDirty=false;curveDraft=null;latestManualCurveSource=r.commandFlows&&r.commandFlows.manualCurveSource||null;renderCurveEditor(r.curveEditor);await loadDiag()}catch(e){curveBusy=false;renderCurveEditor(curveLatest);$('curvestatus').textContent=applied?'已校验应用到下一杯，但界面刷新失败，请重新打开诊断页：'+String(e.message||e):'未应用：'+String(e.message||e)+'。草稿已保留。'}}
+const curveCanvas=$('curveeditorchart');if(curveCanvas){
+ const hit=e=>{const r=curveCanvas.getBoundingClientRect(),lx=(e.clientX-r.left)/r.width*800,ly=(e.clientY-r.top)/r.height*232,pts=[88,250,420,560,700];let best=-1,bd=1e9;for(let i=0;i<5;i++){const yy=190-Number(curveDraft.values[curveKeys[i]])/curveYmax*154,d=Math.hypot(lx-pts[i],ly-yy);if(d<bd){bd=d;best=i}}return bd<=30?best:-1};
+ curveCanvas.onpointerdown=e=>{if(curveBusy||!curveDraft)return;const q=e.target&&e.target.closest&&e.target.closest('[data-curve-point]');const i=q?Number(q.dataset.curvePoint):hit(e);if(i<0)return;e.preventDefault();curveSelected=i;curveDrag={id:e.pointerId,ymax:curveYmax};if(curveCanvas.setPointerCapture)curveCanvas.setPointerCapture(e.pointerId);renderCurveEditor(curveLatest)};
+ curveCanvas.onpointermove=e=>{if(!curveDrag||curveDrag.id!==e.pointerId)return;e.preventDefault();const r=curveCanvas.getBoundingClientRect(),yy=(e.clientY-r.top)/r.height*232;curveSetValue((190-yy)/154*curveDrag.ymax)};
+ const end=e=>{if(curveDrag&&curveDrag.id===e.pointerId){curveDrag=null;if(curveCanvas.hasPointerCapture&&curveCanvas.hasPointerCapture(e.pointerId))curveCanvas.releasePointerCapture(e.pointerId)}};
+ curveCanvas.onpointerup=end;curveCanvas.onpointercancel=end;
+ curveCanvas.onkeydown=e=>{const q=e.target&&e.target.closest&&e.target.closest('[data-curve-point]');if(q)curveSelected=Number(q.dataset.curvePoint);if(e.key==='ArrowUp'||e.key==='ArrowDown'){e.preventDefault();curveNudge(e.key==='ArrowUp'?1:-1)}};
+ if(typeof document!=='undefined')for(const id of ['curveEditor','refill-settings']){const d=document.getElementById(id);if(d)d.addEventListener('toggle',()=>{if(d.open&&curveLatest)renderCurveEditor(curveLatest)})}
+ if(typeof window!=='undefined')window.addEventListener('resize',()=>{if(curveLatest)renderCurveEditor(curveLatest)});
+}
+const curveInput=$('curvevalue');if(curveInput){curveInput.onchange=()=>curveEnterValue(curveInput.value);curveInput.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();curveEnterValue(curveInput.value)}};}
+if($('curveup'))$('curveup').onclick=()=>curveNudge(1);if($('curvedown'))$('curvedown').onclick=()=>curveNudge(-1);if($('curvereset'))$('curvereset').onclick=curveReset;if($('curveapply'))$('curveapply').onclick=applyCurveDraft;if($('curveshape'))$('curveshape').onchange=e=>curveShapeToggle(e.target.checked);for(const id of ['curveshowcurrent','curveshowdraft'])if($(id))$(id).onchange=()=>renderCurveEditor(curveLatest);
+const flowOptions=$('flowseries');if(flowOptions){flowOptions.innerHTML=[['cup','杯中目标 g/s'],['raw','RAW杯流 g/s'],['trend','趋势轨迹 g/s'],['decaid','Decaid杯流 g/s'],['target','机器目标 ml/s'],['machine','机器实际 ml/s'],['writes','写入指令 ml/s']].map(x=>'<label style="margin-right:12px"><input type="checkbox" checked data-flowseries="'+x[0]+'">'+x[1]+'</label>').join('');flowOptions.querySelectorAll('[data-flowseries]').forEach(q=>q.onchange=()=>{flowSeriesVisible[q.dataset.flowseries]=q.checked;if(lastChartRun)renderCharts(lastChartRun)})}
+
+let learningHistoryData=null,historyReviewBusy=false,historyReviewError=null;
+function renderLearningHistory(data){
+ const table=$('learninghistorytable'),select=$('historyrun'),status=$('historysavestatus');if(!table||!select||!data)return;learningHistoryData=data;
+ const selected=select.value,records=data.records||[];
+ select.innerHTML=records.map(x=>'<option value="'+esc(x.runId).replace(/"/g,'&quot;')+'">'+esc(x.startedAt||x.runId)+' · v'+esc(x.version||'—')+' · '+esc(x.runId)+'</option>').join('');
+ if(records.some(x=>x.runId===selected))select.value=selected;
+ table.innerHTML='<table><tr><th>Shot / time</th><th>Learning status</th><th>Stage evidence</th><th>Reason</th></tr>'+records.map(x=>'<tr><td>'+esc(x.runId)+'<br>'+esc(x.startedAt||'')+' · v'+esc(x.version||'—')+'<br>'+esc(x.releaseMode==='auto'?'AUTO release':x.activeRelease===false?'Continuous extraction':'Active release')+'</td><td>'+esc(x.integrity.status)+'</td><td>'+['s1','s2','s3'].filter(k=>x.stageEvidence[k]).map(x=>x.toUpperCase()).join(' / ')+'</td><td>'+esc((x.integrity.reasons||[]).join(' · ')||'No confirmed fault')+'</td></tr>').join('')+'</table>';
+ const audit=data.s3CommandAudit||{},timeline=(audit.events||[]).slice().reverse(),first=audit.earliestRetainedFlat;
+ const auditHtml='<div class="m"><b>S3 command timeline</b><br>'+esc(first?'Earliest retained flat evidence: '+(first.at||first.runId)+' · '+first.values.join(' → ')+' ml/s':'No verified flat command in retained history')+'<br><span class="small">'+esc(audit.note||'')+'</span><table><tr><th>Shot / time</th><th>Source</th><th>S3 commands ml/s</th><th>Origin / shape</th></tr>'+timeline.map(x=>'<tr><td>'+esc(x.runId)+'<br>'+esc(x.at||'')+' · v'+esc(x.version||'—')+'</td><td>'+esc(x.kind==='applied'?'Verified next-shot application':'Shot-start snapshot')+'</td><td>'+esc(x.values.join(' → '))+'</td><td>'+esc(x.origin)+' · '+esc(x.flat?'FLAT':'SHAPE')+(x.timedShape?' · 3 timed frames':'')+(x.verified?'':' · unverified')+(x.learningExcluded?' · Excluded from learning':'')+'</td></tr>').join('')+'</table></div>';
+ table.innerHTML=auditHtml+table.innerHTML;
+ for(const id of ['historyexclude','historyrestore'])if($(id))$(id).disabled=historyReviewBusy||!data.editable||!records.length;
+ status.textContent=historyReviewError|| (data.savePending?'History save awaiting readback verification':data.editable?'History storage verified':'History is read-only until idle and storage is verified');
+}
+async function reviewHistory(excluded){
+ if(historyReviewBusy||!learningHistoryData)return;const id=$('historyrun').value,reason=$('historyreason').value;if(!id)return;
+ historyReviewError=null;historyReviewBusy=true;renderLearningHistory(learningHistoryData);
+ try{const response=await post('history-review',{runId:id,excluded,reason});renderLearningHistory(response.learningHistory||response.history);await loadDiag();}
+ catch(error){historyReviewError='History review failed: '+String(error.message||error);}
+ finally{historyReviewBusy=false;if(learningHistoryData)renderLearningHistory(learningHistoryData);}
+}
+function renderLearningIntegrity(summary){
+ const box=$('learningintegrity');if(!box)return;const q=summary&&summary.learningIntegrity,manual=summary&&summary.learningReview&&summary.learningReview.excluded;
+ if(!q){box.textContent='';return;}
+ box.innerHTML=manual?'<b class="bad">Shot excluded from learning by user</b>':!q.eligible?'<b class="bad">Shot excluded from learning automatically</b><br>'+esc((q.reasons||[]).map(x=>x.code+(x.phase?' · '+x.phase.replace('stage','S'):'')).join(' / ')):'<span class="small">No confirmed execution/scale fault; stage quality and consensus gates still apply.</span>';
+}
+if($('historyexclude'))$('historyexclude').onclick=()=>reviewHistory(true);if($('historyrestore'))$('historyrestore').onclick=()=>reviewHistory(false);
+
+let lastDiagSummary=null,lastCommandFlows=null,lastLearningHistory=null,lastPresetData=null,lastCalStatus=null,lastAdvancedSettings=null;
+function hxNum(v){if(v==null||v==='')return '—';const n=Math.round(Number(v)*16)/16;return Number.isFinite(n)?String(n):'—'}
+function updateFoldStatuses(){
+ const set=(id,t)=>{const e=$(id);if(e)e.textContent=t};
+ const s=lastDiagSummary||{},v=s.stage2||{},m=s.stage1Startup||{},z=s.stage3Stability||{},a=s.nextShotAdaptive||{};
+ set('st-validation',v.desiredRealFlowGS!=null?('S2 '+hxNum(v.rawRegressionGS)+' / '+hxNum(v.desiredRealFlowGS)+' g/s'+(v.rawErrorPct!=null?' · '+(Number(v.rawErrorPct)>0?'+':'')+v.rawErrorPct+'%':'')):'—');
+ set('st-stability',(m.firstRiseDelayS!=null||z.status)?((m.firstRiseDelayS!=null?'首滴 '+m.firstRiseDelayS+' s':'')+(z.status?' · S3 '+z.status:'')):'—');
+ const acts=['s1','s2','s3'].map(k=>a[k]&&a[k].action).filter(Boolean);
+ set('st-adaptive',acts.length?acts.join(' · '):'—');
+ const c=lastCommandFlows||{};
+ set('st-profile',(c.stage1CommandMlS!=null||c.stage2CommandMlS!=null)?('S1 '+hxNum(c.stage1CommandMlS)+' · S2 '+hxNum(c.stage2CommandMlS)+' · S3 '+(c.stage3FlatCommandMlS!=null?hxNum(c.stage3FlatCommandMlS):'—')):'—');
+ if(typeof curveDraft!=='undefined'&&curveDraft){const names=['S1','S2','S3 前','S3 中','S3 后'],keys=['stage1','stage2','early','mid','late'],i=Number(curveSelected)||0;set('st-curve',hxNum(curveDraft.values[keys[i]])+' ml/s · '+names[i]);}
+ const h=lastLearningHistory||{},shots=Array.isArray(h.shots)?h.shots.length:(h.count||0),ex=Array.isArray(h.shots)?h.shots.filter(x=>x.excluded).length:(h.excluded||0);
+ set('st-history',shots?(shots+' 杯'+(ex?' · '+ex+' 排除':'')):'—');
+ const p=lastPresetData||{},slots=Array.isArray(p.slots)?p.slots.length:0;
+ set('st-presets',slots?(slots+' 槽'+(p.current?' · '+p.current+' 生效':'')):'—');
+ const sc=s.shotCommands||{};
+ set('st-snapshot',(sc.runId||sc.startedAt)?((sc.startedAt?String(sc.startedAt).slice(11,19)+' · ':'')+(sc.segments?sc.segments.length+' 段':'已记录')):'—');
+ set('st-telemetry',(s.sampleCount!=null||s.rawScaleSampleCount!=null)?((s.sampleCount||0)+' 样本 · '+(s.rawScaleSampleCount||0)+' 秤'):'—');
+ set('sum-last',s.startedAt?String(s.startedAt).slice(11,16):'—');
+ set('sum-s2',v.rawRegressionGS!=null?(Number(v.rawRegressionGS).toFixed(2)+' g/s'):'—');
+ const fc=lastCommandFlows||{};
+ set('sum-next',(fc.manualCurveSource||(fc.adaptiveSource&&fc.adaptiveSource.runId))?'已应用':'LUT');
+ set('sum-history',shots?shots+' 杯':'—');
+ const cal=lastCalStatus||{},w=cal.waterPreflight||{},set3=(lastAdvancedSettings&&lastAdvancedSettings.settings)||{};
+ set('st-calstatus',cal.pluginVersion?(cal.calibrationUsable?('CAL READY · '+(cal.pointCount||0)+' 点 · rev '+(cal.lutRevision||1)):('REQUIRED FIRST · '+(cal.pointCount||0)+' 点')):'—');
+ set('st-waterpreflight',w.available?(Math.round(Number(w.currentLevelMm))+' / '+Math.round(Number(w.refillLevelMm))+' mm'):'Tank level unavailable');
+ set('st-calmode',cal.pluginVersion?((cal.calibrationModeLabel||'—')+' · '+(cal.scopeLabel||'—')):'—');
+ set('st-calprepare',cal.pluginVersion?(cal.calibrationActive?'FLOW CAL RUNNING':'EMPTY BASKET'):'—');
+ set('st-callut',(cal.pointCount||0)+' 点'+(Array.isArray(cal.actualRange)&&cal.actualRange.length===2?' · '+hxNum(cal.actualRange[0])+'–'+hxNum(cal.actualRange[1])+' g/s':''));
+ const pa=latestAdvisorySummary||{};
+ const acts3=['stage1','stage2','stage3'].map((k,i)=>pa[k]&&pa[k].action?('S'+(i+1)+' '+pa[k].action):'').filter(Boolean);
+ set('st-advisory',acts3.length?acts3.join(' · '):'—');
+ const manCount=['stage1Mode','stage2Mode','stage3Mode'].filter(k=>fc[k]==='manual').length;
+ set('st-testedit','MANUAL '+manCount+'/3 · S3 '+((fc.s3Shape&&fc.s3Shape.enabled)?'SHAPE':'FLAT'));
+ set('st-modecards',set3.releaseMode==null&&set3.activeRelease==null?'—':((set3.releaseMode==='auto'?'Auto 0 bar':set3.releaseMode==='on'?'主动泄压':'连续萃取')+' · '+(set3.adaptiveLearningLevel||'—')));
+ set('st-targets',set3.stage1Flow==null?'—':(hxNum(set3.stage1Flow)+' / '+hxNum(set3.stage2Flow)+' / '+hxNum(set3.stage3Flow)+' g/s'));
+ set('st-livetrim',set3.liveFlowTrimTest==null?'—':((set3.liveFlowTrimTest?'ON':'OFF')+' · L'+(set3.liveFlowTrimLevel||1)));
+ set('st-releaseparams',set3.dumpFlowThreshold==null?'—':(hxNum(set3.dumpFlowThreshold)+' ml/s · '+set3.dumpTimeoutSeconds+' s'));
+ set('st-directstart',set3.directDriverStartTest==null?'—':(set3.directDriverStartTest?'ON':'OFF'));
+ set('st-csv',s.sampleCount==null?'—':((s.sampleCount||0)+' 行'));
+ set('st-historyjson',shots?(shots+' 杯'):'—');
+}
+if(typeof setInterval==='function')setInterval(updateFoldStatuses,600);
+function paint(x){if(x.liveFlowTrimTest)window.__hecTrim={writes:x.liveFlowTrimTest.writes||0,maxWrites:x.liveFlowTrimTest.maxWrites||0};if(lastModeCard)renderHecStatus(lastModeCard);const mode=$('brewingmode');if(mode&&x.releaseMode)mode.textContent=x.releaseMode==='auto'?'Release: AUTO · 0 bar release / soak → S2':x.releaseMode==='on'?'Release: ON · Release / soak / GHC restart':'Release: OFF · Continuous S1 → S2 → S3';else if(mode&&typeof x.activeRelease==='boolean')mode.textContent=x.activeRelease?'Active release: ON · Release / soak / restart':'Active release: OFF · Continuous S1 → S2 → S3';if(x.phase==='soak'){t.textContent='SOAK '+x.soakSecondsRemaining+'s';d.textContent=x.releaseMode==='auto'?'0 bar soak is running. S2 starts automatically at the configured soak time; no GHC press.':'Active release is complete. Wait until the soak reaches 0. The plugin will arm the second stage only after the full soak.';b.disabled=true;}else if(x.phase==='dumping'){t.textContent='AUTO RELEASE';d.textContent='0 bar release frame requested; the soak countdown uses the configured soak time.';b.disabled=true;}else if(x.phase==='restart_wait'){t.textContent='CHECK PINK LIGHT · '+x.ghcSecondsRemaining+'s';d.textContent='Pink ON → press the physical GHC Espresso button. Pink OFF → tap RE-ARM, then press GHC when the light turns pink.';b.disabled=false;}else if(x.calibrationActive){t.textContent='FLOW CAL RUNNING';d.textContent='EMPTY BASKET. Leave the staircase running until Idle. Do not remove the catch vessel; the plugin will stop at the selected-mode actual-water safety cap before 300 ml.';b.disabled=true;}else if(['stage1','stage2','stage3'].includes(x.phase)){t.textContent='HYPEREX · '+x.phase.toUpperCase();d.textContent=x.releaseMode==='auto'?'Auto release · 0 bar soak then weight-driven S2/S3 in the same shot.':x.releaseMode==='on'?'Active release mode · Weight-driven stage progression.':'Continuous extraction · No intermediate release or restart.';b.disabled=true;}else{t.textContent='HYPEREX IDLE';d.textContent='No GHC action is required.';b.disabled=true;}m.textContent='Cumulative '+Number(x.cumulativeWeight||0).toFixed(1)+'g · arm requests '+(x.armRequestCount||0)+(x.directStartTest?' · DIRECT TEST: '+x.directStartTest.status:'');}
+async function post(ep,body){const r=await fetch(base+'/'+ep,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});let j={};try{j=await r.json()}catch(_){j={error:await r.text()}}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j;}
+async function doRearm(auto){b.disabled=true;b.textContent='RE-ARMING…';try{const x=await post('rearm',{retry:1});paint(x);t.textContent='RE-ARM REQUEST SENT';d.textContent='Wait for the pink GHC Espresso light, then press the physical GHC Espresso button.';if(auto)setTimeout(closeUi,1300)}catch(e){t.textContent='RE-ARM FAILED';d.textContent=String(e)}finally{b.textContent='RE-ARM';setTimeout(()=>b.disabled=false,800)}}
+function stat(label,v){return '<div class="stat"><span class="small">'+label+'</span><b>'+v+'</b></div>'}
+function esc(v){return String(v==null?'—':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function commandModeLabel(v,origin,shape){const o=origin||((v==='auto'||!v)?'original':'retained'),label=o==='adaptive'?'ADAPTIVE':o==='manual'?'MANUAL':o==='original'?'ORIGINAL / LUT':'RETAINED / UNKNOWN';const values=shape&&[shape.earlyCommand,shape.midCommand,shape.lateCommand].map(Number),flat=values&&values.every(Number.isFinite)&&Math.max(...values)-Math.min(...values)<.001;return label+(v==='shape'?(flat?' · FLAT (3 timed frames)':' · SHAPE'):'')}
+function shapeCommandText(sh){if(!sh||sh.enabled!==true)return null;return esc(sh.earlyCommand)+' × '+esc(sh.earlySeconds)+'s → '+esc(sh.midCommand)+' × '+esc(sh.midSeconds)+'s → '+esc(sh.lateCommand)+' ml/s'}
+function appliedS3Text(c){const sh=c&&c.s3Shape;const shaped=shapeCommandText(sh);if(shaped)return shaped;const flat=c&&c.stage3FlatCommandMlS!=null?c.stage3FlatCommandMlS:(c&&c.stage3CommandMlS);return esc(flat)+' ml/s FLAT'}
+function renderAppliedCommands(c,truth){if(!appliedcommands)return;if(!c||!c.appliedProfile){appliedcommands.innerHTML='<span class="bad">Current profile command state unavailable.</span>';return}const p=c.appliedProfile,src=c.adaptiveSource||null;const expectedS3=p.stage3||{};const t=truth||{};const a=t.actual||null;let ap1=p.stage1&&p.stage1.commandMlS,ap2=p.stage2&&p.stage2.commandMlS,mode=expectedS3.mode,ap3=expectedS3.mode==='shape'?shapeCommandText(expectedS3.shape):(esc(expectedS3.flatCommandMlS)+' ml/s');if(!a){ap1='unavailable';ap2='unavailable';ap3='unavailable';mode='unverified'}if(a){ap1=a.stage1CommandMlS;ap2=a.stage2CommandMlS;mode=a.stage3Mode==='shape'?'shape':'actual';ap3=a.stage3Mode==='shape'?shapeCommandText(a.s3Shape):(esc(a.stage3CommandMlS)+' ml/s')}let source='<b>Source:</b> '+esc(c.manualTestStatus||'AUTO / LUT');if(src&&src.runId)source='<b>Source:</b> NEXT SHOT ADAPTIVE '+esc(String(src.mode||'').toUpperCase())+' · run '+esc(src.runId)+(src.appliedAt?' · '+esc(src.appliedAt):'');if(c.manualCurveSource)source='<b>Source:</b> '+(c.manualCurveSource.mode==='lut-reset'?'手动恢复 LUT':'手动曲线编辑')+' · 下一杯执行 · '+esc(c.manualCurveSource.appliedAt||'');const truthLine=t.verified?'<span class="good"><b>WORKFLOW READBACK VERIFIED</b></span> · '+esc(t.status||''):'<span class="bad"><b>WORKFLOW NOT VERIFIED</b></span> · '+esc(t.status||'')+' · expected commands are shown only as a reference until repair succeeds.';appliedcommands.innerHTML='<table><tr><th>Stage</th><th>Target REAL g/s</th><th>LUT cmd</th><th>Mode</th><th>ACTUAL WORKFLOW COMMAND</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode,p.stage1&&p.stage1.origin)+'</td><td><b>'+esc(ap1)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode,p.stage2&&p.stage2.origin)+'</td><td><b>'+esc(ap2)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(expectedS3.desiredGS)+' g/s</td><td>'+esc(expectedS3.lutCommandMlS)+'</td><td>'+commandModeLabel(mode,expectedS3.origin,a&&a.s3Shape||expectedS3.shape)+'</td><td><b>'+ap3+'</b></td></tr></table><div class="small" style="margin-top:7px">'+truthLine+'<br>'+source+'</div>'}
+function renderRunCommands(s){renderLearningIntegrity(s);if(!runcommands)return;const p=s&&s.shotCommands;if(!p){runcommands.innerHTML='<span class="small">No completed HyperEx shot command snapshot is available.</span>';return}const s3=p.stage3||{};const s3txt=s3.mode==='shape'?shapeCommandText(s3.shape):(esc(s3.flatCommandMlS)+' ml/s');runcommands.innerHTML=(s.liveFlowTrim?'<div class="small"><b>LIVE TRIM ENABLED:</b> this table is the shot-start snapshot. In-shot commands and machine target responses are plotted and exported below.</div>':'')+'<table><tr><th>Stage</th><th>Target</th><th>LUT cmd</th><th>Mode AT SHOT START</th><th>COMMANDS USED BY THIS SHOT</th></tr><tr><td>S1</td><td>'+esc(p.stage1&&p.stage1.desiredGS)+' g/s</td><td>'+esc(p.stage1&&p.stage1.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage1&&p.stage1.mode,p.stage1&&p.stage1.origin)+'</td><td><b>'+esc(p.stage1&&p.stage1.commandMlS)+' ml/s</b></td></tr><tr><td>S2</td><td>'+esc(p.stage2&&p.stage2.desiredGS)+' g/s</td><td>'+esc(p.stage2&&p.stage2.lutCommandMlS)+'</td><td>'+commandModeLabel(p.stage2&&p.stage2.mode,p.stage2&&p.stage2.origin)+'</td><td><b>'+esc(p.stage2&&p.stage2.commandMlS)+' ml/s</b></td></tr><tr><td>S3</td><td>'+esc(s3.desiredGS)+' g/s</td><td>'+esc(s3.lutCommandMlS)+'</td><td>'+commandModeLabel(s3.mode,s3.origin,s3.shape)+'</td><td><b>'+s3txt+'</b></td></tr></table><div class="small" style="margin-top:7px">Historical snapshot only. It does not change when NEXT SHOT ADAPTIVE writes a new profile after this shot.</div>'}
+const ADV_SETTING_KEYS={adaptiveLearningLevel:'AdaptiveLearningLevel',activeRelease:'ActiveRelease',liveFlowTrimLevel:'LiveFlowTrimLevel',liveFlowTrimTest:'LiveFlowTrimTest',directDriverStartTest:'DirectDriverStartTest',stage1Flow:'Stage1Flow',stage1PressureLimit:'Stage1PressureLimit',dumpFlowThreshold:'DumpFlowThreshold',dumpFlowStableSamples:'DumpFlowStableSamples',dumpFallbackSeconds:'DumpFallbackSeconds',dumpTimeoutSeconds:'DumpTimeoutSeconds',stage2Flow:'Stage2Flow',stage2PressureLimit:'Stage2PressureLimit',stage3Flow:'Stage3Flow',stage3PressureLimit:'Stage3PressureLimit',hardPressureLimit:'HardPressureLimit',scaleResetThreshold:'ScaleResetThreshold',noScaleTimeoutSeconds:'NoScaleTimeoutSeconds',autoArmRetry1Seconds:'AutoArmRetry1Seconds',autoArmRetry2Seconds:'AutoArmRetry2Seconds',diagnosticSampleIntervalMs:'DiagnosticSampleIntervalMs',maxRunSeconds:'MaxRunSeconds'};
+document.addEventListener('input',e=>{const k=e.target&&e.target.dataset&&e.target.dataset.originStage;if(k){const q=$('mode_'+k);if(q)q.value='manual'}});
+const ADV_FIELDS=Object.keys(ADV_SETTING_KEYS);
+function updateTrimLevelLabel(){const q=$('adv_liveFlowTrimLevel'),o=$('adv_liveFlowTrimLevelLabel');if(!q||!o)return;const labels=['一档 · 原周期 / 最多50次写入','二档 · 300 ms / 最多150次写入','三档 · 250 ms / 最多200次写入','四档 · 200 ms / 最多250次写入'];const level=Number(q.value);o.textContent=labels[level-1]||labels[0];q.setAttribute('aria-valuetext',o.textContent)}
+const trimLevelSlider=$('adv_liveFlowTrimLevel');if(trimLevelSlider)trimLevelSlider.addEventListener('input',updateTrimLevelLabel);
+let lastModeCard=null;
+function modeUiText(s){return window.HXLang&&window.HXLang.text?window.HXLang.text(s):s}
+function renderModeCard(data){
+  if(!data)return;
+  lastModeCard=data;
+  const releaseModeValue=data.releaseMode||(data.activeRelease===false?'off':'on');
+  const next=data.algorithmIntervention==='off'?'off':(data.algorithmIntervention==='hec'?'hec':'full');
+  const active=data.algorithmInterventionActive==='off'?'off':(data.algorithmInterventionActive==='hec'?'hec':(data.algorithmInterventionActive==='full'?'full':next));
+  const release=$('mode-release'),algo=$('mode-algo'),card=$('modecard');
+  if(release){
+    release.dataset.mode=releaseModeValue;
+    release.querySelectorAll('[data-release]').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.release===releaseModeValue))});
+    release.classList.toggle('locked',data.canEdit===false);
+  }
+  if(algo){
+    algo.dataset.mode=next;
+    algo.querySelectorAll('[data-algo]').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.algo===next))});
+    algo.classList.toggle('locked',data.canEdit===false);
+  }
+  if(card){card.classList.toggle('state-off',next==='off');card.classList.toggle('state-hec',next==='hec');}
+  const rs=$('mode-release-sub');if(rs)rs.textContent=modeUiText(releaseModeValue==='auto'?'Auto · 0 bar 泄压 / 浸泡 → S2':releaseModeValue==='on'?'泄压 · 浸泡 · GHC 重启':'连续 S1 → S2 → S3');
+  const as=$('mode-algo-sub');if(as)as.textContent=modeUiText(next==='full'?'全开：插件调流 · HEC：APK 调流 · 全关：只检测':(next==='hec'?'HEC：APK 调流 · 插件监护 + 学习':'只检测 · 不写入'));
+  const l=$('mode-latch');if(l)l.textContent=modeUiText('本杯 算法'+(active==='full'?'全开':(active==='hec'?'HEC':'全关')));
+  const n=$('mode-next');if(n)n.textContent=modeUiText('下一杯 算法'+(next==='full'?'全开':(next==='hec'?'HEC':'全关'))+' · 已保存');
+  renderHecStatus(data);
+}
+function renderHecStatus(data){
+  const bar=$('hec-status');if(!bar)return;
+  const mode=data.algorithmIntervention==='off'?'off':(data.algorithmIntervention==='hec'?'hec':'full');
+  bar.style.display=mode==='hec'?'flex':'none';
+  if(mode!=='hec')return;
+  const h=data.hec||{};
+  const conn=$('hec-conn'),dot=$('hec-dot'),counts=$('hec-counts'),budget=$('hec-budget'),tk=$('hec-takeover'),tks=$('hec-takeover-sep');
+  // 2.2.63 UI text only: a stale heartbeat while HEC is selected means the APK is
+  // usually backgrounded (it stops polling), not that HEC is off. Keep the
+  // connected text unchanged; the stale branch states HEC is still enabled.
+  if(conn)conn.textContent=modeUiText(h.ok?'APK 已连接':'HEC 已启用 · APK 未连接（后台）')+(h.ok&&h.ageMs!=null?' '+(h.ageMs/1000).toFixed(1)+' s':'');
+  if(dot)dot.classList.toggle('bad',!h.ok);
+  if(counts)counts.textContent=modeUiText('外部写入')+' '+(h.externalWrites||0)+' · '+modeUiText('拒绝')+' '+(h.externalRejects||0)+' · '+modeUiText('看门狗')+' '+(h.watchdogs||0);
+  const t=window.__hecTrim||null;
+  if(budget)budget.textContent=modeUiText('本杯预算')+' '+(t?t.writes:0)+' / '+(t?t.maxWrites:0);
+  const taken=!!(h.takeover);
+  if(tk){tk.style.display=taken?'':'none';tk.textContent=modeUiText('HEC：本杯插件已接管')+(taken&&h.takeover.reason?' · '+modeUiText(h.takeover.reason==='hec-no-handshake'?'未握手':'心跳断开'):'');}
+  if(tks)tks.style.display=taken?'':'none';
+}
+const perfPageStats={};let perfPageTimer=0;
+function perfPage(name,ms){
+  ms=Math.max(0,Number(ms)||0);
+  const s=perfPageStats[name]||(perfPageStats[name]={count:0,maxMs:0,lastMs:0,over50Ms:0});
+  s.count++;s.lastMs=+ms.toFixed(1);if(ms>s.maxMs)s.maxMs=+ms.toFixed(1);if(ms>50)s.over50Ms++;
+  if(ms>50){try{console.log('[HXPERF] '+name+' '+ms.toFixed(1)+'ms')}catch(_){}}
+  if(!perfPageTimer)perfPageTimer=setTimeout(perfPageFlush,5000);
+}
+function perfPageFlush(){
+  perfPageTimer=0;
+  if(!Object.keys(perfPageStats).length)return;
+  const payload=JSON.parse(JSON.stringify(perfPageStats));
+  for(const k of Object.keys(perfPageStats))delete perfPageStats[k];
+  fetch(base+'/perf-timing',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).catch(function(){});
+}
+async function loadModeCard(){
+  const t0=Date.now();
+  try{
+    const r=await fetch(base+'/control-mode');
+    if(!r.ok)return;
+    const j=await r.json();
+    const prev=lastModeCard;
+    renderModeCard(j);
+    perfPage('loadModeCard',Date.now()-t0);
+    if(prev&&prev.algorithmIntervention!=='hec'&&j.algorithmIntervention==='hec'){
+      perfPage('hecPageExit',1);
+      perfPageFlush();
+      setTimeout(function(){try{if(typeof closeUi==='function')closeUi()}catch(_){}},300);
+    }
+  }catch(_){}
+}
+async function setAlgorithmMode(mode){
+  const next=mode==='off'?'off':(mode==='hec'?'hec':'full');
+  if(lastModeCard&&lastModeCard.algorithmIntervention===next)return;
+  if(lastModeCard&&lastModeCard.canEdit===false){alert(modeUiText('仅空闲时可改算法介入'));return;}
+  const wasHec=!!(lastModeCard&&lastModeCard.algorithmIntervention==='hec');
+  try{
+    const r=await fetch(base+'/control-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:next})});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.error||'save failed');
+    renderModeCard(Object.assign({},lastModeCard||{},j));
+    if(!wasHec&&next==='hec'){
+      perfPage('hecPageExit',1);perfPageFlush();
+      setTimeout(function(){try{if(typeof closeUi==='function')closeUi()}catch(_){}},300);
+    }
+  }catch(e){alert(modeUiText('算法介入保存失败：')+e.message);renderModeCard(lastModeCard);}
+}
+async function setReleaseMode(mode){
+  const current=lastModeCard&&(lastModeCard.releaseMode||(lastModeCard.activeRelease===false?'off':'on'));
+  if(current===mode)return;
+  if(lastModeCard&&lastModeCard.canEdit===false){alert('Change settings only while idle');return;}
+  try{
+    const pre=await fetch(base+'/advanced-settings');const j=await pre.json();
+    if(!j.canEdit){alert('Change settings only while idle');return;}
+    const payload={};
+    for(const k of ADV_FIELDS){payload[ADV_SETTING_KEYS[k]]=k==='liveFlowTrimLevel'?String(j.settings[k]):j.settings[k];}
+    payload.ActiveRelease=mode;
+    if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;
+    const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(!r.ok){alert('Save failed: '+await r.text());return;}
+    alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');
+    setTimeout(function(){location.reload()},1200);
+  }catch(e){alert('Save failed: '+e.message);renderModeCard(lastModeCard);}
+}
+(function(){
+  const card=$('modecard');if(!card)return;
+  card.addEventListener('click',function(e){
+    const b=e.target.closest('button');if(!b)return;
+    if(b.dataset.release)setReleaseMode(b.dataset.release);
+    else if(b.dataset.algo)setAlgorithmMode(b.dataset.algo);
+  });
+  loadModeCard();
+  setInterval(loadModeCard,1200);
+})();
+
+async function loadAdvancedSettings(){try{const r=await fetch(base+'/advanced-settings');if(!r.ok)return;const j=await r.json(),a=j.settings||{};lastAdvancedSettings=j;for(const k of ADV_FIELDS){const q=$('adv_'+k);if(q&&a[k]!=null){if(k==='activeRelease')q.value=a.releaseMode||(a.activeRelease===false?'off':'on');else if(q.type==='checkbox')q.checked=!!a[k];else q.value=a[k]}}const currentTemp=$('adv_temperature');if(currentTemp&&a.temperature!=null)currentTemp.value=Number(a.temperature).toFixed(1)+' °C';const meta=$('advancedmeta');updateTrimLevelLabel();const modeBox=$('adv_activeRelease');if(modeBox)modeBox.disabled=!j.canEdit;if(meta){const bt=j.basicCurve||{};meta.innerHTML='Single settings source · core curve: S1 <b>'+esc(bt.stage1WeightG)+'g</b> → settle <b>'+esc(bt.releaseSettleSeconds)+'s</b> → soak <b>'+esc(bt.soakSeconds)+'s</b> → S2→S3 <b>'+esc(bt.stage2WeightG)+'g</b> → final <b>'+esc(bt.finalWeightG)+'g</b> · GHC timeout <b>'+esc(bt.ghcConfirmTimeoutSeconds)+'s</b>.'+(j.directStartTest?'<br><b>DIRECT DRIVER TEST: '+esc(j.directStartTest.status)+'</b>':'')}}catch(e){const meta=$('advancedmeta');if(meta)meta.textContent='Settings load error: '+e}}
+async function saveAdvancedSettings(){const preflight=await fetch(base+'/advanced-settings');if(!preflight.ok){alert('Settings availability check failed');return}const eligibility=await preflight.json();if(!eligibility.canEdit){alert('Change settings only while idle');return}const payload={};for(const k of ADV_FIELDS){const q=$('adv_'+k);if(!q)continue;if(q.type==='checkbox'){payload[ADV_SETTING_KEYS[k]]=q.checked;continue}if(k==='adaptiveLearningLevel'){payload[ADV_SETTING_KEYS[k]]=q.value;continue}if(k==='activeRelease'){payload[ADV_SETTING_KEYS[k]]=q.value;continue}const v=Number(q.value);if(!Number.isFinite(v)){alert('Invalid setting: '+k);return}payload[ADV_SETTING_KEYS[k]]=k==='liveFlowTrimLevel'?String(v):v}if(!confirm('Save these values to the normal HyperEx plugin Settings?\\n\\nThis uses the same settings source shown on the Plugins page and reloads HyperEx once.'))return;const r=await fetch(coreSettings,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok){alert('Save failed: '+await r.text());return}alert('Settings saved. HyperEx is reloading; reopen DIAG / CAL if this page closes.');setTimeout(()=>location.reload(),1200)}
+async function loadPresets(){try{const r=await fetch(base+'/presets');renderPresets(await r.json())}catch(e){}}
+function renderPresetBar(d){const bar=$('presetbar');if(!bar)return;if(!diagView){bar.style.display='none';return}const slots=d&&Array.isArray(d.slots)&&d.slots.length?d.slots:[1,2,3,4,5].map(function(n){return{slot:n,empty:true}});bar.innerHTML=slots.map(function(p){const on=!p.empty;return '<button type="button" class="b presetslot '+(on?'presetslot--on':'presetslot--off')+'" data-preset="'+p.slot+'"'+(on?'':' disabled')+' title="'+(on?('P'+p.slot+' '+p.targets.stage1+'/'+p.targets.stage2+'/'+p.targets.stage3+' g/s'):('P'+p.slot+' EMPTY'))+'">'+p.slot+'</button>'}).join('');bar.querySelectorAll('[data-preset]').forEach(function(b){b.onclick=function(){const slot=Number(b.dataset.preset);const p=slots.find(function(x){return x.slot===slot});if(!p||p.empty)return;const t=p.targets,c=p.commands;const ask=(window.HXLang&&HXLang.text)?HXLang.text('APPLY PRESET'):'APPLY PRESET';if(!confirm(ask+' '+slot+' · '+t.stage1+'/'+t.stage2+'/'+t.stage3+' g/s → '+c.stage1+'/'+c.stage2+'/'+c.stage3+' ml/s ?'))return;presetAction('presets-apply',{slot:slot})}})}
+function renderPresets(d){lastPresetData=d||null;const box=$('presets');if(!box)return;const slots=d&&Array.isArray(d.slots)?d.slots:[];const cur=d&&d.current;const head=cur?('CURRENT '+cur.targets.stage1+'/'+cur.targets.stage2+'/'+cur.targets.stage3+' g/s → '+cur.commands.stage1+'/'+cur.commands.stage2+'/'+cur.commands.stage3+' ml/s'):'';box.innerHTML=(head?'<div class="small" style="margin-bottom:6px">'+head+'</div>':'')+slots.map(function(p){const on=!p.empty;const t=on?p.targets:null,c=on?p.commands:null;return '<div class="row" style="align-items:center;margin-top:6px"><b style="min-width:18px">'+p.slot+'</b><span class="small" style="flex:1;min-width:200px">'+(on?(t.stage1+'/'+t.stage2+'/'+t.stage3+' g/s → '+c.stage1+'/'+c.stage2+'/'+c.stage3+' ml/s'):'EMPTY')+'</span><button class="b s" data-presave="'+p.slot+'">SAVE CURRENT</button><button class="b s" data-preapply="'+p.slot+'"'+(on?'':' disabled')+'>APPLY</button><button class="b tertiaryAction" data-preclear="'+p.slot+'"'+(on?'':' disabled')+'>CLEAR</button></div>'}).join('');box.querySelectorAll('[data-presave]').forEach(function(b){b.onclick=function(){presetAction('presets-save',{slot:Number(b.dataset.presave)})}});box.querySelectorAll('[data-preapply]').forEach(function(b){b.onclick=function(){presetAction('presets-apply',{slot:Number(b.dataset.preapply)})}});box.querySelectorAll('[data-preclear]').forEach(function(b){b.onclick=function(){presetAction('presets-clear',{slot:Number(b.dataset.preclear)})}});renderPresetBar(d)}
+async function presetAction(endpoint,body){const st=$('presetstatus');try{if(st)st.textContent='WORKING…';const r=await post(endpoint,body);if(endpoint==='presets-apply'){if(st)st.textContent='PRESET '+body.slot+' APPLYING · PLUGIN RELOADS';setTimeout(function(){location.reload()},1600);return}if(st)st.textContent='PRESET '+body.slot+' '+(endpoint==='presets-save'?'SAVED':'CLEARED');renderPresets(r);await loadCal()}catch(e){if(st)st.textContent='PRESET FAILED: '+String(e)}}
+async function loadCal(){try{const r=await fetch(base+'/calibration-status');const c=await r.json();lastCalStatus=c;loadPresets();lastLearningHistory=c.learningHistory||null;renderLearningHistory(c.learningHistory);latestManualCurveSource=c.commandFlows&&c.commandFlows.manualCurveSource||null;renderCurveEditor(c.curveEditor);lastCommandFlows=c.commandFlows||null;renderAppliedCommands(c.commandFlows||{},c.profileTruth||{});renderBasketContext(c);latestAutoApplyEnabled=c.autoApplyNextShot!==false;latestAutoApplyStatus=c.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary);renderNextDecision(latestAdaptiveSummary);const ok=c.calibrationUsable;const b1=$("step1badge"),b2=$("step2badge");if(b1){b1.textContent="OPTIONAL";b1.className="stepBadge"}if(b2){b2.textContent=ok?"ACTIVE · AUTO NEXT SHOT":(c.lutBootstrapMode?"BOOTSTRAP · 首杯建图":"WAITING FOR VALID LUT");b2.className="stepBadge "+(ok?"good":(c.lutBootstrapMode?"":"bad"))}const csb=$("calstagebadge");if(csb){const st=(c.learningStage&&c.learningStage.stage)||"—";csb.textContent=st;const boot=!!c.lutBootstrapMode;csb.style.background=boot?"rgba(239,173,86,.16)":"rgba(83,214,142,.16)";csb.style.color=boot?"#efad56":"#7ee6ac";}const clo=$("callutorigin");if(clo){const o=c.lutOrigin;clo.innerHTML="LUT 来源 <b>"+(o==="coffee"?"有粉引导 coffee":o==="empty"?"空碗 empty":"引导中")+"</b> · "+esc(c.pointCount)+" 点 · multiplier "+esc(c.currentFlowMultiplier);}const hs=c.persistentHistory||{},hb=$("historystatus");if(hb){if(hs.available===true){hb.style.background="#173b25";hb.style.color="#9ff0b5";hb.innerHTML='<b>ADAPTIVE HISTORY · PERSISTENT</b> · '+esc(hs.savedShots)+' saved shot(s), '+esc(hs.compatibleShots)+' compatible with the current calibration/LUT and basket context. '+esc(hs.baselineReferenceShots||0)+' empty/pre-upgrade baseline references retained; coffee consensus accumulates from normal coffees.'}else if(hs.available===false){hb.style.background="#4a2024";hb.style.color="#ffb4b8";hb.innerHTML='<b>ADAPTIVE HISTORY · SESSION ONLY</b> · '+esc(hs.status)+'<br>Shot-to-shot adaptation still works in this session, but cross-reload/version regression is disabled.'}else{hb.style.background="#3b2d16";hb.style.color="#ffd58a";hb.innerHTML='<b>ADAPTIVE HISTORY</b> · checking pluginStorage write/readback…'}}if($("t1")){ $("t1").value=c.commandFlows&&c.commandFlows.stage1DesiredGS!=null?c.commandFlows.stage1DesiredGS:""; $("t2").value=c.commandFlows&&c.commandFlows.stage2DesiredGS!=null?c.commandFlows.stage2DesiredGS:""; $("t3").value=c.commandFlows&&c.commandFlows.stage3DesiredGS!=null?c.commandFlows.stage3DesiredGS:"";}if(calmode){calmode.innerHTML=(c.calibrationModes||[{id:'low',label:'Low Water'},{id:'full',label:'Full'}]).map(x=>'<button class="b s '+(c.calibrationMode===x.id?'active':'')+'" data-mode="'+esc(x.id)+'">'+esc(x.label)+(x.id==='low'?' · DEFAULT':'')+'</button>').join('');calmode.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-mode',{mode:q.dataset.mode});await loadCal()})}if(waterwarn){const w=c.waterPreflight||{};const wc=w.status==='ok'?'#163b26':w.status==='warn'?'#3b2d16':'#4a2024';const fg=w.status==='ok'?'#9ff0b5':w.status==='warn'?'#ffd58a':'#ffb4b8';waterwarn.style.background=wc;waterwarn.style.color=fg;let tank='Tank level unavailable';if(w.available)tank='Tank: <b>'+esc(w.currentLevelMm)+' mm</b> · refill threshold: <b>'+esc(w.refillLevelMm)+' mm</b> · margin: <b>'+esc(w.marginMm)+' mm</b>';waterwarn.innerHTML='<b>WATER / VESSEL / TANK PREFLIGHT · '+esc(c.calibrationModeLabel)+' · '+esc((w.status||'unknown').toUpperCase())+'</b><br>'+tank+'<br>Prime: '+esc(c.primeFlow)+' ml/s × '+esc(c.primeSeconds)+' s · '+esc(c.calibrationSteps)+' calibration plateaus × '+esc(c.calibrationStepSeconds)+' s · nominal DE1 command water <b>≈'+esc(c.nominalCommandWaterMl)+' ml</b>.<br>Use a <b>'+esc(c.recommendedContainerMl)+' ml or larger</b> catch vessel. Plugin actively stops around <b>'+esc(c.calibrationHardStopG)+' g</b> actual collected water. '+esc(w.message||'');}calstatus.innerHTML='<b class="'+(ok?'good':'bad')+'">'+(ok?'CALIBRATION READY':'CALIBRATION NOT READY')+'</b><br>Mode: <b>'+esc(c.calibrationModeLabel)+'</b> · Profile: <b>'+esc(c.calibrationProfileTitle)+'</b><br>Scope: <b>'+esc(c.scopeLabel)+'</b> · DE1 multiplier: <b>'+esc(c.currentFlowMultiplier)+'</b> · map base: <b>'+esc(c.calibrationBaseMultiplier)+'</b> · suggested: <b>'+esc(c.suggestedFlowMultiplier)+'</b><br>LUT rev <b>'+esc(c.lutRevision||1)+'</b> · points <b>'+esc(c.pointCount)+'</b>'+(Array.isArray(c.actualRange)?' · range <b>'+esc(c.actualRange[0])+'..'+esc(c.actualRange[1])+' g/s</b>':'')+(c.lutMerge?' · merged: <b>'+esc(c.lutMerge.retained)+'</b> retained, <b>'+esc(c.lutMerge.added)+'</b> new, <b>'+esc(c.lutMerge.replaced)+'</b> replaced':'')+'<br>'+esc(c.calibrationStaleReason||'LUT valid')+(c.lastCalibrationValid===false?'<br><b class="bad">LAST CAL RUN INVALID — previous valid LUT retained</b>':c.lastCalibrationValid===true?'<br><b class="good">LAST CAL RUN VALID</b>':'')+'<br>Real→command: S1 '+esc(c.commandFlows&&c.commandFlows.stage1DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage1CommandMlS)+' · S2 '+esc(c.commandFlows&&c.commandFlows.stage2DesiredGS)+'→'+esc(c.commandFlows&&c.commandFlows.stage2CommandMlS)+' · S3 '+esc(c.commandFlows&&c.commandFlows.stage3DesiredGS)+'→'+appliedS3Text(c.commandFlows||{})+'<br>Test mode: <b>'+esc((c.commandFlows&&c.commandFlows.manualTestStatus)||'none')+'</b>';renderTestCommands(c.commandFlows||{},latestAdvisorySummary||{});scope.innerHTML=['off','hyperex','global'].map(x=>'<button class="b s '+(c.scope===x?'active':'')+'" data-scope="'+x+'">'+(x==='off'?'OFF':x==='hyperex'?'HYPEREX ONLY':'GLOBAL')+'</button>').join('');scope.querySelectorAll('button').forEach(q=>q.onclick=async()=>{await post('calibration-scope',{scope:q.dataset.scope});await loadCal()});const last=c.lastCalibration||null;const rows=last&&Array.isArray(last.plateauResults)?last.plateauResults:[];const anchors=last&&last.map&&Array.isArray(last.map.targetAnchors)?last.map.targetAnchors:[];const anchorHtml=anchors.length?'<div style="margin:8px 0"><b>TARGET LUT:</b> '+anchors.map(a=>esc(a.blockId)+' '+esc(a.actualFlow)+' g/s → '+esc(a.commandFlow)+' ml/s ('+esc(a.quality)+')').join(' · ')+'</div>':'';map.innerHTML=rows.length?anchorHtml+'<table><tr><th>Frame</th><th>Block / target</th><th>DE1 cmd</th><th>RAW real g/s</th><th>DE1 flow</th><th>R²</th><th>Status</th></tr>'+rows.map(p=>'<tr><td>'+esc(p.frame)+'</td><td>'+esc((p.blockId||'—')+(p.targetReal!=null?' / '+p.targetReal:'') )+'</td><td>'+esc(p.commandFlow)+'</td><td>'+esc(p.actualFlow)+'</td><td>'+esc(p.machineFlow)+'</td><td>'+esc(p.r2)+'</td><td class="'+(p.acceptedInMap?'good':(p.valid?'':'bad'))+'">'+esc(p.acceptedInMap?'ANCHOR SOURCE':(p.reason||'REJECTED'))+'</td></tr>').join('')+'</table><div style="margin-top:8px">'+esc(c.profileSyncStatus||'')+'</div>':'No calibration run yet. Low Water automatically searches the three HyperEx real-flow targets and generates the LUT only when all targets pass. Full remains the wide engineering staircase.';const cur=c.stage1StartupCorrection||1;startupbox.innerHTML='<b>Stable skip topology:</b> scale feedback is advisory only. Optional S3 DECAY COMP may use 5 profile frames, but S3 subframes advance only by their own timers and never add plugin skipStep calls.'+(Number(cur)!==1?(' <br><span class="bad">Legacy S1 startup factor '+esc(cur)+'× is stored but ignored in v${PLUGIN_VERSION}.</span> <button id=clearstartup class="b s">CLEAR LEGACY</button>'):'');const cl=$("clearstartup");if(cl)cl.onclick=async()=>{try{await post('startup-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};}catch(e){calstatus.textContent='Calibration status error: '+e}}
+// Daily charts show extraction only. Full original telemetry remains in CSV/run data.
+function extractionChartRows(run,rows){
+ if(run.kind==='calibration')return(rows||[]).map(s=>({...s,_chartSegment:0,_chartGroup:'calibration'}));
+ const events=run.events||[],firstStop=events.find(e=>e.name==='stage1_weight_trigger'),finalStop=events.find(e=>e.name==='final_weight_trigger');
+ const release=!(run.config&&run.config.activeRelease===false);let segment=-1,previousGroup=null,interrupted=true;const out=[];
+ for(const s of rows||[]){
+  const time=Number(s.tMs),phase=s.phase;
+  let keep=Number.isFinite(time)&&['stage1','stage2','stage3'].includes(phase);
+  if(finalStop&&time>Number(finalStop.tMs))keep=false;
+  if(release&&firstStop&&phase==='stage1'&&time>Number(firstStop.tMs))keep=false;
+  if(s.machineState&&s.machineState!=='espresso')keep=false;
+  if(s.substate&&!['preinfusion','pouring'].includes(s.substate))keep=false;
+  if(!keep){interrupted=true;continue;}
+  const group=release&&phase==='stage1'?'stage1':'brew';
+  if(interrupted||group!==previousGroup)segment++;
+  out.push({...s,_chartSegment:segment,_chartGroup:group});interrupted=false;previousGroup=group;
+ }
+ return out;
+}
+function extractionChartData(run){
+ const combined=extractionChartRows(run,run.samples),raw=extractionChartRows(run,run.rawScaleSamples),windows=[];
+ for(const group of ['stage1','brew','calibration']){
+  const rows=combined.concat(raw).filter(s=>s._chartGroup===group);if(!rows.length)continue;
+  const start=Math.min(...rows.map(s=>Number(s.tMs)));let end=Math.max(...rows.map(s=>Number(s.tMs)));
+  const stop=(run.events||[]).find(e=>e.name===(group==='stage1'?'stage1_weight_trigger':'final_weight_trigger'));
+  if(stop&&Number(stop.tMs)>=start)end=Number(stop.tMs);
+  windows.push({start,end,group});
+ }
+ const trace=(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).flatMap(x=>{const segment=windows.findIndex(w=>Number(x.tMs)>=w.start&&Number(x.tMs)<=w.end);return segment<0?[]:[{...x,_chartSegment:segment,_chartGroup:windows[segment].group}];});
+ return {combined,raw,trace};
+}
+function extractionChartPoints(rows,field){let segment=null;const points=[];for(const s of rows){const time=Number(s.tMs)/1000;if(segment!==null&&segment!==s._chartSegment){const prev=rows[rows.indexOf(s)-1];if(prev&&prev._chartGroup==='stage1'&&s._chartGroup==='brew'){points.push([Number(prev.tMs)/1000,0],[time,0]);}else points.push([time,NaN]);}points.push([time,s[field]==null?NaN:Number(s[field])]);segment=s._chartSegment;}return points;}
+function svgPath(points,xmin,xmax,ymin,ymax){const W=800,H=205,pad=18,dx=Math.max(.001,xmax-xmin),dy=Math.max(.001,ymax-ymin);if(Array.isArray(points)&&points.length>600){const max=380,dec=[];let run=[];const flush=function(){if(!run.length)return;if(run.length<=max){for(const q of run)dec.push(q);}else{const buckets=Math.max(2,Math.floor(max/2)),step=run.length/buckets;for(let i=0;i<run.length;i+=step){const a=Math.floor(i),b=Math.min(run.length,Math.ceil(i+step));let lo=a,hi=a;for(let j=a;j<b;j++){if(run[j][1]<run[lo][1])lo=j;if(run[j][1]>run[hi][1])hi=j;}if(lo<=hi){dec.push(run[lo]);if(hi!==lo)dec.push(run[hi]);}else{dec.push(run[hi]);dec.push(run[lo]);}}}run=[];};for(const q of points){if(!Number.isFinite(q[0])||!Number.isFinite(q[1])){flush();dec.push(q);continue;}run.push(q);}flush();points=dec;}let out='',pen=false;for(const q of points){if(!Number.isFinite(q[0])||!Number.isFinite(q[1])){pen=false;continue;}const x=pad+(q[0]-xmin)/dx*(W-pad*2),y=H-pad-(q[1]-ymin)/dy*(H-pad*2);out+=(pen?' L ':'M ')+x.toFixed(1)+' '+y.toFixed(1);pen=true}return out}
+function drawChartCanvas(cv,series,ymin,ymax,markers,tickVals){
+ if(!cv)return;const ctx=cv.getContext&&cv.getContext("2d");if(!ctx)return;
+ const W=800,H=205,pad=18;let all=[];series.forEach(s=>all=all.concat(s.points));all=all.filter(p=>Number.isFinite(p[0])&&Number.isFinite(p[1]));
+ const cssW=Math.max(1,cv.clientWidth||800),cssH=Math.max(1,cv.clientHeight||205),dpr=Math.max(1,Math.min(3,window.devicePixelRatio||1));
+ if(cv.width!==Math.round(cssW*dpr)||cv.height!==Math.round(cssH*dpr)){cv.width=Math.round(cssW*dpr);cv.height=Math.round(cssH*dpr);}
+ ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,cv.width,cv.height);cv._markers=[];
+ if(!all.length)return;
+ ctx.setTransform(cv.width/W,0,0,cv.height/H,0,0);
+ const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]),xmin=Math.min(...xs),xmax=Math.max(...xs);
+ if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;
+ const px=v=>pad+(v-xmin)/Math.max(.001,xmax-xmin)*(W-pad*2),py=v=>H-pad-(v-ymin)/Math.max(.001,ymax-ymin)*(H-pad*2);
+ ctx.setLineDash([]);ctx.lineWidth=1;ctx.strokeStyle="#3a3f47";ctx.beginPath();ctx.moveTo(18,187);ctx.lineTo(782,187);ctx.moveTo(18,18);ctx.lineTo(18,187);ctx.stroke();
+ ctx.fillStyle="#aeb6c2";ctx.font="10px ui-monospace,monospace";ctx.textBaseline="middle";
+ for(const tv of (tickVals||[])){if(!Number.isFinite(tv)||tv<=ymin||tv>=ymax)continue;const ty=py(tv);ctx.save();ctx.globalAlpha=.4;ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(18,ty);ctx.lineTo(782,ty);ctx.stroke();ctx.restore();ctx.fillText(tv.toFixed(1),24,ty);}
+ ctx.fillText(Number(ymax).toFixed(1),24,16);ctx.fillText(Number(ymin).toFixed(1),24,184);
+ for(const s of series){const pts=s.points||[];if(!pts.length)continue;ctx.save();ctx.globalAlpha=(s.opacity==null?1:s.opacity);ctx.strokeStyle=s.stroke;ctx.lineWidth=(s.width||1.7);ctx.lineJoin="round";ctx.lineCap="round";ctx.beginPath();let pen=false;for(const q of pts){if(!Number.isFinite(q[0])||!Number.isFinite(q[1])){pen=false;continue;}const X=px(q[0]),Y=py(q[1]);if(pen)ctx.lineTo(X,Y);else{ctx.moveTo(X,Y);pen=true;}}ctx.stroke();ctx.restore();}
+ ctx.textAlign="center";
+ for(const q of (markers||[])){if(!Number.isFinite(q.x))continue;const X=px(q.x),Y=Number.isFinite(q.y)?py(q.y):181;cv._markers.push({sx:X/cv.width*cssW,sy:Y/cv.height*cssH,tip:q.label||""});ctx.save();ctx.strokeStyle=q.color;ctx.fillStyle=q.color;ctx.lineWidth=1.8;if(q.shape==="up"||q.shape==="down"){const sign=q.shape==="up"?-1:1,sz=q.size||5;ctx.beginPath();ctx.moveTo(X,Y-sign*3);ctx.lineTo(X,Y+sign*sz);ctx.stroke();ctx.beginPath();ctx.moveTo(X-4,Y+sign*(sz-3));ctx.lineTo(X,Y+sign*(sz+2));ctx.lineTo(X+4,Y+sign*(sz-3));ctx.stroke();}else if(q.shape==="retry"||q.shape==="unknown"){ctx.font="13px ui-monospace,monospace";ctx.fillText(q.shape==="retry"?"↻":"·",X,Y);}else if(q.shape==="diamond"){ctx.beginPath();ctx.moveTo(X,Y-4);ctx.lineTo(X+4,Y);ctx.lineTo(X,Y+4);ctx.lineTo(X-4,Y);ctx.closePath();ctx.fill();}else if(q.shape==="square"){ctx.fillRect(X-3,Y-3,6,6);}else{ctx.beginPath();ctx.arc(X,Y,3,0,Math.PI*2);ctx.fill();}ctx.restore();}
+ ctx.textAlign="start";ctx.textBaseline="alphabetic";
+ if(!cv._hooked){cv._hooked=true;cv.addEventListener("click",function(ev){const r=cv.getBoundingClientRect(),x=ev.clientX-r.left,y=ev.clientY-r.top;let best=null,bd=14;for(const m of cv._markers||[]){const dx=m.sx-x,dy=m.sy-y,d=Math.sqrt(dx*dx+dy*dy);if(d<bd){bd=d;best=m;}}const box=document.getElementById("flowpointdetail");if(box&&best)box.textContent=best.tip;});}
+}
+function clearChartEl(el){if(!el)return;if(el.tagName&&el.tagName.toLowerCase()==="canvas"){const c=el.getContext&&el.getContext("2d");if(c)c.clearRect(0,0,el.width,el.height);}else el.innerHTML="";}
+function renderChartAny(el,series,ymin,ymax,markers,tickVals){if(!el)return;if(el.tagName&&el.tagName.toLowerCase()==="canvas")return drawChartCanvas(el,series,ymin,ymax,markers,tickVals);return renderChart(el,series,ymin,ymax,markers,tickVals);}
+function renderChart(svg,series,ymin,ymax,markers,tickVals){if(!svg)return;let all=[];series.forEach(s=>all=all.concat(s.points));all=all.filter(p=>Number.isFinite(p[0])&&Number.isFinite(p[1]));if(!all.length){svg.innerHTML='';return}const xs=all.map(p=>p[0]).filter(Number.isFinite),ys=all.map(p=>p[1]).filter(Number.isFinite);const xmin=Math.min(...xs),xmax=Math.max(...xs);if(ymin==null)ymin=Math.min(...ys);if(ymax==null)ymax=Math.max(...ys);if(ymax-ymin<.01)ymax=ymin+1;let h='<line x1="18" y1="187" x2="782" y2="187" stroke="#3a3f47"/><line x1="18" y1="18" x2="18" y2="187" stroke="#3a3f47"/>';for(const tv of (tickVals||[])){if(!Number.isFinite(tv)||tv<=ymin||tv>=ymax)continue;const ty=187-(tv-ymin)/Math.max(.001,ymax-ymin)*169;h+='<line x1="18" y1="'+ty+'" x2="782" y2="'+ty+'" stroke="#3a3f47" stroke-dasharray="3 3" opacity=".4"/><text x="24" y="'+(ty+3.5)+'" fill="#aeb6c2" font-size="10">'+Number(tv).toFixed(1)+'</text>';}for(const s of series){const path=svgPath(s.points,xmin,xmax,ymin,ymax);if(path)h+='<path d="'+path+'" fill="none" stroke="'+s.stroke+'" stroke-width="'+(s.width||1.7)+'" opacity="'+(s.opacity||1)+'"/>'}h+='<text x="24" y="16" fill="#aeb6c2" font-size="10">'+Number(ymax).toFixed(1)+'</text><text x="24" y="184" fill="#aeb6c2" font-size="10">'+Number(ymin).toFixed(1)+'</text>';const mkList=(Array.isArray(markers)&&markers.length>160)?(function(){const o=[],step=markers.length/160;for(let i=0;i<160;i++)o.push(markers[Math.min(markers.length-1,Math.floor(i*step))]);if(o[o.length-1]!==markers[markers.length-1])o.push(markers[markers.length-1]);return o;})():(markers||[]);for(const q of mkList){if(!Number.isFinite(q.x))continue;const xx=18+(q.x-xmin)/Math.max(.001,xmax-xmin)*764;const yy=Number.isFinite(q.y)?187-(q.y-ymin)/Math.max(.001,ymax-ymin)*169:181;const title='<title>'+esc(q.label||'')+'</title>';const tip=' data-tip="'+esc(q.label||'').replace(/"/g,'&quot;')+'"';if(q.shape==='up'||q.shape==='down'){const sign=q.shape==='up'?-1:1,sz=q.size||5,tpos=yy+sign*sz,hbase=tpos-sign*5;h+='<path d="M '+xx+' '+(yy-sign*sz)+' L '+xx+' '+tpos+' M '+(xx-4)+' '+hbase+' L '+xx+' '+tpos+' L '+(xx+4)+' '+hbase+'" fill="none" stroke="'+q.color+'" stroke-width="1.8"'+tip+'>'+title+'</path>';}else if(q.shape==='retry'||q.shape==='unknown')h+='<text x="'+xx+'" y="'+(yy+4)+'" text-anchor="middle" fill="'+q.color+'" font-size="13"'+tip+'>'+title+(q.shape==='retry'?'↻':'·')+'</text>';else if(q.shape==='diamond')h+='<path d="M '+xx+' '+(yy-4)+' l 4 4 l -4 4 l -4 -4 Z" fill="'+q.color+'"'+tip+'>'+title+'</path>';else if(q.shape==='square')h+='<rect x="'+(xx-3)+'" y="'+(yy-3)+'" width="6" height="6" fill="'+q.color+'"'+tip+'>'+title+'</rect>';else h+='<circle cx="'+xx+'" cy="'+yy+'" r="3" fill="'+q.color+'"'+tip+'>'+title+'</circle>'}svg.innerHTML=h}
+function liveTrimMarkers(run){return(run.liveFlowTrim&&run.liveFlowTrim.trace||[]).filter(x=>['check','write','machine-target-response'].includes(x.kind)).map(x=>{const delta=Number.isFinite(x.previousMlS)&&Number.isFinite(x.commandMlS)?x.commandMlS-x.previousMlS:null;const direction=x.kind==='write'?(x.retry?'retry':delta===null?'unknown':delta>0?'up':delta<0?'down':'retry'):null;return {x:x.tMs/1000,y:x.kind==='check'?x.rawGS:(Number.isFinite(Number(x.rawGS))?Number(x.rawGS):x.commandMlS),size:delta===null?null:Math.max(2,Math.round(Math.abs(delta)*48)),shape:x.kind==='write'?direction:x.kind==='machine-target-response'?'square':'circle',color:x.kind==='write'?'#ff9c45':x.kind==='machine-target-response'?'#f4e6a5':x.rawGS==null?'#7c8795':'#63d89b',label:(x.kind==='write'?(direction==='retry'?'同值重试 ↻':direction==='up'?'上调指令 ↑':direction==='down'?'下调指令 ↓':'写入指令（方向未知）'):x.kind)+' @ '+(x.tMs/1000).toFixed(2)+'s · '+(x.kind==='check'?(x.rawGS==null?'no valid RAW regression':x.rawGS+' g/s')+' · '+(x.reason||x.decision):x.commandMlS+' ml/s')+(delta!==null&&x.kind==='write'?' · '+x.previousMlS+' → '+x.commandMlS+' ml/s':'')+(x.startupAction?' · '+(x.startupAction==='return'?'补水收回':x.startupAction==='bleed'?'补水断流(收口)':x.startupAction==='trim'?'补水断流':'补水增强')+(x.startupReason?' · '+x.startupReason:''):'')}})}
+function renderLiveTrim(run){const q=$('livetrimstatus');if(!q)return;const x=run&&run.liveFlowTrim;if(!x){q.textContent='';return}q.textContent='EXPERIMENTAL LIVE FLOW TRIM · level '+(x.level||1)+' · model '+(x.decisionModel||'legacy')+' · '+x.status+' · checks '+x.checks+'/'+(x.maxChecks||50)+' · writes '+x.writes+'/'+(x.maxWrites||50)+' · driver ACK '+x.acks+' · trend confirms '+x.targetConfirmations+' · unresponsive '+(x.targetMisses||0)+' / streak '+(x.consecutiveTargetMisses||0)+' · vector redispatch '+(x.retries||0)+' · interval '+x.periodMs+' ms'+' · normal/rescue '+(x.normalWrites||0)+'/'+(x.rescueWrites||0)+' · silence holds '+(x.silenceHolds||0)+' · S3 writes '+(x.s3NormalWrites||0)+'/'+(x.s3RescueWrites||0)+(x.zeroDegreeShare===null?'':' · 0° share '+Math.round(x.zeroDegreeShare*100)+'% · mean angle '+x.meanAngleDeg+'°')+' · vector angle '+(x.vectorAngleDeg==null?'—':x.vectorAngleDeg+'°')+' · big-angle streak '+(x.bigAngleStreak||0)+' · next-shot band ±'+esc(x.learningBand||8)+'%; confirmed windows pooled with labelled seed-normalization model';}
+function renderCharts(run){if(!run)return;lastChartRun=run;const chart=extractionChartData(run),combined=chart.combined,raw=chart.raw,chartRun={...run,liveFlowTrim:{...(run.liveFlowTrim||{}),trace:chart.trace}};const target=extractionChartPoints(combined,'targetFlowMlS'),machine=extractionChartPoints(combined,'machineFlowMlS'),decaid=extractionChartPoints(combined,'decaidWeightFlowGS');const cupTarget=extractionChartPoints(combined,'desiredRealFlowGS');const rawSlope=[];let rawSegment=null,segmentStart=0;for(let i=0;i<raw.length;i++){if(rawSegment!==raw[i]._chartSegment){if(rawSegment!==null){const prev=raw[i-1];if(prev&&prev._chartGroup==='stage1'&&raw[i]._chartGroup==='brew')rawSlope.push([Number(prev.tMs)/1000,0],[Number(raw[i].tMs)/1000,0]);else rawSlope.push([Number(raw[i].tMs)/1000,NaN]);}rawSegment=raw[i]._chartSegment;segmentStart=i;}let j=i-1;while(j>segmentStart&&Number(raw[i].tMs)-Number(raw[j].tMs)<900)j--;if(j>=segmentStart){let reset=false;for(let k=j+1;k<=i;k++)if(raw[k].tareReset){reset=true;break}const dt=(Number(raw[i].scaleTimestampSeconds)-Number(raw[j].scaleTimestampSeconds));if(!reset&&Number.isFinite(dt)&&dt>.25){rawSlope.push([Number(raw[i].tMs)/1000,(Number(raw[i].weightG)-Number(raw[j].weightG))/dt])}}}const trendPts=[];for(const x of (chart.trace||[]))if((x.kind==='check'||x.kind==='write')&&Number.isFinite(Number(x.rawGS)))trendPts.push([Number(x.tMs)/1000,Number(x.rawGS)]);const trendSmooth=trendPts.map((p,i)=>{const a=trendPts.slice(Math.max(0,i-1),Math.min(trendPts.length,i+2));return [p[0],a.reduce((s,q)=>s+q[1],0)/a.length]});const flowYs=[...target,...machine,...decaid,...rawSlope].map(p=>p[1]).filter(v=>Number.isFinite(v)&&v>-1&&v<20);const fymax=Math.max(6,flowYs.length?Math.min(12,Math.ceil(Math.max(...flowYs)+.5)):8);renderChartAny($('flowchart'),[{key:'cup',points:cupTarget,stroke:'#f58d9a',width:1.3},{key:'target',points:target,stroke:'#f0c75e',width:1.4},{key:'machine',points:machine,stroke:'#71a7ff',width:1.8},{key:'decaid',points:decaid,stroke:'#c77dff',width:1.5,opacity:.8},{key:'raw',points:rawSlope,stroke:'#63d89b',width:2.1},{key:'trend',points:trendSmooth,stroke:'#8fd7ff',width:1.3,opacity:.9},{key:'writes',points:extractionChartPoints(chart.trace.filter(x=>x.kind==='write'),'commandMlS'),stroke:'#ff9c45',width:2}].filter(x=>flowSeriesVisible[x.key]),0,fymax,liveTrimMarkers(chartRun).filter(x=>x.shape==='circle'?flowSeriesVisible.raw:x.shape==='square'?flowSeriesVisible.target:flowSeriesVisible.writes));const anglePts=[];for(const x of (chart.trace||[]))if(x.kind==='check'&&Number.isFinite(Number(x.trendAngleDeg)))anglePts.push([Number(x.tMs)/1000,Number(x.trendAngleDeg)]);if($('anglechart')){if(anglePts.length)renderChartAny($('anglechart'),[{key:'angle',points:anglePts,stroke:'#ffd166',width:1.8}],0,180,null,[90]);else clearChartEl($('anglechart'));}const wp=extractionChartPoints(raw,'weightG');if(wp.length){const wy=wp.map(p=>p[1]).filter(Number.isFinite);renderChartAny($('weightchart'),[{points:wp,stroke:'#e5e8ed',width:2}],Math.min(...wy),Math.max(...wy))}else if($('weightchart'))clearChartEl($('weightchart'))}
+function renderNextDecision(s){const el=$('nextdecision');if(!el)return;const a=s&&s.nextShotAdaptive,ga=s&&s.grindAdvice;if(!a){el.textContent=s&&(s.learningReview&&s.learningReview.excluded||s.learningIntegrity&&s.learningIntegrity.eligible===false)?'Shot excluded from learning; see history review.':'尚无完整杯数据；请按正常流程出杯。';return}const manual=latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||''),st=latestAutoApplyStatus||{},matching=String(st.runId||'')===String(a.runId||'');let h='<b>下一杯决策 · 输出偏差与调整资格分别判断</b>';for(const [label,key] of [['S1','s1'],['S2','s2'],['S3','s3']]){const x=a[key]||{},p=s['stage'+label.slice(1)]||{};let status=manual?'手动曲线已替代此杯建议':x.usable!==false&&(x.action==='ADJUST'||x.action==='LUT COMPENSATE'||x.suggestedShape||x.driftShape)?(matching&&['applied','manual-applied'].includes(st.status)?'已校验应用':matching&&st.status==='error'?'应用失败，保留原曲线':latestAutoApplyEnabled?'有调整建议，等待校验应用':'有调整建议，自动应用已关闭'):x.action==='HOLD'?(x.actualDirectionGuard&&x.actualDirectionGuard.blocked?'实测与模型方向冲突，保持':'保持当前指令'):String(x.action||'').includes('SATURATED')?'加码未触发杯流响应，保持下一杯指令':String(x.action||'').includes('VARIABLE')?'杯间差异较大，暂不自动追调':String(x.action||'').includes('LIMITED')?'受压力／执行条件限制':'等待可比学习证据';h+='<div class="m"><b>'+label+' · '+esc(p.validationStatus||'—')+' '+(p.rawErrorPct==null?'':esc(p.rawErrorPct)+'%')+' → '+esc(status)+'</b><br>'+esc(x.reason||'尚无学习证据')+(x.historySearch?'<br><span class="small">History checked: '+esc(x.historySearch.checked)+' · missing stage: '+esc(x.historySearch.missingStage)+' · context mismatch: '+esc(x.historySearch.skippedContext)+' · command mismatch: '+esc(x.historySearch.incompatibleCommands)+' · storage excluded: '+esc(x.historySearch.skippedStorage)+' · basis mismatch: '+esc(x.historySearch.incompatibleBasis||0)+' · nearby command comparisons: '+esc(x.historySearch.nearbyCommandComparisons||0)+' · matched run: '+esc(x.historySearch.matchedRunId||'none')+'</span>':'')+'</div>'}if(!manual)h+='<div class="small">若需主动调整，可使用上方“下一杯 · 曲线编辑”；修改后需应用并校验。</div>';const selected=s.learningPolicy||{};h+='<div class="small">Learning strength: '+esc(selected.name||'—')+' · Admission width: '+esc(selected.qualityWidth||1)+'×</div>';const audit=s.historyPersistence||{};h+='<div class="m"><b>History persistence</b><br>'+esc(audit.status||'—')+' · '+esc(audit.records||0)+' records · '+esc(audit.bytes||0)+' bytes<br>'+esc(audit.detail||'')+'</div>';const m=s.stage2Startup||{},plan=s.stage2StartupNext||{},execution=s.liveFlowTrim&&s.liveFlowTrim.startupExecution||{};h+='<div class="m"><b>S2 startup response</b><br>'+esc(m.reason||'S2 startup data insufficient')+'<br>Response delay: '+esc(m.firstResponseDelayS==null?'—':m.firstResponseDelayS)+' s · 20–80% rise: '+esc(m.rise20to80S==null?'—':m.rise20to80S)+' s · Rise basis: '+esc(m.riseBasis||'target')+' · Tail error: '+esc(m.tailErrorPct==null?'—':m.tailErrorPct)+'%<br>Next startup: '+esc(plan.reason||'S2 startup needs two comparable clean shots')+(plan.enabled?(plan.strategy==='refill-85'?' · '+esc(plan.baseCommandMlS)+' → '+esc(plan.boostCommandMlS)+' ml/s · '+esc(Math.round((plan.refillTargetFraction||1)*100))+'% base pump flow · '+esc(Math.round(plan.cutoffFraction*100))+'% cutoff · max '+esc(plan.holdMs)+' ms':' · +'+esc(plan.boostQuanta)+'/16 ml/s × '+esc(plan.holdMs)+' ms'):'')+(plan.returnCommandMlS!=null?' · 接管指令 '+esc(plan.returnCommandMlS)+' ml/s':'')+(s.stage2CupOnset?'<br>'+(s.stage2CupOnset.detected?'S2有效称流起点：'+esc((s.stage2CupOnset.startMs/1000).toFixed(2))+' s · 出液前等待 '+esc(s.stage2CupOnset.delayS)+' s，不计入合格与学习窗口':'S2尚未检测到持续有效出液；暂不计算流量合格判定'):'')+'<br>Executed startup boost: '+esc(m.pulseUsed?'YES':'NO')+' · '+esc(execution.status||'not-planned')+'<br>'+esc(execution.reason||'')+'</div>';const tl=s.s2RefillTimeline||{};if(tl.stage2StartMs!=null||tl.onsetMs!=null){const relS=v=>v==null?'—':Number(v).toFixed(2)+' s';h+='<div class="m"><b>S2 补水节点</b><br>帧确认 0.00 s · onset '+relS(tl.relative&&tl.relative.onsetS)+'（S2 起点）'+(tl.cutoffAtMs!=null?' · 断流 '+relS(tl.relative&&tl.relative.cutoffS):'')+(tl.relative&&tl.relative.returnS!=null?' · 收回 '+relS(tl.relative&&tl.relative.returnS):'')+(tl.relative&&tl.relative.completeS!=null?' · 确认 '+relS(tl.relative&&tl.relative.completeS):'')+'<br>'+(tl.overlap?'S2 与补水重叠 '+esc(tl.overlap.seconds)+' s（onset → 收回）':'S2 与补水无重叠')+refillLearningLine(tl)+'</div>'}const gains=[['S2',a.s2&&a.s2.gainFeedForward],['S3',a.s3&&a.s3.gainFeedForward]].filter(x=>x[1]);const gainMemories=[['S2',a.s2&&a.s2.gainMemory],['S3',a.s3&&a.s3.gainMemory]].filter(x=>x[1]);if(gainMemories.length)h+='<div class="m"><b>杯间增益记忆</b><br>'+gainMemories.map(([n,g])=>'<b>'+n+'</b> · 桶 '+esc(g.bucketId)+' · r '+esc(g.r)+' · 样本 '+esc(g.bucketSamples)+' · '+esc(g.confidence)+(g.deviationPct==null?'':' · 偏差 '+esc(g.deviationPct)+'%')+(g.local?' · 当杯局部估计':'')+' · 反算基值 '+esc(g.commandMlS)+' ml/s'+(g.applied?' · 已采用':(g.stage==='s3'?' · 仅记录（形状下一步）':' · 未采用'))).join('<br>')+'</div>';if(gains.length)h+='<div class="m">'+gains.map(([n,g])=>g.k==null?'<b>'+n+' 稳态增益 k</b><br>样本 '+esc(g.samples||0)+' 杯 · 需 ≥2 杯同段干净记录':'<b>'+n+' 稳态增益 k</b><br>k '+esc(g.k)+' · 样本 '+esc(g.samples)+' · 离散 '+esc(Number(g.spread*100).toFixed(1))+'%<br>当前指令 '+esc(g.currentCommandMlS)+' → 目标折算 '+esc(g.targetCommandMlS)+' · 限幅后 '+esc(g.boundedCommandMlS)+' ml/s'+(g.applied?' · 已应用':'')).join('<br>')+'</div>';if(ga&&ga.available)h+='<div class="m" style="border:1px solid rgba(245,158,11,.55);border-left:4px solid #f59e0b;background:rgba(245,158,11,.10);border-radius:8px;padding:9px 11px"><b style="color:#fbbf24">研磨建议 · GRIND ADVISORY</b><br><span style="color:#fcd34d;font-weight:600">'+esc(ga.label)+'</span><br><span class="small">S2 p/q '+esc(ga.s2Pq)+' · 参考 '+esc(ga.referencePq)+' · 偏差 '+esc(ga.relPct)+'% · S2尾CV '+esc(ga.s2TailCvPct==null?'—':ga.s2TailCvPct)+'% · S3偏差 '+esc(ga.s3TailErrorPct==null?'—':ga.s3TailErrorPct)+'% · '+esc(ga.confidence)+'</span><br><span class="small">'+esc(ga.detail||'')+'</span></div>';el.innerHTML=h}
+function validationClass(x){return x==='HIT'?'good':x==='NEAR'||x==='TRANSIENT'?'':'bad'}
+function validationRow(label,p){if(!p)return '<tr><td>'+label+'</td><td colspan=7>—</td></tr>';return '<tr><td>'+label+'</td><td>'+esc(p.desiredRealFlowGS)+'</td><td>'+esc(p.machineFlowAvg)+'</td><td>'+esc(p.gflowAvg)+'</td><td><b>'+esc(p.rawRegressionGS)+'</b></td><td>'+esc(p.rawRegressionR2)+'</td><td>'+esc(p.rawRegressionSeconds)+'s</td><td class="'+validationClass(p.validationStatus)+'">'+esc(p.validationStatus)+' '+(p.rawErrorPct==null?'':('('+p.rawErrorPct+'%)'))+'</td></tr>'}
+function advisoryClass(a){return !a?'':a.action==='HOLD'?'good':a.confidence==='INSUFFICIENT'?'bad':''}
+function advisoryRow(label,a){if(!a)return '<tr><td>'+label+'</td><td colspan=6>—</td></tr>';const ref=a.referenceCommandMlS==null?'—':a.referenceCommandMlS;const range=a.referenceRangeMlS&&a.referenceRangeMlS.length===2?(a.referenceRangeMlS[0]+'–'+a.referenceRangeMlS[1]):'—';return '<tr><td>'+label+'</td><td>'+esc(a.confidence)+'</td><td>'+esc(a.action)+'</td><td>'+esc(a.currentCommandMlS)+'</td><td>'+esc(ref)+'</td><td><b>'+esc(range)+'</b></td><td class="'+advisoryClass(a)+'">'+esc(a.message)+'</td></tr>'}
+function segCell(x){if(!x||x.slope==null)return '—';return '<b>'+esc(x.slope)+'</b> g/s · R² '+esc(x.r2)+' · '+esc(x.seconds)+'s'}
+function renderStability(s){if(!stability)return;const m=s&&s.stage1Startup,st=s&&s.stage3Stability;if(!m&&!st){stability.innerHTML='<span class="small">No S1/S3 stability diagnostics available yet.</span>';return}let h='';if(m){const cls=m.confidence==='INSUFFICIENT'?'bad':m.confidence==='MEDIUM'?'good':'';h+='<div style="margin-bottom:10px"><b>S1 STARTUP</b> · confidence <span class="'+cls+'">'+esc(m.confidence)+'</span><br>First cup rise: <b>'+esc(m.firstRiseDelayS)+' s</b> · 20–80% flow: <b>'+esc(m.midFlowGS)+' g/s</b> · R² '+esc(m.midR2)+' · transit '+esc(m.transit20to80S)+' s · active avg '+esc(m.activeFlowGS)+' g/s · collected '+esc(m.gainG)+' g<br><span class="small">Quality: '+esc(m.qualityReason||'—')+' · 20–80% samples '+esc(m.midSampleCount??'—')+' · active '+esc(m.activeSeconds)+' s</span></div>'}if(st){const sc=st.status==='STABLE'?'good':'bad';h+='<div><b>S3 STABILITY</b> · <span class="'+sc+'">'+esc(st.status)+'</span> · late/early '+esc(st.lateToEarlyRatio)+'<table><tr><th>EARLY 25%</th><th>MID 50%</th><th>LATE 25%</th><th>Stall window</th></tr><tr><td>'+segCell(st.early)+'</td><td>'+segCell(st.mid)+'</td><td>'+segCell(st.late)+'</td><td>'+(st.stall&&st.stall.suspected?'<span class="bad"><b>YES</b> '+esc(st.stall.startS)+'–'+esc(st.stall.endS)+'s · RAW '+esc(st.stall.rawSlopeGS)+' g/s while DE1 '+esc(st.stall.machineFlowMlS)+' ml/s</span>':'<span class="good">none</span>')+'</td></tr></table>'+(Array.isArray(st.shapeFrames)?'<div style="margin-top:8px"><b>LATEST SHOT · S3 FRAME MEASUREMENTS</b><div class="small">The Command column is the command captured for this completed shot, not the current NEXT SHOT profile.</div><table><tr><th>Frame</th><th>SHOT command</th><th>MEASURED RAW regression</th><th>R²</th><th>Window</th></tr>'+st.shapeFrames.map(x=>'<tr><td>'+esc(x.name)+'</td><td>'+esc(x.commandMlS)+' ml/s</td><td>'+esc(x.slope)+' g/s</td><td>'+esc(x.r2)+'</td><td>'+esc(x.seconds)+' s</td></tr>').join('')+'</table></div>':'')+'</div>'}stability.innerHTML=h}
+function renderAdvisory(s){if(!advisory)return;const a=s&&s.advisory;if(!a){advisory.innerHTML='<span class="small">No advisory available yet. Run a complete HyperEx shot.</span>';return}advisory.innerHTML='<table><tr><th>Stage</th><th>Confidence</th><th>Action</th><th>Current cmd</th><th>Mid ref</th><th>Reference Range</th><th>Advice</th></tr>'+advisoryRow('S1',a.stage1)+advisoryRow('S2',a.stage2)+advisoryRow('S3',a.stage3)+'</table><div class="small" style="margin-top:8px">Range is deliberately only a partial step toward the theoretical correction. LOW confidence may still show a broad manual-test range; INSUFFICIENT never shows a numeric range.</div>'}
+function adaptiveModePreview(key,sug,targetGS){const node=sug&&(key==='stage1'?sug.s1:key==='stage2'?sug.s2:null);const eligible=node&&node.usable&&(key==='stage1'?node.action==='ADJUST':(node.action==='ADJUST'||node.action==='LUT COMPENSATE'))&&Number.isFinite(Number(node.suggestedCommandMlS));if(eligible)return {disabled:true,text:'将应用最新学习值 ' +round(Number(node.suggestedCommandMlS),3)+' ml/s（草稿态，按应用生效）'};
+  // 2.2.53 (D6): mirror the D1 fallback — show the estimate that will be
+  // applied, and warn that the LUT fallback may underflow with coffee.
+  const fb=key==='stage2'?adaptiveEstimateFallback(node,Number(targetGS)):null;
+  if(fb)return {disabled:true,text:'将应用估计值 '+round(fb.commandMlS,3)+' ml/s（草稿态，按应用生效）'};
+  return {disabled:true,text:key==='stage2'?'无合格估计→清回 LUT（咖啡下可能欠流）＋armed 学习（草稿态，按应用生效）':'无新建议（HOLD）→清回 LUT＋armed 学习（草稿态，按应用生效）'};}
+function wireModeSelects(){for(const key of ['stage1','stage2']){const sel=$('mode_' +key),cmd=$('cmd_' +key),prev=$('adprev_' +key);if(!sel||!cmd)continue;const upd=()=>{const ad=sel.value==='adaptive';cmd.disabled=ad;if(prev){const pv=ad?adaptiveModePreview(key,latestNextShotAdaptive,Number(state.cfg&&state.cfg[key+'Flow'])):null;prev.textContent=pv?pv.text:'';}};sel.onchange=upd;upd();}}
+function stageTestRow(label,key,c,a){const mode=(c&&c[key+'Mode'])||'auto',origin=c&&c[key+'Origin']||(mode==='auto'?'original':'retained');const lut=c&&c[key+'LutCommandMlS']!=null?c[key+'LutCommandMlS']:'—',eff=c&&c[key+'CommandMlS']!=null?c[key+'CommandMlS']:lut,editor=key==='stage3'&&c&&c.stage3FlatCommandMlS!=null?c.stage3FlatCommandMlS:eff,shaped=key==='stage3'&&c&&c.s3Shape&&c.s3Shape.enabled,applied=shaped?appliedS3Text(c):esc(eff)+' ml/s',adv=a&&a[key],rr=adv&&adv.referenceRangeMlS&&adv.referenceRangeMlS.length===2?adv.referenceRangeMlS[0]+'–'+adv.referenceRangeMlS[1]:'—',keep=shaped||origin==='retained',adSel=key!=='stage3'&&origin==='adaptive',adPrev=adSel?adaptiveModePreview(key,latestNextShotAdaptive,Number(c&&c[key+'DesiredGS'])):null;return '<tr><td>'+label+'</td><td>'+esc(c&&c[key+'DesiredGS'])+'</td><td>'+esc(lut)+'</td><td>'+esc(rr)+'</td><td><select id="mode_'+key+'">'+(keep?'<option value="keep" selected>'+commandModeLabel(mode,origin)+'</option>':'')+(key!=='stage3'?'<option value="adaptive" '+(origin==='adaptive'?'selected':'')+'>ADAPTIVE</option>':'')+'<option value="auto" '+(!keep&&origin==='original'?'selected':'')+'>ORIGINAL / LUT</option><option value="manual" '+(!keep&&origin==='manual'?'selected':'')+'>MANUAL</option></select></td><td><input id="cmd_'+key+'" type="number" min="0.10" max="8.00" step="0.01" value="'+esc(editor)+'" style="width:85px" data-origin-stage="'+key+'" '+(adSel?'disabled':'')+' ><span id="adprev_'+key+'" class="small"'+(adPrev?esc(adPrev.text):'')+'</span></td><td><b>'+applied+'</b></td></tr>'}
+function shapeSuggestion(c,st){const a=latestNextShotAdaptive&&latestNextShotAdaptive.s3;if(a&&a.usable&&a.driftShape){const q=a.driftShape;return {early:Number(q.earlyCommand),earlySeconds:Number(q.earlySeconds),mid:Number(q.midCommand),midSeconds:Number(q.midSeconds),late:Number(q.lateCommand),source:'DRIFT MODEL'}}if(a&&a.usable&&a.suggestedShape){const q=a.suggestedShape;return {early:Number(q.earlyCommand),earlySeconds:Number(q.earlySeconds),mid:Number(q.midCommand),midSeconds:Number(q.midSeconds),late:Number(q.lateCommand),source:'NEXT SHOT ADAPTIVE'}}if(a&&a.action&&String(a.action).includes('REPEAT'))return null;const cur=Number(c&&c.stage3CommandMlS);if(!Number.isFinite(cur))return null;let early=cur,mid=cur,late=cur;if(st&&(st.status==='LATE DECAY'||(st.stall&&st.stall.suspected))){early=Math.max(.10,cur*.97);late=Math.min(8,cur*(st.stall&&st.stall.suspected?1.15:1.08));}return {early:Number(early.toFixed(3)),earlySeconds:8,mid:Number(mid.toFixed(3)),midSeconds:14,late:Number(late.toFixed(3)),source:'FALLBACK'}}
+function renderAdaptive(s){
+  latestAdaptiveSummary=s||null;
+  if(!adaptive)return;
+  if(s&&(s.learningReview&&s.learningReview.excluded||s.learningIntegrity&&s.learningIntegrity.eligible===false)){adaptive.innerHTML='<span class="bad">Shot excluded from learning; see history review.</span>';return;}
+  const a=s&&s.nextShotAdaptive;
+  if(!a){adaptive.innerHTML='<span class="small"><b>WAITING FOR SHOT EVIDENCE</b><br>After STEP 1 calibration is valid, run HyperEx normally. The plugin will collect completed-shot evidence and adjust only the next shot when its safety gates pass.</span>';return}
+  const s1=a.s1||{},s2=a.s2||{},s3=a.s3||{},ready=!!a.actionable,st=latestAutoApplyStatus||{};
+  const appliedForRun=String(st.runId||'')===String(a.runId||'')&&(st.status==='applied'||st.status==='manual-applied');
+  const failedForRun=String(st.runId||'')===String(a.runId||'')&&st.status==='error';
+  const scalarRow=(label,x,basis)=>{let measured=x.measuredGS==null?'—':esc(x.measuredGS)+' g/s';if(x.previousGS!=null&&x.currentGS!=null)measured=esc(x.previousGS)+' → '+esc(x.currentGS)+' g/s · mean '+esc(x.measuredGS);let proposed='repeat';if(x.action==='HOLD')proposed='<span class="good"><b>HOLD '+esc(x.currentCommandMlS)+' ml/s</b></span>';else if(x.action==='ADJUST'||x.action==='LUT COMPENSATE')proposed='<b>'+esc(x.suggestedCommandMlS)+' ml/s</b>';else if(x.action)proposed='<b>'+esc(x.action)+'</b>';return '<tr><td>'+label+'</td><td>'+basis+'<br>'+measured+(x.variabilityPct!=null?' · var '+esc(x.variabilityPct)+'%':'')+'</td><td>'+esc(x.currentCommandMlS)+' ml/s</td><td>'+proposed+'</td><td>'+esc(x.confidence||'—')+'</td></tr>'};
+  let h='<div class="small">Learning strength: '+esc(a.learningLevel||'—')+'<br>Source run: <b>'+esc(a.runId)+'</b> · <b>'+esc(a.mode)+'</b> · all numeric changes below apply to the <b>NEXT SHOT ONLY</b>.</div><table><tr><th>Stage</th><th>Evidence</th><th>LEARNING seed / fixed command</th><th>NEXT action / command</th><th>Confidence</th></tr>';
+  if(latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||''))h='<div class="manualPanel good"><b>下一杯已采用手动曲线。</b> 以下为旧杯分析，尚未作为新曲线效果验证。</div>'+h;
+  h+=scalarRow('S1',s1,esc(s1.evidenceBasis||'startup 20–80%'));
+  h+=scalarRow('S2',s2,esc(s2.evidenceBasis||'RAW multi-second regression'));
+  let s3meas=s3.overallGS==null?'—':('overall '+esc(s3.overallGS)+' g/s');
+  if(s3.evidenceBasis)s3meas+='<br>'+esc(s3.evidenceBasis);
+  if(s3.levelErrorPct!=null)s3meas+=' · LEVEL error '+esc(s3.levelErrorPct)+'%';
+  if(s3.variabilityPct!=null)s3meas+=' · max var '+esc(s3.variabilityPct)+'%';
+  let s3shot=(s3.sourceFrames||[]).map(x=>esc(x.commandMlS)).join(' → ')||'—';
+  let s3next='<b>'+esc(s3.action||'REPEAT')+'</b>';
+  if(s3.normalizedShapeVariabilityPct!=null)s3meas+=' · normalized shape var '+esc(s3.normalizedShapeVariabilityPct)+'%';
+  if(s3.suggestedShape){const q=s3.suggestedShape;s3next='<b>'+esc(s3.action)+'<br>'+esc(q.earlyCommand)+' × '+esc(q.earlySeconds)+'s → '+esc(q.midCommand)+' × '+esc(q.midSeconds)+'s → '+esc(q.lateCommand)+'</b>';if(s3.levelFactor!=null)s3next+='<br><span class="small">LEVEL ×'+esc(s3.levelFactor)+' · normalized SHAPE '+(s3.shapeFactors||[]).map(x=>'×'+esc(x)).join(' / ')+'</span>'}
+  h+='<tr><td>S3</td><td>'+s3meas+'<br>late/early '+esc(s3.lateToEarlyRatio)+' · '+esc(s3.status||'—')+'</td><td>'+s3shot+'</td><td>'+s3next+'</td><td>'+esc(s3.confidence||'—')+'</td></tr>';
+  h+='</table><div class="small" style="margin-top:7px">'+esc(a.note||'')+'<br>S1: '+esc(s1.maxStepRule||'')+'<br>'+esc(s1.reason||'—')+'<br>S2: '+esc(s2.maxStepRule||'')+'<br>'+esc(s2.reason||'—')+'<br>S3: '+esc(s3.maxStepRule||'')+'<br>'+esc(s3.reason||'—')+'</div>';
+  const review=s&&s.controlReview;if(review){h+='<div class="manualPanel"><b>本杯控制诊断 · '+esc(review.status)+'</b><div class="small">'+esc(review.note)+' · 杯内状态：'+esc(review.controllerStatus)+'</div>';for(const p of review.phases||[]){const q=p.output||{};h+='<div class="m"><b>'+esc(p.phase==='stage2'?'S2':'S3')+' · '+esc(p.status)+'</b> · 后段误差 '+esc(q.tailErrorPct)+'% · 波动CV '+esc(q.tailRippleCVPct)+'% · 过冲 '+esc(q.tailOvershootPct)+'% · p95 '+esc(q.tailP95ErrorPct)+'% · RMSE '+esc(q.tailRMSEGS)+' g/s · 写入 '+esc(p.writes)+'次 · 反转 '+esc(p.directionReversals)+'次<br>'+esc(p.learningStatus)+'</div>';for(const g of p.actionGroups||[])h+='<div class="small">'+esc((g.firstMs/1000).toFixed(1))+'–'+esc((g.lastMs/1000).toFixed(1))+'s · '+esc(g.writes)+'次写入 · '+esc(g.status)+' · '+esc(g.attribution)+'</div>'}h+='</div>'}
+  for(const [label,x] of [['S2',s2],['S3',s3]]){const q=x.outputQuality;if(q&&q.available)h+='<div class="small"><b>'+label+' ACTUAL RAW OUTPUT</b> · phase error '+esc(q.wholePhaseErrorPct)+'% · final60% mean '+esc(q.tailMeanGS)+' g/s · error '+esc(q.tailErrorPct)+'% · ripple CV '+esc(q.tailRippleCVPct)+'% · RMSE '+esc(q.tailRMSEGS)+' g/s · overshoot '+esc(q.tailOvershootPct)+'%</div>'}
+  const curveSuperseded=latestManualCurveSource&&String(latestManualCurveSource.afterRunId||'')===String(a.runId||'');
+  if(curveSuperseded){h+='<div class="manualPanel good"><b>手动曲线已应用到下一杯。</b> 上表保留旧杯算法分析；当前执行以 NEXT SHOT · APPLIED PROFILE 为准。新杯完成后继续自动学习。</div>';}else if(ready){
+    if(latestAutoApplyEnabled){
+      if(appliedForRun)h+='<div class="row"><span class="good"><b>APPLIED ✓ TO NEXT SHOT</b></span><span class="small" style="align-self:center">Readback and profile sync completed. The NEXT SHOT · APPLIED PROFILE block above is authoritative.</span></div>';
+      else if(failedForRun)h+='<div class="row"><span class="bad"><b>NOT APPLIED</b></span><span class="small" style="align-self:center">AUTO APPLY failed safely: '+esc(st.message||'unknown error')+'. Previous profile retained.</span></div>';
+      else h+='<div class="row"><span><b>AUTO APPLY ARMED</b></span><span class="small" style="align-self:center">An actionable proposal exists; wait for successful APPLIED readback before treating it as current.</span></div>';
+    }else h+='<div class="row"><button id="applynext" class="b primaryAction">APPLY NEXT SHOT</button><span class="small" style="align-self:center">AUTO APPLY is OFF.</span></div>';
+  }else h+='<div class="small" style="margin-top:8px"><b>NO NUMERIC CHANGE YET</b> · the plugin keeps the current profile until the required repeated evidence agrees.</div>';
+  adaptive.innerHTML=h;
+  const q=$('applynext');
+  if(q)q.onclick=async()=>{if(!confirm('Apply the bounded NEXT SHOT adaptive suggestion?\\n\\nThis changes only future-shot profile commands. It does NOT modify the calibration LUT and does NOT change a running shot.'))return;try{const r=await post('adaptive-next-apply',{});if(r&&r.verified!==true)throw new Error('server did not verify the applied override');alert('Next-shot suggestion VERIFIED and applied.\\n\\nThe NEXT SHOT · APPLIED PROFILE block is authoritative.');await loadDiag()}catch(e){alert('Apply next shot failed: '+e)}}
+}
+function renderBasketContext(c){
+ const el=$('basketcontext');if(!el)return;const prior=c.baselinePrior||{},stage=c.learningStage||{};
+ el.innerHTML='<b>'+esc(stage.stage||'CHECKING BASELINE')+'</b><div>'+esc(stage.message||'Checking calibration and saved empty-basket evidence.')+'</div><div class="small">Empty-basket Step 2: '+esc(stage.emptyShots||0)+' / '+esc(stage.maxEmptyShots||3)+' maximum. '+esc(prior.referenceShots||0)+' empty/pre-upgrade references retained. Starting LUT and bounded commands are kept; normal coffees then refine the next-shot trajectory automatically.</div>';
+}
+async function readRawWorkflow(){
+ const status=$('auditstatus'),out=$('auditjson');if(status)status.textContent='Reading fresh workflow without repair/upload…';
+ try{
+  const r=await fetch(base+'/adaptive-audit');const a=await r.json();
+  if(out)out.value=JSON.stringify(a,null,2);
+  if(!r.ok)throw Error(a.error||'Read failed');
+  status.textContent='RAW GET /workflow · '+a.serverTime+' · expected current profile match: '+a.workflowMatchesExpected+' · latest proposal match: '+(a.proposalMatchesWorkflow==null?'no actionable proposal':a.proposalMatchesWorkflow)+' · auto apply: '+((a.autoApply||{}).status||'no attempt recorded')+'. Upload acknowledgement is not independent DE1 memory readback.';
+ }catch(e){if(status)status.textContent='Raw readback unavailable: '+e}
+}
+if($('readworkflow'))$('readworkflow').onclick=readRawWorkflow;
+function renderAutoApplyBox(){const box=$('autoapplybox');if(!box)return;const on=!!latestAutoApplyEnabled;const st=latestAutoApplyStatus||{};let status=st.message?('<span class="small">Auto apply state: <b>'+esc(st.status||'unknown')+'</b> · '+esc(st.message)+(st.runId?' · '+esc(st.runId):'')+'</span>'):'';box.innerHTML='<div class="row"><button id="autoapplytoggle" class="b '+(on?'primaryAction':'tertiaryAction')+'">AUTO APPLY NEXT SHOT: '+(on?'ON':'OFF')+'</button><span class="small" style="align-self:center">'+(on?'Default mode · verified actionable suggestions apply automatically.':'Manual mode · enter DIAG and press APPLY NEXT SHOT when a numeric suggestion is available.')+'</span></div>'+status;const q=$('autoapplytoggle');if(q)q.onclick=async()=>{const next=!latestAutoApplyEnabled;if(!confirm((next?'Enable':'Disable')+' AUTO APPLY NEXT SHOT?\\n\\n'+(next?'Verified actionable suggestions will apply automatically after completed HyperEx shots.':'The plugin will return to the v0.1.39 manual APPLY NEXT SHOT workflow.')))return;try{const r=await post('adaptive-auto-set',{enabled:next});latestAutoApplyEnabled=!!r.autoApplyNextShot;latestAutoApplyStatus=r.autoApplyLastStatus||null;renderAutoApplyBox();renderAdaptive(latestAdaptiveSummary)}catch(e){alert('AUTO APPLY setting failed: '+e)}}}
+function renderS3Shape(c,st){if(!s3shape)return;const saved=c&&c.s3Shape&&c.s3Shape.enabled?c.s3Shape:null;const sug=shapeSuggestion(c,st);const q=saved||sug||{early:c.stage3CommandMlS,earlySeconds:8,mid:c.stage3CommandMlS,midSeconds:14,late:c.stage3CommandMlS};const manualOn=q.manual===true;const earlyNow=Number.isFinite(Number(q.earlyFactor))?Number(q.earlyFactor):(Number(q.earlyCommand)/Number(q.midCommand)||1);const driftNow=Number.isFinite(Number(q.drift))?Number(q.drift):(Number(q.lateCommand)/Number(q.midCommand)||1);const derivedTilt=Math.max(-1,Math.min(1,(earlyNow-1)/0.45));const tiltValue=manualOn&&Number.isFinite(Number(q.manualTilt))?Math.max(-1,Math.min(1,Number(q.manualTilt))):derivedTilt;const ap=latestNextShotAdaptive&&latestNextShotAdaptive.s3;const hint=(ap&&ap.action&&(ap.action==='REPEAT SAME SHAPE'||ap.action==='VARIABLE / REPEAT'))?('NEXT SHOT: '+ap.action+' · keep the current shape unchanged until repeated evidence is consistent.'):('Suggested '+(sug&&sug.source==='NEXT SHOT ADAPTIVE'?'from NEXT SHOT ADAPTIVE':'from latest LATE DECAY')+': '+(sug?(sug.early+' × '+sug.earlySeconds+'s → '+sug.mid+' × '+sug.midSeconds+'s → '+sug.late):'—'));s3shape.innerHTML='<b>S3 SHAPE OVERRIDE EDITOR</b> · profile-time only, no extra skipStep<div class="small">'+(saved?'<span class="good"><b>APPLIED SHAPE</b></span> · inputs below are loaded from the current applied override.':'<b>NOT APPLIED</b> · inputs below are only a TEST/PROPOSED editor until APPLY SELECTED MODES & COMMANDS succeeds.')+'</div><table><tr><th>Mode</th><th>EARLY cmd</th><th>EARLY time</th><th>MID cmd</th><th>MID time</th><th>LATE cmd</th></tr><tr><td><select id="s3shape_mode"><option value="off" '+(!saved?'selected':'')+'>FLAT</option><option value="decay" '+(saved?'selected':'')+'>DECAY COMP TEST</option></select></td><td><input id="s3shape_early" type="number" min=".10" max="8" step=".01" value="'+esc(q.earlyCommand??q.early)+'" style="width:76px"></td><td><input id="s3shape_early_s" type="number" min="3" max="30" step="1" value="'+esc(q.earlySeconds)+'" style="width:62px"> s</td><td><input id="s3shape_mid" type="number" min=".10" max="8" step=".01" value="'+esc(q.midCommand??q.mid)+'" style="width:76px"></td><td><input id="s3shape_mid_s" type="number" min="3" max="30" step="1" value="'+esc(q.midSeconds)+'" style="width:62px"> s</td><td><input id="s3shape_late" type="number" min=".10" max="8" step=".01" value="'+esc(q.lateCommand??q.late)+'" style="width:76px"></td></tr></table><div class="row" style="align-items:center;gap:8px;margin-top:8px"><label class="small"><input id="s3manual" type="checkbox" '+(manualOn?'checked':'')+'> 手动形状</label><input id="s3tilt" type="range" min="-1" max="1" step="0.05" value="'+tiltValue+'" '+(manualOn?'':'disabled')+' style="flex:1;min-width:120px"><span id="s3tiltreadout" class="small">early ×'+Number(manualOn?1+0.45*tiltValue:earlyNow).toFixed(2)+' / drift ×'+Number(manualOn?1-0.20*tiltValue:driftNow).toFixed(2)+'</span></div><div class="small">S3 shape may place EARLY above MID or LATE below MID; only an adjacent rise is bounded. '+hint+' The shape is enabled automatically only when AUTO APPLY is ON and a verified actionable adaptive suggestion passes all safety checks.</div>';;const manualBox=$('s3manual'),tiltBox=$('s3tilt'),tiltReadout=$('s3tiltreadout');const syncTilt=()=>{const on=!!(manualBox&&manualBox.checked),t=Number(tiltBox&&tiltBox.value)||0;if(tiltBox)tiltBox.disabled=!on;if(tiltReadout)tiltReadout.textContent=on?'early ×'+(1+0.45*t).toFixed(2)+' / drift ×'+(1-0.20*t).toFixed(2):'early ×'+Number(earlyNow).toFixed(2)+' / drift ×'+Number(driftNow).toFixed(2);};if(manualBox)manualBox.onchange=syncTilt;if(tiltBox)tiltBox.oninput=syncTilt;syncTilt();}
+function renderTestCommands(c,a){if(!testcommands)return;testcommands.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>LUT cmd</th><th>Ref range</th><th>Editor mode</th><th>Editor flat cmd</th><th>CURRENTLY APPLIED</th></tr>'+stageTestRow('S1','stage1',c,a)+stageTestRow('S2','stage2',c,a)+stageTestRow('S3','stage3',c,a)+'</table><div class="small" style="margin-top:7px">DE1 command hard limit: 0.10–8.00 ml/s. MANUAL changes only the HyperEx profile command; calibration LUT data remains untouched. If S3 DECAY COMP is enabled, its three shape commands override the flat S3 command. Selecting ADAPTIVE is a draft; press APPLY SELECTED MODES & COMMANDS to take effect.</div>';renderS3Shape(c,latestStage3Stability);wireModeSelects()}
+async function applyTestCommands(){const stages={};for(const key of ['stage1','stage2','stage3']){const mode=$('mode_'+key).value;const command=Number($('cmd_'+key).value);if(mode==='manual'&&(!Number.isFinite(command)||command<0.10||command>8.00)){alert(key.toUpperCase()+' manual command must be 0.10–8.00 ml/s.');return}stages[key]={mode,command}}const sm=$('s3shape_mode'),manualBox=$('s3manual'),tiltBox=$('s3tilt'),manualShape=!!(manualBox&&manualBox.checked),manualTilt=manualShape?Math.max(-1,Math.min(1,Number(tiltBox&&tiltBox.value)||0)):null;let s3Shape;
+if(manualShape){
+ const mid=Number($('s3shape_mid').value),earlyFactor=1+0.45*manualTilt,drift=1-0.20*manualTilt,earlySeconds=Number($('s3shape_early_s').value),midSeconds=Number($('s3shape_mid_s').value);
+ if(![mid,earlySeconds,midSeconds].every(Number.isFinite)||mid<.10||mid>8||earlySeconds<3||earlySeconds>30||midSeconds<3||midSeconds>30){alert('S3 manual drift needs MID 0.10–8.00 ml/s and times 3–30 s.');return}
+ if(![mid*earlyFactor,mid*drift].every(v=>v>=.10&&v<=8)){alert('S3 drift-derived command outside 0.10–8.00 ml/s.');return}
+ if(mid*drift>Math.max(mid+.25,mid*1.35)+1e-9){alert('S3 相邻增幅必须在上限内（max +0.25 ml/s / ×1.35）');return}
+ s3Shape={enabled:true,model:'drift',manual:true,manualTilt,midCommand:mid,earlyFactor,drift,earlySeconds,midSeconds};
+}else{
+ s3Shape={enabled:!!sm&&sm.value==='decay',earlyCommand:Number($('s3shape_early').value),earlySeconds:Number($('s3shape_early_s').value),midCommand:Number($('s3shape_mid').value),midSeconds:Number($('s3shape_mid_s').value),lateCommand:Number($('s3shape_late').value)};
+ if(s3Shape.enabled){
+  if([s3Shape.earlyCommand,s3Shape.midCommand,s3Shape.lateCommand].some(x=>!Number.isFinite(x)||x<.10||x>8)){alert('S3 shape commands must be 0.10–8.00 ml/s.');return}
+  // cut 7: S3 shape order is free; the hard-limit checks above already bound the commands.
+  if(!Number.isFinite(s3Shape.earlySeconds)||s3Shape.earlySeconds<3||s3Shape.earlySeconds>30||!Number.isFinite(s3Shape.midSeconds)||s3Shape.midSeconds<3||s3Shape.midSeconds>30){alert('S3 EARLY/MID times must be 3–30 seconds.');return}
+ }
+}if(!confirm('Apply these TEST commands to HyperEx?\\n\\nS1/S2/manual flat commands are static. S3 DECAY COMP, if enabled, advances only by profile time and adds NO plugin skipStep calls. Calibration LUT remains unchanged. Changes apply to the next normal shot only.'))return;try{const r=await post('test-command-set',{stages,s3Shape,revision:curveLatest&&curveLatest.revision});if(r.verified!==true)throw Error('下一杯曲线未校验');await loadDiag()}catch(e){alert('Apply failed: '+e)}}
+async function returnAllToLut(){if(!confirm('Return S1/S2/S3 to AUTO / LUT and clear all manual test overrides, including S3 shape?'))return;try{await post('test-command-clear',{});await loadDiag()}catch(e){alert('Reset failed: '+e)}}
+
+let csvLoaded=false;async function ensureCsv(){if(csvLoaded)return;csvLoaded=true;try{const cr=await fetch(base+'/diagnostics-csv');if(cr.ok)csv.value=await cr.text()}catch(_){}}
+async function loadDiag(){b.style.display='none';copy.style.display='block';diag.style.display='block';t.textContent='DIAGNOSTICS / FLOW CAL';d.textContent='STEP 1 calibrates the physical real-flow LUT. STEP 2 measures every completed shot and automatically adapts S1/S2/S3 for the next shot only. STEP 3 is manual engineering; STEP 4 exports CSV.';try{const jr=await fetch(base+'/diagnostics');if(jr.ok){const j=await jr.json(),s=j.summary||{};renderLiveTrim(j.run);renderCharts(j.run);renderRunCommands(s);if(s.kind==='hyperex'){validation.innerHTML=stat('S1 target / RAW reg',(s.stage1?(esc(s.stage1.desiredRealFlowGS)+' / '+esc(s.stage1.rawRegressionGS)):'—'))+stat('S2 target / RAW reg',(s.stage2?(esc(s.stage2.desiredRealFlowGS)+' / '+esc(s.stage2.rawRegressionGS)):'—'))+stat('S3 target / RAW reg',(s.stage3?(esc(s.stage3.desiredRealFlowGS)+' / '+esc(s.stage3.rawRegressionGS)):'—'));validationtable.innerHTML='<table><tr><th>Stage</th><th>Target g/s</th><th>DE1 Flow</th><th>Decaid</th><th>RAW regression</th><th>R²</th><th>Window</th><th>Status / error</th></tr>'+validationRow('S1',s.stage1)+validationRow('S2',s.stage2)+validationRow('S3',s.stage3)+'</table>';latestAdvisorySummary=s.advisory||null;latestStage3Stability=s.stage3Stability||null;latestNextShotAdaptive=s.nextShotAdaptive||null;renderStability(s);renderAdaptive(s);renderNextDecision(s);renderAdvisory(s);lastDiagSummary=s;updateFoldStatuses()}else{validation.innerHTML=stat('LATEST RUN',s.kind||'calibration');validationtable.innerHTML='<span class="small">Latest diagnostic run is not a HyperEx shot. Run HyperEx to populate current-shot validation.</span>';latestAdvisorySummary=null;latestStage3Stability=null;latestNextShotAdaptive=null;latestAdaptiveSummary=null;lastDiagSummary=null;updateFoldStatuses();if(stability)stability.innerHTML='<span class="small">S1/S3 stability diagnostics are generated only from a HyperEx shot.</span>';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='<span class="small">Reference advice is generated only from a HyperEx shot.</span>'}stats.innerHTML=stat('RAW SCALE WEIGHT',s.lastRawScaleWeightG??'—')+stat('RAW instantaneous dW/dt',s.lastRawScaleDwDtGS??'—')+stat('Decaid weightFlow',s.lastDecaidWeightFlowGS??'—')+stat('RUN RESULT',s.result||'—')+stat('COMBINED SAMPLES',s.sampleCount||0)+stat('RAW SCALE SAMPLES',s.rawScaleSampleCount||0);m.textContent=(s.result||'')+' · '+(s.sampleCount||0)+' combined · '+(s.rawScaleSampleCount||0)+' raw scale';const faults=j.run&&Array.isArray(j.run.learningExecutionFaults)?j.run.learningExecutionFaults:[];if(faults.length&&validation){const f=faults[faults.length-1];validation.innerHTML+='<div class="stat" style="grid-column:1/-1"><b class="bad">ABORT · '+esc(f.phase||'')+'</b><div class="small">'+esc(f.reason||'')+'</div></div>';}}else{renderRunCommands(null);validation.innerHTML=stat('LAST RUN','none yet');validationtable.innerHTML='';latestAdaptiveSummary=null;lastDiagSummary=null;updateFoldStatuses();if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='<span class="small"><b>NEW INSTALL / NO PREVIOUS SHOT</b><br>Run one complete HyperEx validation shot to generate the first next-shot suggestion.</span>';if(advisory)advisory.innerHTML='';stats.innerHTML=''}}catch(e){if(runcommands)runcommands.innerHTML='<span class="bad">Latest-shot command snapshot unavailable: '+esc(e)+'</span>';validation.innerHTML=stat('DIAG ERROR',esc(e));validationtable.innerHTML='';latestAdaptiveSummary=null;lastDiagSummary=null;updateFoldStatuses();if(stability)stability.innerHTML='';if(adaptive)adaptive.innerHTML='';if(advisory)advisory.innerHTML='';stats.innerHTML=''}await loadCal();await loadAdvancedSettings()}
+const flowSvg=$('flowchart');if(flowSvg)flowSvg.onclick=e=>{const q=e.target.closest('[data-tip]');if(q&&$('flowpointdetail'))$('flowpointdetail').textContent=q.getAttribute('data-tip')};for(const saveAdv of document.querySelectorAll('#saveadvanced,[data-save-advanced]'))saveAdv.onclick=saveAdvancedSettings;$('applytest').onclick=applyTestCommands;$('returnlut').onclick=returnAllToLut;
+$('prepare').onclick=async()=>{let c={calibrationModeLabel:'Low Water',calibrationSteps:9,calibrationStepSeconds:7.5,nominalCommandWaterMl:95,recommendedContainerMl:300,calibrationHardStopG:240,primeFlow:3,primeSeconds:3,waterPreflight:{status:'unknown',available:false,message:'Tank level unavailable'}};try{const rr=await fetch(base+'/calibration-status');if(rr.ok)c=await rr.json()}catch(_){}const w=c.waterPreflight||{};if(w.status==='block'){alert('WATER PREFLIGHT BLOCKED.\\n\\n'+(w.message||'DE1 tank level is too close to/below the refill threshold.')+'\\n\\nRefill the tank and try again.');return}let allowUnknown=false;if(w.status==='unknown'||!w.available){if(!confirm('DE1 tank level is unavailable or stale.\\n\\nThe plugin cannot verify tank water automatically. Continue only if you have manually checked the tank.'))return;allowUnknown=true}else if(w.status==='warn'){if(!confirm('DE1 tank water margin is low.\\n\\n'+(w.message||'')+'\\n\\nContinue anyway?'))return}const msg='EMPTY BASKET ONLY · '+c.calibrationModeLabel+' CALIBRATION.\\n\\nPrime '+c.primeFlow+' ml/s × '+c.primeSeconds+' s, then '+c.calibrationSteps+' target/search plateaus × '+c.calibrationStepSeconds+' s.\\nNominal DE1 commanded water: ≈'+c.nominalCommandWaterMl+' ml.\\nActual-water safety stop: ≈'+c.calibrationHardStopG+' g.\\n\\nUse a '+c.recommendedContainerMl+' ml or larger catch vessel.\\nTare the scale, then start Espresso manually. Do not remove the vessel until Idle.\\n\\nContinue?';if(!confirm(msg))return;try{await post('calibration-prepare',{allowUnknownWater:allowUnknown,allowLowMargin:w.status==='warn'});alert(c.calibrationModeLabel+' calibration profile selected. EMPTY BASKET. Tare scale, start Espresso, and leave the vessel in place until Idle.');await loadCal()}catch(e){alert('Prepare failed: '+e)}};
+$('sync').onclick=async()=>{try{await post('calibration-sync',{});await loadCal()}catch(e){alert('Sync failed: '+e)}};
+$('suggested').onclick=async()=>{try{await post('calibration-use-suggested',{});alert('Suggested multiplier will be used for the NEXT calibration run. Re-run Flow Cal to create a LUT tied to that multiplier.');await loadCal()}catch(e){alert('Action failed: '+e)}};
+$('global').onclick=async()=>{if(!confirm('This changes DE1 flowMultiplier globally for ALL profiles. The current value will be saved for Restore. After applying, run Flow Cal again. Continue?'))return;try{await post('calibration-apply-global',{});alert('Global multiplier applied. Run Flow Cal again before using the LUT.');await loadCal()}catch(e){alert('Global apply failed: '+e)}};
+$('restore').onclick=async()=>{if(!confirm('Restore the DE1 flowMultiplier saved before the last global apply?'))return;try{await post('calibration-restore-global',{});await loadCal()}catch(e){alert('Restore failed: '+e)}};
+$('clearcal').onclick=async()=>{if(!confirm('Clear the saved real-flow LUT? HyperEx will return to direct DE1 flow commands.'))return;try{await post('calibration-clear',{});await loadCal()}catch(e){alert('Clear failed: '+e)}};
+async function poll(){try{const r=await fetch(base+'/status');paint(await r.json())}catch(e){}setTimeout(poll,400)}b.onclick=()=>doRearm(false);const exportHistory=$('exporthistory'),historyUrl=$('historyurl');if(exportHistory)exportHistory.onclick=async()=>{const url=location.origin+base+'/history-export';if(historyUrl)historyUrl.innerHTML='<a href="'+url+'" target="_blank" rel="noopener">'+url+'</a>';try{await navigator.clipboard.writeText(url);exportHistory.textContent='URL COPIED'}catch(e){exportHistory.textContent='URL SHOWN BELOW'}setTimeout(()=>{exportHistory.textContent='EXPORT HISTORY JSON'},2500)};const importHistoryBtn=$('importhistory'),importHistoryFile=$('importhistoryfile'),importLutBtn=$('importlut'),importLutFile=$('importlutfile');
+async function readJsonFile(f){const text=await f.text();try{return JSON.parse(text)}catch(_){throw new Error('Not a JSON file')}}
+async function postJson(endpoint,data){const r=await fetch(base+'/'+endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});let j={};try{j=await r.json()}catch(_){j={error:await r.text()}}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
+function wireImport(button,input,statusId,endpoint,done){if(!button||!input)return;button.onclick=()=>input.click();input.onchange=async()=>{const f=input.files&&input.files[0],st=$(statusId);if(!f)return;try{if(st)st.textContent='IMPORTING…';const data=await readJsonFile(f);const r=await postJson(endpoint,data);if(st)st.textContent=done(r);await loadCal()}catch(e){if(st)st.textContent='IMPORT FAILED: '+String(e)}finally{input.value=''}}}
+wireImport(importHistoryBtn,importHistoryFile,'historyimportstatus','history-import',r=>'IMPORTED '+r.imported+' new · '+r.replaced+' replaced · '+r.total+' stored'+(r.persisted?'':' (memory only; storage not verified)'));
+wireImport(importLutBtn,importLutFile,'lutimportstatus','calibration-import',r=>'LUT IMPORTED · '+r.points+' points · '+r.range[0]+'..'+r.range[1]+' g/s · '+(r.usable?'USABLE':'NOT USABLE: '+(r.staleReason||'out of range')));
+const importUrl=$('importurl'),importUrlBtn=$('importurlbtn');
+if(importUrl&&!importUrl.value)importUrl.value=location.origin+base+'/history-export';
+if(importUrlBtn)importUrlBtn.onclick=async()=>{const st=$('importurlstatus'),url=(importUrl&&importUrl.value||'').trim();if(!url){if(st)st.textContent='URL REQUIRED';return}try{if(st)st.textContent='READING URL…';const res=await fetch(url,{cache:'no-store'});if(!res.ok)throw new Error('HTTP '+res.status);const data=await res.json();if(st)st.textContent='IMPORTING…';const hist=await postJson('history-import',data);let lut=null;try{lut=await postJson('calibration-import',data)}catch(e){lut={error:String(e)}}if(st)st.textContent='HISTORY '+hist.imported+' new · '+hist.replaced+' replaced · '+hist.total+' stored | LUT '+(lut.error?('SKIPPED: '+lut.error):(lut.points+' points · '+lut.range[0]+'..'+lut.range[1]+' g/s · '+(lut.usable?'USABLE':'NOT USABLE')));await loadCal()}catch(e){if(st)st.textContent='IMPORT FAILED: '+String(e)}};
+copy.onclick=async()=>{await ensureCsv();csv.focus();csv.select();try{await navigator.clipboard.writeText(csv.value);copy.textContent='COPIED'}catch(e){document.execCommand('copy');copy.textContent='SELECTED / COPIED'}setTimeout(()=>copy.textContent='COPY CSV',1200)};function dashboardBack(){if(window.history&&window.history.length>1){window.history.back();return}homeFallback()}function homeFallback(){try{if(window.top&&window.top!==window&&window.top.history&&window.top.history.length>1){window.top.history.back();return}}catch(_){}if(window.history&&window.history.length>2){window.history.go(-2);return}if(window.history&&window.history.length>1){window.history.back();return}}function closeUi(){try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:'streamline:close'},'*')}catch(_){}setTimeout(dashboardEntry?dashboardBack:homeFallback,280)}$('close').textContent=diagView?'CLOSE / HOME':'CLOSE';$('close').onclick=closeUi;const closeTop=$('close-top');if(closeTop){closeTop.textContent=diagView?'CLOSE / HOME':'CLOSE';closeTop.onclick=closeUi;}const jumpWeight=$('jump-weight');if(jumpWeight){if(!diagView)jumpWeight.style.display='none';else jumpWeight.onclick=()=>{const target=$('weight-curves');if(target)target.scrollIntoView({behavior:'smooth',block:'start'});};}const step4=$("step4");function syncChartEngine(){
+ const btn=$("chartengine");if(btn)btn.textContent=chartEngine==="canvas"?"CANVAS 2D":"SVG";
+ for(const id of ["flowchart","anglechart","weightchart"]){const el=$(id);if(!el)continue;const isCanvas=el.tagName&&el.tagName.toLowerCase()==="canvas";const wantCanvas=chartEngine==="canvas";if(isCanvas===wantCanvas)continue;let n;if(wantCanvas){n=document.createElement("canvas");}else{n=document.createElementNS("http://www.w3.org/2000/svg","svg");n.setAttribute("viewBox","0 0 800 205");n.setAttribute("preserveAspectRatio","none");}n.id=id;n.className="chart";el.replaceWith(n);}
+}
+const engineBtn=$("chartengine");if(engineBtn)engineBtn.addEventListener("click",function(){chartEngine=chartEngine==="canvas"?"svg":"canvas";syncChartEngine();if(lastChartRun)renderCharts(lastChartRun);});window.addEventListener("resize",function(){if(chartEngine!=="canvas"||!lastChartRun)return;setTimeout(function(){renderCharts(lastChartRun)},160);});syncChartEngine();if(step4)step4.addEventListener("toggle",function(){if(step4.open)ensureCsv()});if(diagView){renderPresetBar(null);loadDiag()}else if(view==='rearm'){doRearm(true)}else{poll()}
+</script></body></html>`;
+  }
+
+  function startGhcCountdown() {
+    clearTimer("ghcCountdownTimer");
+    state.ghcPromptStartedAtMs = Date.now();
+    const total = Math.max(1, state.cfg.ghcConfirmTimeoutSeconds);
+    let lastLogged = null;
+    let lastUi = null;
+
+    const tick = () => {
+      if (state.phase !== "restart_wait") return;
+      const elapsed = (Date.now() - state.ghcPromptStartedAtMs) / 1000;
+      const remaining = Math.max(0, Math.ceil(total - elapsed));
+      state.ghcSecondsRemaining = remaining;
+      const message = `CHECK PINK: ON -> PRESS GHC / OFF -> RE-ARM — ${remaining}s`;
+      emitGhcPrompt("waiting", remaining, message);
+      if (remaining !== lastUi) { emitSkinChanged(); lastUi = remaining; }
+
+      const shouldLog = remaining === Math.ceil(total) || remaining === 15 || remaining === 10 || remaining <= 5;
+      if (shouldLog && remaining !== lastLogged) {
+        log(`>>> ${message} <<<`);
+        lastLogged = remaining;
+      }
+
+      if (remaining > 0 && state.phase === "restart_wait") {
+        state.ghcCountdownTimer = setTimeout(tick, 250);
+      }
+    };
+
+    tick();
+  }
+
+  function clearTimer(name) {
+    if (state[name] !== null && state[name] !== undefined) {
+      clearTimeout(state[name]);
+      state[name] = null;
+    }
+  }
+
+  function clearAllTimers() {
+    stopLiveTrim("cancelled");
+    cancelDirectStartTest();
+    clearTimer("dumpTimer");
+    clearTimer("dumpSettleTimer");
+    clearTimer("dumpFallbackTimer");
+    clearTimer("idlePollTimer");
+    clearTimer("soakTimer");
+    clearTimer("noScaleTimer");
+    clearTimer("maxRunTimer");
+    clearTimer("restartSkipTimer");
+    clearTimer("restartPollTimer");
+    clearTimer("restartTimeoutTimer");
+    clearTimer("ghcCountdownTimer");
+    clearTimer("soakCountdownTimer");
+    clearTimer("armReinforceTimer");
+    clearTimer("armReinforceTimer2");
+    clearTimer("autoApplyTimer");
+    clearTimer("completionTimer");
+    clearTimer("abortResetTimer");
+    clearTimer("flowStripTimer");
+    clearTimer("historyWriteDeferred");
+    clearTimer("historyTrimWriteTimer");
+  }
+
+  function profileObject() {
+    const c = state.cfg;
+    const s1 = snapCommandFlow(resolvedStageCommandFlow("stage1", c.stage1Flow)) ?? LIMITS.commandFlowMin;
+    const s2 = snapCommandFlow(resolvedStageCommandFlow("stage2", c.stage2Flow)) ?? LIMITS.commandFlowMin;
+    const s3 = snapCommandFlow(resolvedStageCommandFlow("stage3", c.stage3Flow)) ?? LIMITS.commandFlowMin;
+    const mode = releaseMode(c);
+    const releaseSoakSeconds = Math.max(0.1, Number(c.soakSeconds) || 0);
+    const safePressure = value => clampNumber(value, LIMITS.pressureMin, Math.min(LIMITS.pressureMax, c.hardPressureLimit), LIMITS.pressureMin);
+    const p1 = safePressure(c.stage1PressureLimit), p2 = safePressure(c.stage2PressureLimit), p3 = safePressure(c.stage3PressureLimit);
+    const summary = commandFlowSummary();
+    const manualStages = Array.isArray(summary.manualTestActiveStages) ? summary.manualTestActiveStages : [];
+    const shape = s3ShapeStatus();
+    const manualNote = manualStages.length
+      ? ` Command overrides active for ${manualStages.map(x => x.toUpperCase()).join("/")}; per-stage origins are shown in diagnostics; saved LUT is unchanged.`
+      : ` All stages ORIGINAL / LUT.`;
+    const calNote = state.calibrationMapUsable
+      ? `Scale-calibrated real-flow feed-forward. Effective commands: ${formatCommandFlow(s1)}/${formatCommandFlow(s2)}/${formatCommandFlow(shape.enabled ? shape.midCommand : s3)} ml/s at flowMultiplier ${Number(calibrationBaseMultiplier()).toFixed(3)}.${manualNote}`
+      : `Direct bounded DE1 flow feed-forward; calibration LUT inactive (${state.calibrationMapStaleReason || "not available"}).${manualNote}`;
+    const steps = [
+      {
+        name: `S1 real ${c.stage1Flow.toFixed(2)} g/s`,
+        temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
+        flow: formatCommandFlow(s1), seconds: "120", volume: "0", weight: "0",
+        limiter: { value: p1.toFixed(2), range: Math.max(0.1, p1 * 0.1).toFixed(2) }
+      }
+    ];
+    if (mode === "auto") {
+      
+      
+      
+      
+      
+      steps.push({
+        name: "Active release / soak",
+        temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "pressure", transition: "fast",
+        pressure: "0", flow: "", seconds: releaseSoakSeconds.toFixed(1), volume: "0", weight: "0", exit: null,
+        limiter: { value: "0", range: "0.6" }
+      });
+    }
+    steps.push(
+      {
+        name: `S2 real ${c.stage2Flow.toFixed(2)} g/s`,
+        temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
+        flow: formatCommandFlow(s2), seconds: "180", volume: "0", weight: "0",
+        limiter: { value: p2.toFixed(2), range: Math.max(0.1, p2 * 0.1).toFixed(2) }
+      }
+    );
+    if (shape.enabled) {
+      steps.push(
+        {
+          name: `S3 EARLY real ${c.stage3Flow.toFixed(2)} g/s`,
+          temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
+          flow: formatCommandFlow(shape.earlyCommand), seconds: clampNumber(shape.earlySeconds,3,30,8).toFixed(1), volume: "0", weight: "0",
+          limiter: { value: p3.toFixed(2), range: Math.max(0.1, p3 * 0.1).toFixed(2) }
+        },
+        {
+          name: `S3 MID real ${c.stage3Flow.toFixed(2)} g/s`,
+          temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
+          flow: formatCommandFlow(shape.midCommand), seconds: clampNumber(shape.midSeconds,3,30,14).toFixed(1), volume: "0", weight: "0",
+          limiter: { value: p3.toFixed(2), range: Math.max(0.1, p3 * 0.1).toFixed(2) }
+        },
+        {
+          name: `S3 LATE real ${c.stage3Flow.toFixed(2)} g/s`,
+          temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
+          flow: formatCommandFlow(shape.lateCommand), seconds: "180", volume: "0", weight: "0",
+          limiter: { value: p3.toFixed(2), range: Math.max(0.1, p3 * 0.1).toFixed(2) }
+        }
+      );
+    } else {
+      steps.push({
+        name: `S3 real ${c.stage3Flow.toFixed(2)} g/s`,
+        temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
+        flow: formatCommandFlow(s3), seconds: "180", volume: "0", weight: "0",
+        limiter: { value: p3.toFixed(2), range: Math.max(0.1, p3 * 0.1).toFixed(2) }
+      });
+    }
+    if (steps.length > LIMITS.maxProfileFrames) throw new Error(`HyperEx profile would contain ${steps.length} frames; DE1 limit is ${LIMITS.maxProfileFrames}`);
+    return {
+      title: profileTitleForMode(),
+      author: "ladiosupp / HyperEx",
+      notes: `DE1XL v1.50 HyperEx pulse filtration v${PLUGIN_VERSION}. User flow settings mean desired cup-scale mass flow (g/s). ${calNote} ${mode==="auto"?`Auto release mode: a real 0 bar release frame at S1 weight for ${releaseSoakSeconds.toFixed(1)} s (the user's soak value), then S2 and S3 in the same shot; no second GHC press.` : mode==="on"?"Active release mode: Idle at S1 weight, soak, GHC restart, one skip to S2 and one weight skip to S3.":"Continuous mode: one Espresso; one S1-weight skip to S2, one S2-weight skip to S3; no intermediate Idle/soak/restart."} Optional S3 DECAY COMP uses only natural profile-time transitions inside S3; no extra plugin skipStep calls. Final stop is by Idle. Current-shot regression is advisory only.`,
+      beverage_type: "espresso",
+      steps,
+      tank_temperature: "0", target_weight: "0", target_volume: "0", target_volume_count_start: "0",
+      legacy_profile_type: "settings_2c", type: mode === "auto" ? "advanced" : "flow", lang: "en", hidden: "0",
+      reference_file: "hyperex_pulse_filter", changes_since_last_espresso: "", version: "2"
+    };
+  }
+
+  function calibrationProfileObject(mode) {
+    const c = state.cfg;
+    const normalizedMode = normalizeCalibrationMode(mode || state.calibrationMode);
+    const wp = calibrationWaterPlan(normalizedMode);
+    const program = calibrationProgram(normalizedMode);
+    const calPressure = clampNumber(6.0, LIMITS.pressureMin, Math.min(LIMITS.pressureMax, c.hardPressureLimit), Math.min(6.0, c.hardPressureLimit));
+    const calibrationFrameCount = program.length + (wp.primeSeconds > 0 ? 1 : 0);
+    if (calibrationFrameCount > LIMITS.maxProfileFrames) throw new Error(`Calibration profile would contain ${calibrationFrameCount} frames; DE1 limit is ${LIMITS.maxProfileFrames}`);
+    return {
+      title: calibrationProfileTitle(normalizedMode),
+      author: "ladiosupp / HyperEx",
+      notes: `EMPTY BASKET ONLY. HyperEx v${PLUGIN_VERSION} ${wp.modeLabel} real-flow calibration. Prime ${wp.primeFlow.toFixed(2)} ml/s × ${wp.primeSeconds.toFixed(1)} s, then ${wp.steps} ${wp.algorithm === "target-lut" ? "target-search" : "calibration"} plateaus × ${wp.stepSeconds.toFixed(1)} s; nominal DE1 commanded water ≈${wp.nominalCommandWaterMl} ml. Use a ${wp.recommendedContainerMl} ml or larger catch vessel. The plugin actively stops calibration at about ${wp.hardStopG} g actual collected water to preserve margin below 300 ml. Tank level is checked before PREPARE when live DE1 water-level telemetry is available. Tare the scale, start Espresso manually, and leave the vessel in place until Idle.`,
+      beverage_type: "espresso",
+      steps: [
+        ...(wp.primeSeconds > 0 ? [{
+          name: `CAL PRIME - ${wp.primeFlow.toFixed(2)} ml/s`,
+          temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
+          flow: wp.primeFlow.toFixed(2), seconds: wp.primeSeconds.toFixed(1), volume: "0", weight: "0",
+          limiter: { value: calPressure.toFixed(2), range: Math.max(0.1, calPressure * 0.1).toFixed(2) }
+        }] : []),
+        ...program.map((step, i) => ({
+          name: wp.algorithm === "target-lut"
+            ? `CAL ${step.blockId} target ${Number(step.targetReal).toFixed(1)} - cmd ${Number(step.commandFlow).toFixed(2)}`
+            : `CAL ${wp.modeLabel.toUpperCase()} ${i + 1}/${program.length} - ${Number(step.commandFlow).toFixed(2)} ml/s`,
+          temperature: c.temperature.toFixed(1), sensor: "coffee", pump: "flow", transition: "fast", pressure: "",
+          flow: formatCommandFlow(step.commandFlow), seconds: Number(step.seconds).toFixed(1), volume: "0", weight: "0",
+          limiter: { value: calPressure.toFixed(2), range: Math.max(0.1, calPressure * 0.1).toFixed(2) }
+        }))
+      ],
+      tank_temperature: "0", target_weight: "0", target_volume: "0", target_volume_count_start: "0",
+      legacy_profile_type: "settings_2c", type: "flow", lang: "en", hidden: "0",
+      reference_file: `hyperex_flow_calibration_${wp.mode}`, changes_since_last_espresso: "", version: "2"
+    };
+  }
+
+  async function api(path, options) {
+    const response = await fetch(`${API}${path}`, options || {});
+    if (!response.ok) {
+      let body = "";
+      try { body = await response.text(); } catch (_) {}
+      throw new Error(`${options && options.method ? options.method : "GET"} ${path} -> HTTP ${response.status}${body ? `: ${body.slice(0, 240)}` : ""}`);
+    }
+    return response;
+  }
+
+  function canonicalProfileValue(value) {
+    if (Array.isArray(value)) return value.map(canonicalProfileValue);
+    if (value && typeof value === "object") {
+      const out = {};
+      for (const key of Object.keys(value).sort()) out[key] = canonicalProfileValue(value[key]);
+      return out;
+    }
+    return value;
+  }
+
+  function profilesEquivalent(a, b) {
+    
+    
+    const stored = profile => profile && typeof profile === 'object' ? {
+      title:String(profile.title || ''), author:String(profile.author || ''), notes:String(profile.notes || ''),
+      execution:normalizedProfileExecution(profile)
+    } : null;
+    try { return JSON.stringify(stored(a)) === JSON.stringify(stored(b)); }
+    catch (_) { return false; }
+  }
+
+  function normalizedProfileExecution(profile) {
+    if (!profile || typeof profile !== "object") return null;
+    const num = value => {
+      if (value === null || value === undefined || value === '') return null;
+      const v = Number(value);
+      return Number.isFinite(v) ? round(v, 5) : String(value);
+    };
+    const steps = Array.isArray(profile.steps) ? profile.steps.map(step => {
+      const q = step || {};
+      const pump = String(q.pump || '');
+      return {
+        name:String(q.name || ''), temperature:num(q.temperature), sensor:String(q.sensor || ''),
+        pump, transition:String(q.transition || ''),
+        
+        
+        ...(pump === 'flow' ? {flow:num(q.flow)} : pump === 'pressure' ? {pressure:num(q.pressure)} : {flow:num(q.flow),pressure:num(q.pressure)}),
+        seconds:num(q.seconds), volume:num(q.volume), weight:num(q.weight),
+        limiter:q.limiter ? {value:num(q.limiter.value),range:num(q.limiter.range)} : null,
+        
+        exit:q.exit ? {type:String(q.exit.type || ''),condition:String(q.exit.condition || ''),value:num(q.exit.value)} : null
+      };
+    }) : [];
+    return {
+      beverage_type:String(profile.beverage_type || ''), steps,
+      tank_temperature:num(profile.tank_temperature), target_weight:num(profile.target_weight),
+      target_volume:num(profile.target_volume), target_volume_count_start:num(profile.target_volume_count_start),
+      version:num(profile.version)
+      
+    };
+  }
+
+  function profileExecutionDifferences(actual, expected) {
+    const differences = [];
+    const visit = (a, e, field) => {
+      if (JSON.stringify(a) === JSON.stringify(e)) return;
+      if (a && e && typeof a === 'object' && typeof e === 'object' && Array.isArray(a) === Array.isArray(e)) {
+        const keys = Array.from(new Set(Object.keys(e).concat(Object.keys(a))));
+        for (const key of keys) visit(a[key],e[key],Array.isArray(e) ? `${field}[${key}]` : (field ? `${field}.${key}` : key));
+      } else differences.push({field:field || 'profile',expected:e === undefined ? null : e,actual:a === undefined ? null : a});
+    };
+    visit(normalizedProfileExecution(actual),normalizedProfileExecution(expected),'');
+    if (String(actual && actual.title || '') !== String(expected && expected.title || '')) differences.unshift({field:'title',expected:expected && expected.title || null,actual:actual && actual.title || null});
+    return differences;
+  }
+
+  function profileExecutionEquivalent(a, b) {
+    try {
+      return JSON.stringify(normalizedProfileExecution(a)) === JSON.stringify(normalizedProfileExecution(b));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function profileCommandSummaryFromProfile(profile) {
+    if (!profile || !Array.isArray(profile.steps) || profile.steps.length < 3) return null;
+    const flow = step => { const v = Number(step && step.flow); return Number.isFinite(v) ? round(v, 3) : null; };
+    const steps = profile.steps;
+    const layout = profileLayoutForProfile(profile);
+    const s3steps = steps.slice(layout.s3);
+    const shape = s3steps.length >= 3;
+    return {
+      title: String(profile.title || ""),
+      stage1CommandMlS: flow(steps[layout.s1]),
+      stage2CommandMlS: flow(steps[layout.s2]),
+      stage3Mode: shape ? "shape" : "flat",
+      stage3CommandMlS: shape ? flow(s3steps[1]) : flow(s3steps[0]),
+      s3Shape: shape ? {
+        enabled: true,
+        earlyCommand: flow(s3steps[0]), earlySeconds: round(Number(s3steps[0] && s3steps[0].seconds),1),
+        midCommand: flow(s3steps[1]), midSeconds: round(Number(s3steps[1] && s3steps[1].seconds),1),
+        lateCommand: flow(s3steps[2])
+      } : { enabled:false }
+    };
+  }
+
+  function runtimeProfileTruthPayload() {
+    const expected = state.cfg ? profileObject() : null;
+    const actual = state.workflowProfile;
+    return {
+      selectedTitle: state.workflowTitle || "",
+      verified: !!state.runtimeProfileVerified,
+      readbackAt: state.profileReadbackAt,
+      machineUploadAcknowledged: !!state.machineProfileAckKey,
+      machineProfileIndependentlyReadBack: false,
+      status: state.runtimeProfileStatus || "not verified",
+      expected: expected ? profileCommandSummaryFromProfile(expected) : null,
+      actual: actual ? profileCommandSummaryFromProfile(actual) : null,
+      differences: expected ? profileExecutionDifferences(actual, expected) : []
+    };
+  }
+
+  async function readWorkflowProfile() {
+    const response = await api('/workflow', { method: 'GET' });
+    const body = await response.json();
+    state.profileReadbackAt = new Date().toISOString();
+    return body && body.profile && typeof body.profile === 'object' ? body.profile : null;
+  }
+
+  function invalidateProfileTruth(reason, clearMachineAck) {
+    state.runtimeProfileVerified = false;
+    state.armed = false;
+    state.runtimeProfileStatus = reason || 'verification required';
+    if (clearMachineAck) state.machineProfileAckKey = "";
+  }
+
+  function noteMultiplierChange(value) {
+    const previous = finiteOrNull(state.flowMultiplierCurrent);
+    if (previous !== null && Math.abs(previous - value) > 0.0001) {
+      state.adaptiveHistory = [];
+      state.persistentHistoryCompatibleCount = 0;
+      invalidateProfileTruth('flowMultiplier changed; fresh verification required', true);
+      if (state.diagnosticCurrent && state.diagnosticCurrent.kind === 'hyperex') state.diagnosticCurrent.config.profileTruthVerified = false;
+    }
+  }
+
+  function profileSyncIsIdle() {
+    return state.phase === 'idle' && !state.calibrationActive && state.lastMachineState !== 'espresso';
+  }
+
+  
+  
+  function profileSyncInFlight() {
+    return state.profileSyncBusy > 0;
+  }
+
+  function workflowBrewTemperature(profile) {
+    if(!state.cfg||!profile||!isHyperExProfileTitle(profile.title)||!Array.isArray(profile.steps)||profile.steps.length<3||profile.steps.length>LIMITS.maxProfileFrames)return null;
+    const temps=profile.steps.map(step=>finiteOrNull(step&&step.temperature));
+    if(temps.some(v=>v===null||v<LIMITS.temperatureMin||v>LIMITS.temperatureMax))return null;
+    const value=temps[0];
+    return temps.every(v=>Math.abs(v-value)<0.001)?value:null;
+  }
+
+  function adoptWorkflowBrewTemperature(profile,fromNotification) {
+    if(!profileSyncIsIdle())return false; 
+    const value=workflowBrewTemperature(profile);
+    if(value===null||Math.abs(value-state.cfg.temperature)<0.001)return false;
+    const previous=state.cfg.temperature;
+    state.cfg.temperature=value;
+    refreshLearningStage();
+    if(fromNotification){
+      
+      state.workflowSelectionRevision++;
+      state.temperatureRecheckNeeded=true;
+    }
+    log(`Home/profile brew temperature accepted: ${previous} -> ${value} °C; fresh verification required.`);
+    return true;
+  }
+
+  function recheckHomeTemperatureIfNeeded() {
+    if(!state.temperatureRecheckNeeded||state.runtimeProfileRepairBusy||state.profileVerificationPending||!profileSyncIsIdle())return;
+    state.temperatureRecheckNeeded=false;state.profileVerificationRetryAtMs=0;
+    scheduleProfileVerification('home temperature changed during synchronization');
+  }
+
+  function checkProfileSelection(revision) {
+    if (!profileSyncIsIdle()) throw new Error('Profile sync blocked while shot or calibration is active');
+    if (!isHyperExProfileTitle(state.workflowTitle) || state.workflowSelectionRevision !== revision) throw new Error('Workflow selection changed during verification');
+  }
+
+  function checkProfileSyncContext(profile, revision) {
+    checkProfileSelection(revision);
+    if (!profileExecutionEquivalent(profile, profileObject())) throw new Error('Expected profile changed during verification; retry required');
+  }
+
+  async function verifyAndRepairSelectedHyperExProfile(reason) {
+    if (!state.cfg || !isHyperExProfileTitle(state.workflowTitle)) return;
+    return syncHyperExProfile(true, reason || 'workflow verification');
+  }
+
+  function scheduleProfileVerification(reason) {
+    if (!state.cfg || !isHyperExProfileTitle(state.workflowTitle) || state.runtimeProfileRepairBusy || state.profileVerificationPending || Date.now() < state.profileVerificationRetryAtMs || !profileSyncIsIdle()) return;
+    state.profileVerificationPending = true;
+    state.profileVerificationRetryAtMs = Date.now() + 3000;
+    verifyAndRepairSelectedHyperExProfile(reason).catch(error => {
+      invalidateProfileTruth(`verification failed: ${error.message || error}`, true);
+      log(state.runtimeProfileStatus);
+      emitSkinChanged();
+    }).finally(() => { state.profileVerificationPending = false; recheckHomeTemperatureIfNeeded(); });
+  }
+
+  async function upsertProfile(profile, recordsArg) {
+    const title = profile && profile.title ? String(profile.title) : "";
+    if (!title) throw new Error("profile title missing");
+    let records = Array.isArray(recordsArg) ? recordsArg : null;
+    if (!records) {
+      records = [];
+      try {
+        const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
+        const body = await listResponse.json();
+        if (Array.isArray(body)) records = body;
+      } catch (error) {
+        log(`Profile list read failed before upsert '${title}': ${error.message || error}`);
+      }
+    }
+    const matching = records.filter(r => r && r.profile && String(r.profile.title || '') === title && r.visibility !== 'deleted');
+    if (matching.length) {
+      const exact = matching.find(r => profilesEquivalent(r.profile, profile));
+      if (exact) {
+        log(`Profile '${title}' already current; Decaid write skipped.`);
+        return exact;
+      }
+      const chosen = matching.find(r => !r.isDefault) || matching[0];
+      const response = await api(`/profiles/${encodeURIComponent(chosen.id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
+      });
+      const updated = await response.json();
+      if (updated) { const at = records.findIndex(r => r && r.id === chosen.id); if (at >= 0) records[at] = updated; }
+      return updated;
+    }
+    const response = await api('/profiles', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
+    });
+    const created = await response.json();
+    if (created) records.push(created);
+    return created;
+  }
+
+  async function ensureProfileInstalled(records) {
+    try { await syncHyperExProfile(false, 'startup maintenance', records); }
+    catch (error) { state.profileSyncStatus = `HyperEx profile sync failed: ${error.message || error}`; log(state.profileSyncStatus); }
+  }
+
+  async function hideLegacyCalibrationProfile(recordsArg) {
+    const legacyTitle = HYPEREX_TITLE_PREFIX + " Flow Calibration";
+    if (!legacyTitle || isCalibrationProfileTitle(legacyTitle)) return;
+    if (state.legacyProfileHiddenTitle === legacyTitle) return;
+    try {
+      let records = Array.isArray(recordsArg) ? recordsArg : null;
+      if (!records) {
+        const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
+        const body = await listResponse.json();
+        if (!Array.isArray(body)) return;
+        records = body;
+      }
+      const legacy = records.filter(r => r && r.profile && String(r.profile.title || '') === legacyTitle && r.visibility === 'visible');
+      for (const rec of legacy) {
+        if (!rec.id) continue;
+        await api(`/profiles/${encodeURIComponent(rec.id)}/visibility`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ visibility: 'hidden' })
+        });
+        log(`Legacy single calibration profile '${legacyTitle}' hidden after dual-profile migration.`);
+      }
+      state.legacyProfileHiddenTitle = legacyTitle;
+      storageWrite(STORAGE_LEGACY_PROFILE, legacyTitle);
+    } catch (error) {
+      log(`Legacy calibration profile migration skipped: ${error.message || error}`);
+    }
+  }
+
+  async function ensureCalibrationProfilesInstalled(recordsArg) {
+    let records = Array.isArray(recordsArg) ? recordsArg : null;
+    if (!records) {
+      try {
+        const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
+        const body = await listResponse.json();
+        if (Array.isArray(body)) records = body;
+      } catch (error) {
+        log(`Profile list read failed during calibration profile maintenance: ${error.message || error}`);
+      }
+    }
+    for (const mode of ['low', 'full']) {
+      try {
+        const profile = calibrationProfileObject(mode);
+        const rec = await upsertProfile(profile, records);
+        state.calibrationProfileIds[mode] = rec && rec.id ? rec.id : state.calibrationProfileIds[mode];
+        log(`Calibration profile '${profile.title}' installed/updated.`);
+      } catch (error) {
+        log(`Calibration profile ${calibrationModeConfig(mode).label} auto-install failed: ${error.message || error}`);
+      }
+    }
+    await hideLegacyCalibrationProfile(records);
+  }
+
+  function syncHyperExProfile(updateCurrentWorkflow, reason, records) {
+    if (!profileSyncIsIdle()) return Promise.reject(new Error('Profile writes blocked during an active shot'));
+    if (updateCurrentWorkflow && isHyperExProfileTitle(state.workflowTitle)) invalidateProfileTruth('waiting for fresh workflow readback', false);
+    state.profileSyncBusy++;
+    const task = state.profileSyncQueue.catch(() => {}).then(() => performHyperExProfileSync(updateCurrentWorkflow, reason, records))
+      .finally(() => { state.profileSyncBusy--; });
+    state.profileSyncQueue = task.catch(() => {});
+    return task;
+  }
+
+  async function requireIdleMachineForProfileSync() {
+    const machine = extractMachine(await getMachineSnapshot());
+    if (!machine.machineState || machine.machineState === 'espresso') throw new Error('Machine is busy or state is unavailable; profile writes blocked');
+    if (!profileSyncIsIdle()) throw new Error('Shot began during profile verification');
+  }
+
+  async function performHyperExProfileSync(updateCurrentWorkflow, reason, records) {
+    if (!profileSyncIsIdle()) throw new Error('Profile writes blocked during an active shot');
+    const selected = !!(updateCurrentWorkflow && isHyperExProfileTitle(state.workflowTitle));
+    const revision = state.workflowSelectionRevision;
+    state.runtimeProfileRepairBusy = selected;
+    try {
+      if (selected) {
+        invalidateProfileTruth('checking fresh workflow / multiplier readback', false);
+        await requireIdleMachineForProfileSync();
+        checkProfileSelection(revision);
+        if (!state.calibrationStorageLoaded || !state.overrideStorageLoaded || !state.s2RefillStorageLoaded || !state.scopeStorageLoaded || !state.scopedOriginalStorageLoaded || !state.learningContextLoaded) throw new Error('Waiting for stored calibration and overrides / multiplier scope / history context');
+        if (state.scopeMode === 'hyperex') {
+          if (state.scopeChangeBusy) throw new Error('Scoped multiplier change still pending');
+          await enterHyperExScopedMultiplier('profile verification', revision);
+          checkProfileSelection(revision);
+        }
+        const multiplier = await refreshFlowMultiplier(true, true);
+        recomputeCalibrationUsability();
+        if (state.lutBootstrapMode) {
+          if (!Number.isFinite(multiplier)) throw new Error('Bootstrap arming requires a readable DE1 multiplier');
+        } else if (!state.calibrationMapUsable || !multiplierClose(multiplier, calibrationBaseMultiplier())) throw new Error('Valid LUT and matching actual multiplier required before arming');
+      }
+      recomputeCalibrationUsability();
+      
+      
+      let actual=null;
+      if(selected){
+        actual=await readWorkflowProfile();checkProfileSelection(revision);
+        if(!actual||!isHyperExProfileTitle(actual.title))throw new Error('GET /workflow no longer selects HyperEx');
+        adoptWorkflowBrewTemperature(actual,false);
+      }
+      const profile = profileObject();
+      if (selected) checkProfileSyncContext(profile, revision);
+      const rec = await upsertProfile(profile, records);
+      state.hyperExProfileId = rec && rec.id ? rec.id : state.hyperExProfileId;
+      if (selected) {
+        checkProfileSyncContext(profile, revision);
+        state.workflowProfile = actual;
+        checkProfileSyncContext(profile, revision);
+        if (!actual || !isHyperExProfileTitle(actual.title)) throw new Error('GET /workflow no longer selects HyperEx');
+        const changed = !profileExecutionEquivalent(actual, profile);
+        if (changed) {
+          state.machineProfileAckKey = "";
+          await requireIdleMachineForProfileSync();
+          checkProfileSyncContext(profile, revision);
+          await api('/workflow', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({profile}) });
+          checkProfileSyncContext(profile, revision);
+          state.workflowTitle = profile.title;
+        }
+        const key = JSON.stringify(normalizedProfileExecution(profile));
+        if (changed || state.machineProfileAckKey !== key) {
+          
+          await requireIdleMachineForProfileSync();
+          checkProfileSyncContext(profile, revision);
+          await api('/machine/profile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(profile) });
+          checkProfileSyncContext(profile, revision);
+          state.machineProfileAckKey = key;
+        }
+        const readback = await readWorkflowProfile();
+        state.workflowProfile = readback;
+        checkProfileSyncContext(profile, revision);
+        if (!readback || readback.title !== profile.title || !profileExecutionEquivalent(readback, profile)) {
+          const differences = profileExecutionDifferences(readback, profile);
+          log(`Workflow execution mismatch details: ${JSON.stringify(differences)}`);
+          const detail = differences.slice(0,6).map(d => `${d.field}: expected ${JSON.stringify(d.expected)}, actual ${JSON.stringify(d.actual)}`).join('; ');
+          throw new Error(`Final GET /workflow does not match expected LUT/adaptive profile${detail ? ': '+detail : ''}`);
+        }
+        const multiplier = await refreshFlowMultiplier(true, true);
+        checkProfileSyncContext(profile, revision);
+        if (!multiplierClose(multiplier, calibrationBaseMultiplier()) || state.machineProfileAckKey !== key) throw new Error('Multiplier or machine upload acknowledgement changed during verification');
+        state.temperatureRecheckNeeded=false;
+        state.runtimeProfileVerified = true;
+        state.workflowTitle = profile.title;
+        state.profileReadbackAt = new Date().toISOString();
+        state.runtimeProfileStatus = `GET /workflow verified; machine upload acknowledged (${reason || 'sync'})`;
+        state.runtimeProfileMismatchAbortSent = false;
+        state.armed = !!state.cfg.enabled;
+        restoreAdaptiveHistoryFromPersistentFile();
+      }
+      state.profileSyncStatus = `HyperEx profile synced ${new Date().toISOString()}`;
+      emitSkinChanged();
+      return rec;
+    } catch (error) {
+      if (selected) invalidateProfileTruth(`verification failed: ${error.message || error}`, true);
+      state.profileSyncStatus = `HyperEx sync failed: ${error.message || error}`;
+      emitSkinChanged();
+      throw error;
+    } finally { state.runtimeProfileRepairBusy = false; recheckHomeTemperatureIfNeeded(); }
+  }
+
+  async function prepareCalibrationProfile(options) {
+    const opts = options && typeof options === 'object' ? options : {};
+    const preflight = waterPreflightStatus();
+    if (preflight.status === 'block') throw new Error(`Water preflight blocked: ${preflight.message}`);
+    if (preflight.status === 'unknown' && opts.allowUnknownWater !== true) throw new Error(`Water preflight unavailable: ${preflight.message}`);
+    if (preflight.status === 'warn' && opts.allowLowMargin !== true) throw new Error(`Water preflight warning: ${preflight.message}`);
+    state.calibrationWaterPreflightApprovedUntilMs = Date.now() + 10 * 60 * 1000;
+    const current = await refreshFlowMultiplier(true);
+    let base = finiteOrNull(state.calibrationPendingMultiplier);
+    if (!Number.isFinite(base)) base = Number(current);
+    if (!Number.isFinite(base)) throw new Error('Cannot determine current DE1 flowMultiplier');
+    state.calibrationPendingMultiplier = base;
+    storageWrite(STORAGE_PENDING_MULT, String(base));
+
+    
+    
+    if (state.scopeMode === 'hyperex') {
+      if (finiteOrNull(state.scopedOriginalMultiplier) === null) { state.scopedOriginalMultiplier = current; storageWrite(STORAGE_SCOPED_ORIGINAL, String(current)); }
+      await writeFlowMultiplier(base, 'prepare Flow Calibration');
+      state.scopedAppliedMultiplier = base;
+    }
+
+    const selectedMode = normalizeCalibrationMode(state.calibrationMode);
+    const profile = calibrationProfileObject(selectedMode);
+    const rec = await upsertProfile(profile);
+    state.calibrationProfileIds[selectedMode] = rec && rec.id ? rec.id : state.calibrationProfileIds[selectedMode];
+    await api('/workflow', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile })
+    });
+    state.workflowTitle = profile.title;
+    state.calibrationArmed = true;
+    state.armed = false;
+    emitSkinChanged();
+    { const wp = calibrationWaterPlan(selectedMode); log(`Calibration profile '${profile.title}' selected. EMPTY BASKET: prime ${wp.primeFlow} ml/s × ${wp.primeSeconds}s + ${calibrationCommands().length} measured plateaus; nominal command water ≈${wp.nominalCommandWaterMl} ml; use >=${wp.recommendedContainerMl} ml catch vessel. Tare scale, then start Espresso manually and let all plateaus finish (unless the actual-water safety stop is reached).`); }
+    return calibrationStatusPayload();
+  }
+
+  async function requestMachineState(machineState) {
+    diagnosticEvent("command_request", { machineState });
+    await api(`/machine/state/${machineState}`, { method: "PUT" });
+    diagnosticEvent("command_accepted", { machineState });
+    diagnosticSample(`command:${machineState}`, true);
+    log(`Machine command accepted: ${machineState}`);
+  }
+
+  async function getMachineSnapshot() {
+    const response = await api(`/machine/state`, { method: "GET" });
+    return await response.json();
+  }
+
+  function extractMachine(payload) {
+    const p = payload || {};
+    const m = p.machine || p;
+    const nestedState = m.state && typeof m.state === "object" ? m.state : (p.state && typeof p.state === "object" ? p.state : null);
+    const machineState = nestedState ? nestedState.state : (typeof p.machineState === "string" ? p.machineState : (typeof p.state === "string" ? p.state : null));
+    const substate = nestedState ? nestedState.substate : (p.machineSubstate || p.substate || null);
+    return {
+      machineState,
+      substate,
+      pressure: n(m.pressure !== undefined ? m.pressure : p.pressure, 0),
+      telemetryValid: finiteOrNull(m.pressure !== undefined ? m.pressure : p.pressure)!==null && finiteOrNull(m.flow !== undefined ? m.flow : p.flow)!==null,
+      flow: n(m.flow !== undefined ? m.flow : p.flow, 0),
+      targetFlow: Number.isFinite(Number(m.targetFlow !== undefined ? m.targetFlow : p.targetFlow)) ? Number(m.targetFlow !== undefined ? m.targetFlow : p.targetFlow) : null,
+      targetPressure: Number.isFinite(Number(m.targetPressure !== undefined ? m.targetPressure : p.targetPressure)) ? Number(m.targetPressure !== undefined ? m.targetPressure : p.targetPressure) : null,
+      machineWeightFlow: Number.isFinite(Number(m.weightFlow !== undefined ? m.weightFlow : p.weightFlow)) ? Number(m.weightFlow !== undefined ? m.weightFlow : p.weightFlow) : null,
+      profileFrame: m.profileFrame !== undefined ? m.profileFrame : (p.profileFrame !== undefined ? p.profileFrame : null)
+    };
+  }
+
+
+  function scaleTimestampSeconds(value) {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      const numeric = Number(trimmed);
+      if (Number.isFinite(numeric)) return scaleTimestampSeconds(numeric);
+      const parsed = Date.parse(trimmed);
+      return Number.isFinite(parsed) ? parsed / 1000 : null;
+    }
+    const v = Number(value);
+    if (!Number.isFinite(v)) return null;
+    const a = Math.abs(v);
+    
+    
+    if (a >= 1e17) return v / 1e9;
+    if (a >= 1e14) return v / 1e6;
+    if (a >= 1e11) return v / 1e3;
+    if (a >= 1e9) return v;
+    return v;
+  }
+
+  function captureRawScaleSample(snapshot, weight, decaidWeightFlow, receivedAtMs) {
+    const run = state.diagnosticCurrent;
+    const sourceTimestamp = snapshot && snapshot.timestamp !== undefined ? snapshot.timestamp : null;
+    const timestampSeconds = scaleTimestampSeconds(sourceTimestamp);
+    let rawDwDt = null;
+    let tareReset = false;
+
+    if (run && Array.isArray(run.rawScaleSamples) && run.rawScaleSamples.length) {
+      const prev = run.rawScaleSamples[run.rawScaleSamples.length - 1];
+      const drop = Number(prev.weightG) - weight;
+      tareReset = Number.isFinite(drop) && state.cfg && drop >= state.cfg.scaleResetThreshold;
+      const dt = Number.isFinite(timestampSeconds) && Number.isFinite(Number(prev.scaleTimestampSeconds))
+        ? timestampSeconds - Number(prev.scaleTimestampSeconds) : null;
+      if (!tareReset && Number.isFinite(dt) && dt > 0 && dt <= 10) {
+        rawDwDt = (weight - Number(prev.weightG)) / dt;
+      }
+    }
+
+    state.latestRawDwDt = Number.isFinite(rawDwDt) ? rawDwDt : null;
+    if (!run) return;
+    run.rawScaleSamples.push({
+      tMs: Math.max(0, receivedAtMs - run.startedAtMs),
+      phase: state.phase,
+      profileFrame: state.lastFrame,
+      physicalProfileFrame: state.lastPhysicalFrame,
+      targetFlowMlS: round(state.lastTargetFlow, 4),
+      machineFlowMlS: round(state.lastFlow, 4),
+      pressureBar: round(state.lastPressure, 4),
+      scaleTimestamp: sourceTimestamp,
+      scaleTimestampSeconds: Number.isFinite(timestampSeconds) ? round(timestampSeconds, 6) : null,
+      weightG: round(weight, 4),
+      rawDwDtGS: Number.isFinite(rawDwDt) ? round(rawDwDt, 4) : null,
+      decaidWeightFlowGS: Number.isFinite(decaidWeightFlow) ? round(decaidWeightFlow, 4) : null,
+      tareReset
+    });
+    if (run.rawScaleSamples.length > 12000) run.rawScaleSamples.shift();
+  }
+
+
+  function clearScaleReconnectTimer() {
+    if (state.scaleReconnectTimer !== null) {
+      clearTimeout(state.scaleReconnectTimer);
+      state.scaleReconnectTimer = null;
+    }
+  }
+
+  function scheduleScaleReconnect(delayMs) {
+    clearScaleReconnectTimer();
+    state.scaleReconnectTimer = setTimeout(() => {
+      state.scaleReconnectTimer = null;
+      connectScaleStream();
+    }, Math.max(250, delayMs || 1000));
+  }
+
+  function onScaleSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object") return;
+    if (snapshot.status === "connected") {
+      if (!state.scaleConnected) log("Scale snapshot stream reports connected.");
+      state.scaleConnected = true;
+      return;
+    }
+    if (snapshot.status === "disconnected") {
+      state.scaleConnected = false;
+      log("Scale snapshot stream reports disconnected.");
+      return;
+    }
+
+    const weight = Number(snapshot.weight);
+    if (!Number.isFinite(weight)) return;
+    const weightFlow = Number(snapshot.weightFlow);
+    const receivedAtMs = Date.now();
+    state.scaleConnected = true;
+    state.latestRawWeight = weight;
+    state.latestWeightFlow = Number.isFinite(weightFlow) ? weightFlow : 0;
+    state.latestScaleAtMs = receivedAtMs;
+    state.latestScaleTimestamp = snapshot.timestamp !== undefined ? snapshot.timestamp : null;
+    state.lastWeightFlow = state.latestWeightFlow;
+    captureRawScaleSample(snapshot, weight, Number.isFinite(weightFlow) ? weightFlow : null, receivedAtMs);
+
+    if (state.phase === "idle" || state.phase === "aborted") return;
+
+    updateCumulativeWeight(weight);
+    diagnosticSample("scale", false);
+
+    const releaseModeValue = releaseMode(state.cfg);
+    if(releaseModeValue==="off"&&["stage1","stage2","stage3"].includes(state.phase)&&state.cumulativeWeight>=state.cfg.finalWeight){finishSequence();return;}
+    if (state.phase === "stage1" && state.cumulativeWeight >= state.cfg.stage1Weight) {
+      if(releaseModeValue==="auto")beginAutoRelease();
+      else if(releaseModeValue==="on")beginDump();
+      else beginContinuousStage2();
+      return;
+    }
+    if (state.phase === "stage2") {
+      if (state.cumulativeWeight >= state.cfg.finalWeight) {
+        finishSequence();
+        return;
+      }
+      if (state.cumulativeWeight >= state.cfg.stage2Weight) {
+        beginStage3LowFlow();
+        return;
+      }
+    }
+    if (state.phase === "stage3" && state.cumulativeWeight >= state.cfg.finalWeight) {
+      finishSequence();
+    }
+  }
+
+  function handleScaleTransportEvent(event) {
+    if (!event) return;
+    if (event.type === "data") {
+      try {
+        const payload = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
+        onScaleSnapshot(payload);
+      } catch (error) {
+        log(`Scale snapshot parse error: ${error.message || error}`);
+      }
+      return;
+    }
+    if (event.type === "close" || event.type === "error") {
+      state.scaleConnected = false;
+      state.scaleHandle = null;
+      log(`Scale snapshot stream ${event.type}; reconnecting.`);
+      scheduleScaleReconnect(1000);
+    }
+  }
+
+  function connectScaleStream() {
+    if (state.scaleHandle !== null) return;
+    clearScaleReconnectTimer();
+    host.transport.open({kind: "websocket", url: SCALE_WS})
+      .then((opened) => {
+        if (!opened || !opened.handle) throw new Error("scale websocket opened without a handle");
+        state.scaleHandle = opened.handle;
+        host.transport.onEvent(opened.handle, handleScaleTransportEvent);
+        log("Connected to Decaid scale snapshot stream.");
+      })
+      .catch((error) => {
+        state.scaleHandle = null;
+        state.scaleConnected = false;
+        log(`Scale snapshot stream connection failed: ${error.message || error}; retrying.`);
+        scheduleScaleReconnect(1000);
+      });
+  }
+
+  function closeScaleStream() {
+    clearScaleReconnectTimer();
+    const handle = state.scaleHandle;
+    state.scaleHandle = null;
+    state.scaleConnected = false;
+    if (handle !== null) {
+      host.transport.close(handle).catch(() => {});
+    }
+  }
+
+  function clearWaterReconnectTimer() {
+    if (state.waterReconnectTimer !== null) {
+      clearTimeout(state.waterReconnectTimer);
+      state.waterReconnectTimer = null;
+    }
+  }
+
+  function scheduleWaterReconnect(delayMs) {
+    clearWaterReconnectTimer();
+    state.waterReconnectTimer = setTimeout(() => {
+      state.waterReconnectTimer = null;
+      connectWaterLevelStream();
+    }, Math.max(500, delayMs || 1500));
+  }
+
+  function waterPreflightStatus() {
+    const cfg = calibrationModeConfig();
+    const current = finiteOrNull(state.waterCurrentLevelMm);
+    const refill = finiteOrNull(state.waterRefillLevelMm);
+    const ageMs = state.waterLevelAtMs > 0 ? Date.now() - state.waterLevelAtMs : null;
+    const fresh = current !== null && refill !== null && ageMs !== null && ageMs <= 5000;
+    if (!fresh) {
+      return {
+        status: 'unknown', available: false, fresh: false,
+        currentLevelMm: round(current, 2), refillLevelMm: round(refill, 2),
+        marginMm: current !== null && refill !== null ? round(current - refill, 2) : null,
+        ageMs,
+        message: 'Live DE1 tank level is unavailable or stale. Manually verify the tank before calibration.'
+      };
+    }
+    const margin = current - refill;
+    if (current <= refill || margin < Number(cfg.waterBlockMarginMm || 0)) {
+      return {
+        status: 'block', available: true, fresh: true,
+        currentLevelMm: round(current, 2), refillLevelMm: round(refill, 2), marginMm: round(margin, 2), ageMs,
+        message: `Tank margin is too small for ${cfg.label}. Refill the tank before calibration.`
+      };
+    }
+    if (margin < Number(cfg.waterWarnMarginMm || 0)) {
+      return {
+        status: 'warn', available: true, fresh: true,
+        currentLevelMm: round(current, 2), refillLevelMm: round(refill, 2), marginMm: round(margin, 2), ageMs,
+        message: `Tank is above the DE1 refill threshold but the remaining height margin is only ${round(margin,1)} mm. Refill is recommended.`
+      };
+    }
+    return {
+      status: 'ok', available: true, fresh: true,
+      currentLevelMm: round(current, 2), refillLevelMm: round(refill, 2), marginMm: round(margin, 2), ageMs,
+      message: `Tank level margin is ${round(margin,1)} mm above the refill threshold.`
+    };
+  }
+
+  function handleWaterTransportEvent(event) {
+    if (!event) return;
+    if (event.type === 'data') {
+      try {
+        const payload = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!payload || typeof payload !== 'object') return;
+        const current = Number(payload.currentLevel);
+        const refill = Number(payload.refillLevel);
+        if (Number.isFinite(current) && Number.isFinite(refill)) {
+          state.waterCurrentLevelMm = current;
+          state.waterRefillLevelMm = refill;
+          state.waterLevelAtMs = Date.now();
+          state.waterLevelConnected = true;
+        }
+      } catch (error) {
+        log(`Water-level parse error: ${error.message || error}`);
+      }
+      return;
+    }
+    if (event.type === 'close' || event.type === 'error') {
+      state.waterLevelConnected = false;
+      state.waterHandle = null;
+      scheduleWaterReconnect(1500);
+    }
+  }
+
+  function connectWaterLevelStream() {
+    if (state.waterHandle !== null) return;
+    clearWaterReconnectTimer();
+    host.transport.open({kind: 'websocket', url: WATER_WS})
+      .then(opened => {
+        if (!opened || !opened.handle) throw new Error('water-level websocket opened without a handle');
+        state.waterHandle = opened.handle;
+        state.waterLevelConnected = true;
+        host.transport.onEvent(opened.handle, handleWaterTransportEvent);
+        log('Connected to Decaid DE1 water-level stream.');
+      })
+      .catch(error => {
+        state.waterHandle = null;
+        state.waterLevelConnected = false;
+        log(`DE1 water-level stream connection failed: ${error.message || error}; retrying.`);
+        scheduleWaterReconnect(1500);
+      });
+  }
+
+  function closeWaterLevelStream() {
+    clearWaterReconnectTimer();
+    const handle = state.waterHandle;
+    state.waterHandle = null;
+    state.waterLevelConnected = false;
+    if (handle !== null) host.transport.close(handle).catch(() => {});
+  }
+
+  function averageFinite(values) {
+    const a = values.map(Number).filter(Number.isFinite);
+    return a.length ? a.reduce((sum, v) => sum + v, 0) / a.length : null;
+  }
+
+  function linearRegression(points) {
+    const clean = points.filter(p => Number.isFinite(Number(p.x)) && Number.isFinite(Number(p.y)));
+    if (clean.length < 3) return null;
+    const mx = clean.reduce((s, p) => s + Number(p.x), 0) / clean.length;
+    const my = clean.reduce((s, p) => s + Number(p.y), 0) / clean.length;
+    let sxx = 0, sxy = 0, syy = 0;
+    for (const p of clean) {
+      const dx = Number(p.x) - mx, dy = Number(p.y) - my;
+      sxx += dx * dx; sxy += dx * dy; syy += dy * dy;
+    }
+    if (sxx <= 0) return null;
+    const slope = sxy / sxx;
+    const intercept = my - slope * mx;
+    const r2 = syy > 0 ? Math.max(0, Math.min(1, (sxy * sxy) / (sxx * syy))) : 1;
+    return { slope, intercept, r2, n: clean.length };
+  }
+
+  function analyzeCalibrationRun(run, baseMultiplier) {
+    const raw = run && Array.isArray(run.rawScaleSamples) ? run.rawScaleSamples : [];
+    const plateauResults = [];
+    const mode = normalizeCalibrationMode(run && run.config && run.config.calibrationMode || state.calibrationMode);
+    const modeCfg = calibrationModeConfig(mode);
+    const program = Array.isArray(run && run.config && run.config.calibrationProgram)
+      ? run.config.calibrationProgram.map(x => ({
+          blockId: String(x.blockId || ''), targetSource: String(x.targetSource || ''),
+          targetReal: finiteOrNull(x.targetReal), commandFlow: Number(x.commandFlow),
+          seconds: Number(x.seconds || modeCfg.stepSeconds),
+          settleSeconds: Number(x.settleSeconds || modeCfg.settleSeconds),
+          windowSeconds: Number(x.windowSeconds || modeCfg.windowSeconds)
+        })).filter(x => Number.isFinite(x.commandFlow))
+      : calibrationProgram(mode);
+    const frameOffset = Number(modeCfg.primeSeconds || 0) > 0 ? 1 : 0;
+
+    for (let i = 0; i < program.length; i += 1) {
+      const step = program[i];
+      const frame = i + frameOffset;
+      const cmd = Number(step.commandFlow);
+      const settleMs = Number(step.settleSeconds || modeCfg.settleSeconds) * 1000;
+      const windowMs = Number(step.windowSeconds || modeCfg.windowSeconds) * 1000;
+      const frameSamples = raw.filter(r => Number(r.profileFrame) === frame && Number.isFinite(Number(r.weightG)));
+      if (!frameSamples.length) {
+        plateauResults.push({ frame, blockId: step.blockId || '', targetReal: step.targetReal, commandFlow: cmd, valid: false, acceptedInMap: false, reason: 'no raw scale samples' });
+        continue;
+      }
+      const firstT = Math.min(...frameSamples.map(r => Number(r.tMs)));
+      const lastT = Math.max(...frameSamples.map(r => Number(r.tMs)));
+      const startT = Math.max(firstT + settleMs, lastT - windowMs);
+      const window = frameSamples.filter(r => Number(r.tMs) >= startT && !r.tareReset);
+      const regPoints = window.map(r => ({
+        x: Number.isFinite(Number(r.scaleTimestampSeconds)) ? Number(r.scaleTimestampSeconds) : Number(r.tMs) / 1000,
+        y: Number(r.weightG)
+      }));
+      const reg = linearRegression(regPoints);
+      const machineFlow = averageFinite(window.map(r => r.machineFlowMlS));
+      const pressure = averageFinite(window.map(r => r.pressureBar));
+      const decaid = averageFinite(window.map(r => r.decaidWeightFlowGS));
+      const actual = reg ? reg.slope : null;
+      const r2Min = modeCfg.algorithm === 'target-lut' ? 0.96 : 0.95;
+      const valid = !!reg && reg.n >= 8 && Number.isFinite(actual) && actual > 0.05 && reg.r2 >= r2Min;
+      plateauResults.push({
+        frame, blockId: step.blockId || '', targetSource: step.targetSource || '', targetReal: round(step.targetReal, 3),
+        commandFlow: cmd, actualFlow: round(actual, 4), machineFlow: round(machineFlow, 4),
+        decaidWeightFlow: round(decaid, 4), pressure: round(pressure, 4), r2: reg ? round(reg.r2, 5) : null,
+        samples: reg ? reg.n : window.length, fitStartMs: Math.round(startT), fitEndMs: Math.round(lastT),
+        valid, acceptedInMap: false,
+        reason: valid ? '' : (!reg ? 'insufficient fit' : reg.n < 8 ? `too few samples ${reg.n}` : reg.r2 < r2Min ? `low R2 ${round(reg.r2,3)}` : 'invalid/near-zero slope')
+      });
+    }
+
+    
+    
+    
+    if (modeCfg.algorithm === 'target-lut') {
+      const anchors = [];
+      const targetCoverage = [];
+      const blocks = [];
+      for (const step of program) {
+        if (!step.blockId || blocks.some(b => b.id === step.blockId)) continue;
+        blocks.push({ id: step.blockId, targetSource: step.targetSource || '', target: Number(step.targetReal) });
+      }
+
+      for (const block of blocks) {
+        const target = Number(block.target);
+        const candidates = plateauResults
+          .filter(p => p.blockId === block.id && p.valid)
+          .sort((a, b) => Number(a.commandFlow) - Number(b.commandFlow));
+        const monotonic = [];
+        for (const p of candidates) {
+          if (!monotonic.length || Number(p.actualFlow) > Number(monotonic[monotonic.length - 1].actualFlow) + 0.03) {
+            monotonic.push(p);
+          } else {
+            p.reason = `non-monotonic in ${block.id} vs ${round(monotonic[monotonic.length - 1].actualFlow,3)} g/s`;
+          }
+        }
+
+        const nearTolerance = target >= 4 ? 0.40 : target >= 1.8 ? 0.25 : 0.20;
+        const maxGap = target >= 4 ? 1.25 : target >= 1.8 ? 0.85 : 0.75;
+        let nearest = null;
+        for (const p of monotonic) {
+          const err = Math.abs(Number(p.actualFlow) - target);
+          if (!nearest || err < nearest.err) nearest = { p, err };
+        }
+
+        let lo = null, hi = null;
+        for (const p of monotonic) {
+          const y = Number(p.actualFlow);
+          if (y <= target) lo = p;
+          if (y >= target && !hi) hi = p;
+        }
+
+        let command = null, machineFlow = null, quality = null, source = [];
+        if (lo && hi && lo !== hi) {
+          const ya = Number(lo.actualFlow), yb = Number(hi.actualFlow);
+          const gap = yb - ya;
+          if (gap > 0 && gap <= maxGap) {
+            const f = (target - ya) / gap;
+            command = Number(lo.commandFlow) + f * (Number(hi.commandFlow) - Number(lo.commandFlow));
+            if (Number.isFinite(Number(lo.machineFlow)) && Number.isFinite(Number(hi.machineFlow))) {
+              machineFlow = Number(lo.machineFlow) + f * (Number(hi.machineFlow) - Number(lo.machineFlow));
+            }
+            quality = 'tight-bracket';
+            source = [lo, hi];
+          }
+        }
+        if (!Number.isFinite(command) && nearest && nearest.err <= nearTolerance) {
+          command = Number(nearest.p.commandFlow);
+          machineFlow = Number(nearest.p.machineFlow);
+          quality = 'near-hit';
+          source = [nearest.p];
+        }
+
+        for (const p of source) {
+          p.acceptedInMap = true;
+          p.reason = `${quality} source for ${block.id} ${round(target,2)} g/s`;
+        }
+        for (const p of monotonic) {
+          if (!p.acceptedInMap && !p.reason) p.reason = `valid ${block.id} search point`;
+        }
+
+        const gap = lo && hi ? Number(hi.actualFlow) - Number(lo.actualFlow) : null;
+        const ok = Number.isFinite(command);
+        targetCoverage.push({
+          blockId: block.id, targetSource: block.targetSource, target: round(target, 3), ok, quality,
+          commandFlow: round(command, 4), nearestError: nearest ? round(nearest.err, 4) : null,
+          lowerActual: lo ? lo.actualFlow : null, upperActual: hi ? hi.actualFlow : null,
+          lowerCommand: lo ? lo.commandFlow : null, upperCommand: hi ? hi.commandFlow : null,
+          gap: round(gap, 4), maxGap, nearTolerance
+        });
+        if (ok) {
+          anchors.push({
+            blockId: block.id, targetSource: block.targetSource,
+            actualFlow: round(target, 4), commandFlow: round(command, 4), machineFlow: round(machineFlow, 4),
+            r2: source.length ? round(Math.min(...source.map(p => Number(p.r2))), 5) : null,
+            samples: source.length ? Math.min(...source.map(p => Number(p.samples || 0))) : null,
+            quality
+          });
+        }
+      }
+
+      anchors.sort((a, b) => Number(a.actualFlow) - Number(b.actualFlow));
+      let monotonicCommands = anchors.length >= 3;
+      for (let i = 1; i < anchors.length; i += 1) {
+        if (!(Number(anchors[i].commandFlow) > Number(anchors[i - 1].commandFlow) + 0.02)) monotonicCommands = false;
+      }
+      const coversTargets = blocks.length >= 3 && anchors.length === blocks.length && targetCoverage.every(x => x.ok) && monotonicCommands;
+
+      let suggested = null, displayFactor = null;
+      const displayPts = anchors.filter(p => Number.isFinite(Number(p.machineFlow)) && Number(p.machineFlow) > 0.12);
+      if (coversTargets && Number.isFinite(Number(baseMultiplier)) && displayPts.length >= 3) {
+        let num = 0, den = 0;
+        for (const p of displayPts) {
+          const x = Number(p.machineFlow), y = Number(p.actualFlow);
+          num += x * y; den += x * x;
+        }
+        if (den > 0) {
+          displayFactor = num / den;
+          suggested = Math.max(0.13, Math.min(2.0, Number(baseMultiplier) * displayFactor));
+        }
+      }
+
+      const actuals = anchors.map(p => Number(p.actualFlow));
+      const map = {
+        schema: 3,
+        algorithm: 'v0.1.38-target-lut',
+        createdAt: new Date().toISOString(), calibrationMode: mode,
+        baseFlowMultiplier: round(baseMultiplier, 4), valid: coversTargets, coversTargets,
+        targetCoverage, targetAnchors: anchors,
+        actualRange: anchors.length ? [round(Math.min(...actuals), 4), round(Math.max(...actuals), 4)] : null,
+        desiredRange: anchors.length ? [round(Math.min(...actuals), 4), round(Math.max(...actuals), 4)] : null,
+        points: anchors.map(p => ({
+          commandFlow: p.commandFlow, actualFlow: p.actualFlow, machineFlow: p.machineFlow,
+          r2: p.r2, samples: p.samples, quality: p.quality, blockId: p.blockId, targetSource: p.targetSource
+        })),
+        suggestedFlowMultiplier: round(suggested, 4), displayScaleFactor: round(displayFactor, 4)
+      };
+      if (!monotonicCommands && anchors.length) {
+        for (const x of targetCoverage) if (x.ok) x.warning = 'anchor commands are not strictly increasing';
+      }
+      return { valid: map.valid, map, plateauResults };
+    }
+
+    
+    const validByCommand = plateauResults.filter(p => p.valid).sort((a, b) => a.commandFlow - b.commandFlow);
+    const monotonic = [];
+    for (const p of validByCommand) {
+      if (!monotonic.length || Number(p.actualFlow) > Number(monotonic[monotonic.length - 1].actualFlow) + 0.03) {
+        p.acceptedInMap = true; p.reason = 'used'; monotonic.push(p);
+      } else {
+        p.acceptedInMap = false;
+        p.reason = `non-monotonic vs previous ${round(monotonic[monotonic.length - 1].actualFlow,3)} g/s`;
+      }
+    }
+    const desired = [state.cfg.stage1Flow, state.cfg.stage2Flow, state.cfg.stage3Flow].map(Number).filter(Number.isFinite);
+    const minDesired = desired.length ? Math.min(...desired) : 1.5;
+    const maxDesired = desired.length ? Math.max(...desired) : 5.0;
+    const minActual = monotonic.length ? Number(monotonic[0].actualFlow) : null;
+    const maxActual = monotonic.length ? Number(monotonic[monotonic.length - 1].actualFlow) : null;
+    const targetCoverage = desired.map(target => {
+      let lo = null, hi = null;
+      for (const p of monotonic) {
+        const y = Number(p.actualFlow);
+        if (y <= target) lo = p;
+        if (y >= target && !hi) hi = p;
+      }
+      const gap = lo && hi ? Number(hi.actualFlow) - Number(lo.actualFlow) : null;
+      const maxGap = target <= 2.05 ? 0.85 : 1.25;
+      const ok = !!lo && !!hi && Number.isFinite(gap) && gap <= maxGap;
+      return { target: round(target, 3), ok, lowerActual: lo ? lo.actualFlow : null, upperActual: hi ? hi.actualFlow : null,
+        lowerCommand: lo ? lo.commandFlow : null, upperCommand: hi ? hi.commandFlow : null, gap: round(gap, 4), maxGap };
+    });
+    const coversTargets = monotonic.length >= 5 && targetCoverage.length > 0 && targetCoverage.every(x => x.ok);
+    const displayPts = monotonic.filter(p => Number.isFinite(Number(p.machineFlow)) && Number(p.machineFlow) > 0.12);
+    let suggested = null, displayFactor = null;
+    if (coversTargets && Number.isFinite(Number(baseMultiplier)) && displayPts.length >= 3) {
+      let num = 0, den = 0;
+      for (const p of displayPts) { const x = Number(p.machineFlow), y = Number(p.actualFlow); num += x * y; den += x * x; }
+      if (den > 0) { displayFactor = num / den; suggested = Math.max(0.13, Math.min(2.0, Number(baseMultiplier) * displayFactor)); }
+    }
+    const map = {
+      schema: 3, algorithm: 'v0.1.38-full-staircase', createdAt: new Date().toISOString(), calibrationMode: mode,
+      baseFlowMultiplier: round(baseMultiplier, 4), valid: coversTargets, coversTargets, targetCoverage,
+      actualRange: monotonic.length ? [round(minActual, 4), round(maxActual, 4)] : null,
+      desiredRange: [round(minDesired, 4), round(maxDesired, 4)],
+      points: monotonic.map(p => ({ commandFlow: p.commandFlow, actualFlow: p.actualFlow, machineFlow: p.machineFlow, r2: p.r2, samples: p.samples })),
+      suggestedFlowMultiplier: round(suggested, 4), displayScaleFactor: round(displayFactor, 4)
+    };
+    return { valid: map.valid, map, plateauResults };
+  }
+
+  function curveEditorRevision() {
+    return JSON.stringify({profile:normalizedProfileExecution(profileObject()),binding:testOverrideBinding(),fingerprint:adaptiveHistoryFingerprintKey(adaptiveHistoryFingerprint()),selection:state.workflowSelectionRevision,refill:currentS2RefillSettings()});
+  }
+  function manualCurveBlocksRun(run) {
+    const os=testOverrideStatus(),q=os.valid&&!os.baselinePrior&&state.testOverrides&&state.testOverrides.manualCurveSource;
+    return !!(run&&q&&q.afterRunId&&String(q.afterRunId)===String(run.runId));
+  }
+  function curveEditorSnapshot() {
+    if(!state.cfg)return null;
+    const c=commandFlowSummary(),q=c.s3Shape||{},v={stage1:c.stage1CommandMlS,stage2:c.stage2CommandMlS,early:q.enabled?q.earlyCommand:c.stage3FlatCommandMlS,mid:q.enabled?q.midCommand:c.stage3FlatCommandMlS,late:q.enabled?q.lateCommand:c.stage3FlatCommandMlS,earlySeconds:q.enabled?q.earlySeconds:8,midSeconds:q.enabled?q.midSeconds:14};
+    const refillDefaults=validatedS2RefillSettings(null);if(state.cfg.s2RefillBoundedModel===true)refillDefaults.basis="cup-target";
+    return {revision:curveEditorRevision(),values:v,shaped:!!q.enabled,refill:currentS2RefillSettings(),refillBoundedModel:state.cfg.s2RefillBoundedModel===true,refillLimits:{...S2_REFILL_LIMITS,floodMaxMlS:[refillFloodFloor(),8,1/16]},refillDefaults,
+      refillPreview:stage2StartupPlan(),refillAdaptiveLaw:{riseTargetS:S2_REFILL_RISE_TARGET_S,rrQuantile:S2_REFILL_RR_QUANTILE,rrMedian:S2_REFILL_RR_MEDIAN,cutoffLeadS:S2_REFILL_CUTOFF_LEAD_S,fcFactor:S2_REFILL_FC_FACTOR,floodMin:refillFloodFloor(),floodMax:LIMITS.commandFlowMax,holdMsMin:S2_REFILL_HOLD_MS_MIN,holdMsMax:S2_REFILL_HOLD_MS_MAX,holdMarginS:S2_REFILL_HOLD_MARGIN_S,viFallbackMl:S2_REFILL_VI_FALLBACK_ML,coldFloodMlS:S2_REFILL_FLOOD_COLD_MLS,volumeWarnMl:S2_REFILL_BOOST_VOLUME_WARN_ML},refillActive:activeReleaseEnabled(state.cfg)&&state.cfg.liveFlowTrimTest&&state.cfg.s2StartupAssist,refillLoadWarning:state.s2RefillLoadWarning,refillPrevious:state.s2RefillPrevious?JSON.parse(JSON.stringify(state.s2RefillPrevious)):null,refillLastShot:refillLastShotSnapshot(),
+      canApply:state.s2RefillStorageLoaded&&state.phase==="idle"&&!state.calibrationActive&&!state.curveApplyBusy&&!state.runtimeProfileRepairBusy&&!(state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")&&isHyperExProfileTitle(state.workflowTitle)&&state.runtimeProfileVerified&&(state.calibrationMapUsable||state.lutBootstrapMode),
+      source:state.testOverrides&&testOverrideStatus().valid&&!testOverrideStatus().baselinePrior?state.testOverrides.manualCurveSource||null:null,
+      targetGS:{stage1:state.cfg.stage1Flow,stage2:state.cfg.stage2Flow,stage3:state.cfg.stage3Flow},
+      stageWeights:{stage1:state.cfg.stage1Weight,stage2:state.cfg.stage2Weight,final:state.cfg.finalWeight}};
+  }
+  function restoreManualApplySchedule(previousStatus) {
+    if(previousStatus&&previousStatus.status==="scheduled"&&!state.autoApplyTimer&&state.phase==="idle"&&state.autoApplyNextShot&&state.diagnosticLast&&state.diagnosticLast.runId===previousStatus.runId){
+      const run=state.diagnosticLast;scheduleAutoApplyGrace(run, AUTO_APPLY_GRACE_MS);
+    }
+  }
+  function verifyS2RefillReadback(stored){
+    return new Promise(resolve=>{
+      const expected={basis:stored.basis,startDelayMs:stored.startDelayMs,targetPercent:stored.targetPercent,cutoffPercent:stored.cutoffPercent,maxDurationMs:stored.maxDurationMs,approachMs:stored.approachMs};
+      const token={expected,done:false,timer:null};
+      token.resolve=ok=>{if(token.done)return;token.done=true;if(token.timer)clearTimeout(token.timer);if(state.pendingRefillSave===token)state.pendingRefillSave=null;resolve(ok);};
+      token.timer=setTimeout(()=>token.resolve(false),1500);
+      state.pendingRefillSave=token;
+      if(!storageRead(STORAGE_S2_REFILL))token.resolve(false);
+    });
+  }
+  async function saveS2RefillSettings(body) {
+    if(!state.s2RefillStorageLoaded||state.phase!=="idle"||state.calibrationActive||state.curveApplyBusy||state.runtimeProfileRepairBusy||state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")throw new Error("请在空闲且参数载入完成后保存");
+    if(!body||body.revision!==curveEditorRevision())throw new Error("参数已改变，请重新载入后保存");
+    const next=validatedS2RefillSettings(body.refill,true),before=currentS2RefillSettings();
+    state.curveApplyBusy=true;
+    try {
+      await requireIdleMachineForProfileSync();
+      if(state.phase!=="idle"||body.revision!==curveEditorRevision())throw new Error("参数或运行状态已改变");
+      const previous=JSON.stringify(before)===JSON.stringify(next)?state.s2RefillPrevious:{at:new Date().toISOString(),before:{...before},after:{...next}};
+      const stored={...next,previousChange:previous};
+      if(!storageWrite(STORAGE_S2_REFILL,stored))throw new Error("补水参数写入失败");
+      if(!await verifyS2RefillReadback(stored))throw new Error("补水参数已写入，但没有收到存储回读确认；请重新载入核对");
+      state.s2RefillSettings=next;state.s2RefillPrevious=previous;state.s2RefillLoadWarning=null;
+      emitSkinChanged();return {saved:true};
+    }finally{state.curveApplyBusy=false;}
+  }
+  async function applyCurveEditorDraft(body) {
+    if(!state.s2RefillStorageLoaded)throw new Error("S2 refill settings are still loading");
+    if(state.phase!=="idle"||state.calibrationActive||state.curveApplyBusy||state.runtimeProfileRepairBusy||state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")throw new Error("曲线正在运行或同步，请空闲后再应用");
+    if(!isHyperExProfileTitle(state.workflowTitle)||!state.runtimeProfileVerified)throw new Error("请先选择并校验 HyperEx 曲线");
+    recomputeCalibrationUsability();if(!state.calibrationMapUsable&&!state.lutBootstrapMode)throw new Error("有效 LUT 尚未就绪");
+    if(!body||body.revision!==curveEditorRevision())throw new Error("下一杯参数已改变，请重新载入当前曲线后编辑");
+    const v=body.values||{},keys=["stage1","stage2","early","mid","late"],shaped=body.shaped===true;
+    for(const k of keys)if(typeof v[k]!=="number"||!Number.isFinite(v[k])||v[k]<LIMITS.commandFlowMin||v[k]>LIMITS.commandFlowMax)throw new Error("流量指令必须在0.10–8.00 ml/s内");
+    if(!["earlySeconds","midSeconds"].every(k=>typeof v[k]==="number"&&Number.isFinite(v[k])&&v[k]>=3&&v[k]<=30))throw new Error("S3前段、中段时间必须在3–30秒内");
+    const qEarly=snapCommandFlow(v.early),qMid=snapCommandFlow(v.mid),qLate=snapCommandFlow(v.late);
+    if(shaped){
+      const rise=(a,b)=>b<=Math.max(a+.25,a*1.35)+1e-9;
+      
+      
+      if(!(qMid>0))throw new Error("S3 中段指令必须大于 0");
+      const earlyFactor=qEarly/qMid,drift=qLate/qMid;
+      if(earlyFactor<.50-1e-9||earlyFactor>2.00+1e-9||drift<.50-1e-9||drift>2.00+1e-9)throw new Error("S3 前段／后段相对中段的倍率必须在 0.50–2.00 内");
+      if(!rise(qEarly,qMid)||!rise(qMid,qLate))throw new Error("S3 相邻增幅必须在上限内（max +0.25 ml/s / ×1.35）");
+    }else if(v.early!==v.mid||v.mid!==v.late)throw new Error("平直 S3 的三个指令必须一致");
+    const before=curveEditorSnapshot(),nextRefill=validatedS2RefillSettings(body.refill===undefined?currentS2RefillSettings():body.refill,true),previousRefill=state.s2RefillSettings?{...state.s2RefillSettings}:null,previousRefillWarning=state.s2RefillLoadWarning,previousRefillPrevious=state.s2RefillPrevious?JSON.parse(JSON.stringify(state.s2RefillPrevious)):null,previousOverrides=state.testOverrides?JSON.parse(JSON.stringify(state.testOverrides)):null,previousStatus=state.autoApplyLastStatus;
+    if(keys.concat(["earlySeconds","midSeconds"]).every(k=>before.values[k]===v[k])&&before.shaped===shaped&&JSON.stringify(before.refill)===JSON.stringify(nextRefill))throw new Error("曲线尚未修改");
+    state.curveApplyBusy=true;
+    let changed=false;
+    try {
+      await requireIdleMachineForProfileSync();
+      const actual=await readWorkflowProfile();
+      if(!actual||!isHyperExProfileTitle(actual.title))throw new Error("所选曲线已改变");
+      adoptWorkflowBrewTemperature(actual,false);
+      if(state.phase!=="idle"||body.revision!==curveEditorRevision()||!profileExecutionEquivalent(actual,profileObject()))throw new Error("首页或下一杯曲线已改变，请重新载入后编辑");
+      clearTimer("autoApplyTimer");
+      const c=commandFlowSummary(),stages={};
+      for(const k of ["stage1","stage2","stage3"]){const cmd=k==="stage3"?c.stage3FlatCommandMlS:c[k+"CommandMlS"];stages[k]={mode:c[k+"Mode"]==="manual"?"manual":"auto",origin:c[k+"Origin"]||"original",command:c[k+"Mode"]==="manual"?cmd:null};}
+      for(const k of ["stage1","stage2"])if(!sameCommandFlow(v[k],before.values[k]))stages[k]={mode:"manual",origin:"manual",command:snapCommandFlow(v[k])};
+      if(!shaped&&(before.shaped||!sameCommandFlow(v.mid,before.values.mid)))stages.stage3={mode:"manual",origin:"manual",command:snapCommandFlow(v.mid)};
+      const binding=testOverrideBinding();
+      const source={afterRunId:state.diagnosticLast&&state.diagnosticLast.runId||"",appliedAt:new Date().toISOString(),mode:"curve-editor"};
+      const shapeBefore=s3ShapeStatus();
+      const keepManual=shapeBefore.enabled===true&&shapeBefore.model==="drift"&&shapeBefore.manual===true;
+      
+      
+      
+      const shapeUnchanged=before.shaped===true&&shaped&&["early","mid","late","earlySeconds","midSeconds"].every(k=>v[k]===before.values[k])&&state.testOverrides&&state.testOverrides.s3Shape&&state.testOverrides.s3Shape.enabled===true;
+      const nextShape=shaped?(shapeUnchanged?JSON.parse(JSON.stringify(state.testOverrides.s3Shape)):{enabled:true,model:"drift",origin:before.shaped&&["early","mid","late","earlySeconds","midSeconds"].every(k=>v[k]===before.values[k])?c.stage3Origin||"retained":"manual",manual:keepManual,manualTilt:keepManual?shapeBefore.manualTilt:null,midCommand:qMid,earlyFactor:round(qEarly/qMid,4),drift:round(qLate/qMid,4),earlyCommand:qEarly,lateCommand:qLate,earlySeconds:round(v.earlySeconds,1),midSeconds:round(v.midSeconds,1)}):{enabled:false};
+      state.testOverrides={schema:3,writerVersion:PLUGIN_VERSION,savedAt:source.appliedAt,...binding,stages,
+        s3Shape:nextShape,manualCurveSource:source};
+      changed=true;
+      state.s2RefillSettings=nextRefill;state.s2RefillLoadWarning=null;
+      if(JSON.stringify(before.refill)!==JSON.stringify(nextRefill))state.s2RefillPrevious={at:source.appliedAt,before:before.refill,after:nextRefill};
+      if(!storageWrite(STORAGE_S2_REFILL,{...nextRefill,previousChange:state.s2RefillPrevious})||!storageWrite(STORAGE_TEST_OVERRIDES,state.testOverrides))throw new Error("S2 refill settings could not be saved");
+      await syncHyperExProfile(true,"manual curve editor");
+      const truth=runtimeProfileTruthPayload();if(!truth.verified||!truth.machineUploadAcknowledged)throw new Error("下一杯曲线尚未校验成功");
+      state.autoApplyLastStatus={runId:source.afterRunId,status:"curve-applied",at:source.appliedAt,message:"手动曲线已校验并应用到下一杯；新杯完成后继续自动学习",commandFlows:commandFlowSummary()};
+      log("Manual curve editor verified and applied to NEXT SHOT; LUT unchanged.");emitSkinChanged();
+      return {verified:true};
+    }catch(error){
+      if(changed){state.s2RefillSettings=previousRefill;state.s2RefillLoadWarning=previousRefillWarning;state.s2RefillPrevious=previousRefillPrevious;storageWrite(STORAGE_S2_REFILL,previousRefill?{...previousRefill,previousChange:previousRefillPrevious}:"");state.testOverrides=previousOverrides;storageWrite(STORAGE_TEST_OVERRIDES,previousOverrides||"");try{await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle),"curve editor rollback");}catch(_){} }
+      state.autoApplyLastStatus=previousStatus;if(changed)restoreManualApplySchedule(previousStatus);throw error;
+    }finally{state.curveApplyBusy=false;}
+  }
+
+  function calibrationStatusPayload() {
+    recomputeCalibrationUsability();
+    refreshLearningStage();
+    const map = state.calibrationMap;
+    return {
+      pluginVersion: PLUGIN_VERSION,
+      curveEditor: curveEditorSnapshot(),
+      basketContext: state.cfg ? state.cfg.basketContext : "unknown",
+      learningStage: state.learningStage,
+      baselinePrior: baselineFeedForwardPayload(),
+      overrideContextStatus: testOverrideStatus().reason,
+      autoApplyNextShot: !!state.autoApplyNextShot,
+      autoApplyLastStatus: state.autoApplyLastStatus,
+      activeRelease: activeReleaseEnabled(state.cfg),
+      algorithmIntervention: normalizeAlgorithmIntervention(state.algorithmIntervention),
+      algorithmInterventionActive: activeAlgorithmIntervention(),
+      algorithmInterventionLoaded: state.algorithmInterventionStorageLoaded,
+      canEdit: state.phase === "idle" && !state.calibrationActive && !state.curveApplyBusy && (!state.autoApplyLastStatus || state.autoApplyLastStatus.status !== "applying"),
+      calibrationMode: state.calibrationMode,
+      calibrationModeLabel: calibrationModeConfig().label,
+      calibrationAlgorithm: calibrationModeConfig().algorithm || 'staircase',
+      calibrationModes: Object.keys(CALIBRATION_MODES).map(k => ({ id: k, label: CALIBRATION_MODES[k].label })),
+      workflowTitle: state.workflowTitle,
+      calibrationProfileTitle: calibrationProfileTitle(state.calibrationMode),
+      calibrationProfileTitles: { low: calibrationProfileTitle('low'), full: calibrationProfileTitle('full') },
+      calibrationArmed: state.calibrationArmed,
+      calibrationActive: state.calibrationActive,
+      scope: state.scopeMode,
+      scopeLabel: scopeLabel(state.scopeMode),
+      currentFlowMultiplier: round(state.flowMultiplierCurrent, 4),
+      scopedOriginalMultiplier: round(state.scopedOriginalMultiplier, 4),
+      pendingCalibrationMultiplier: round(state.calibrationPendingMultiplier, 4),
+      globalPreviousMultiplier: round(state.globalPreviousMultiplier, 4),
+      calibrationValid: !!(map && map.valid),
+      calibrationUsable: state.calibrationMapUsable,
+      lutBootstrapMode: !!state.lutBootstrapMode,
+      lutOrigin: lutOriginOf(state.calibrationMap),
+      calibrationStaleReason: state.calibrationMapStaleReason,
+      calibrationBaseMultiplier: round(calibrationBaseMultiplier(), 4),
+      suggestedFlowMultiplier: map && map.valid === true && Number(map.schema || 0) >= 3 ? round(map.suggestedFlowMultiplier, 4) : null,
+      targetCoverage: map && Array.isArray(map.targetCoverage) ? map.targetCoverage : null,
+      targetAnchors: map && Array.isArray(map.targetAnchors) ? map.targetAnchors : null,
+      actualRange: map ? map.actualRange : null,
+      pointCount: calibrationPoints().length,
+      lutRevision: map && Number(map.revision || 0) > 0 ? Number(map.revision) : null,
+      lutMerge: map && map.merge ? map.merge : null,
+      commandFlows: commandFlowSummary(),
+      profileTruth: runtimeProfileTruthPayload(),
+      persistentHistory: historyStatusPayload(),
+      learningHistory:learningHistoryPayload(),
+      manualTestOverride: testOverrideStatus(),
+      profileSyncStatus: state.profileSyncStatus,
+      stage1StartupCorrection: stage1StartupFactor(),
+      nominalCommandWaterMl: calibrationWaterPlan().nominalCommandWaterMl,
+      recommendedContainerMl: calibrationWaterPlan().recommendedContainerMl,
+      primeFlow: calibrationWaterPlan().primeFlow,
+      primeSeconds: calibrationWaterPlan().primeSeconds,
+      calibrationHardStopG: calibrationWaterPlan().hardStopG,
+      calibrationStepSeconds: calibrationWaterPlan().stepSeconds,
+      calibrationSteps: calibrationWaterPlan().steps,
+      waterPreflight: waterPreflightStatus(),
+      lastCalibrationValid: state.calibrationLast ? !!state.calibrationLast.valid : null,
+      lastCalibration: state.calibrationLast
+    };
+  }
+
+  async function beginCalibrationRun() {
+    if (state.calibrationActive || state.calibrationFinalizeBusy) return;
+    state.calibrationActive = true;
+    state.phase = 'calibration';
+    state.calibrationHardPressureSamples = 0;
+    resetWeightTracking(finiteOrNull(state.latestRawWeight));
+    const current = await refreshFlowMultiplier(true);
+    if (Number.isFinite(current)) state.calibrationPendingMultiplier = current;
+    startDiagnostics('calibration');
+    diagnosticEvent('calibration_multiplier', { flowMultiplier: round(current, 4) });
+    emitSkinChanged();
+    log(`Flow Calibration started (${calibrationModeConfig().label}) at flowMultiplier=${Number.isFinite(current) ? current.toFixed(3) : 'unknown'}. EMPTY BASKET; actual-water safety cap=${calibrationModeConfig().hardStopG} g.`);
+  }
+
+  
+  
+  
+  
+  
+  
+  function mergeCalibrationMap(previous, next) {
+    if (!next || next.valid !== true || !Array.isArray(next.points) || next.points.length < 2) return next;
+    const usablePrevious = previous && previous.valid === true && Number(previous.schema || 0) >= 3 && Array.isArray(previous.points) && previous.points.length >= 2;
+    if (!usablePrevious) return next;
+    const near = value => Math.max(0.05, Math.abs(Number(value)) * 0.02);
+    const fresh = next.points.map(p => ({ ...p, source: "new" }));
+    let replaced = 0, added = 0;
+    const kept = previous.points.map(p => {
+      const clash = fresh.find(q => Math.abs(Number(q.actualFlow) - Number(p.actualFlow)) <= near(p.actualFlow));
+      if (clash) { replaced += 1; return { ...clash }; }
+      return { ...p, source: p.source || "retained" };
+    });
+    for (const q of fresh) {
+      if (!kept.some(m => Math.abs(Number(m.actualFlow) - Number(q.actualFlow)) <= near(q.actualFlow))) { kept.push({ ...q }); added += 1; }
+    }
+    kept.sort((a, b) => Number(a.actualFlow) - Number(b.actualFlow));
+    const monotonic = [];
+    let dropped = 0;
+    for (const p of kept) {
+      const last = monotonic[monotonic.length - 1];
+      if (last && Number(p.commandFlow) <= Number(last.commandFlow) + 1e-6) {
+        dropped += 1;
+        if (p.source === "new" && last.source !== "new") monotonic[monotonic.length - 1] = p;
+        continue;
+      }
+      monotonic.push(p);
+    }
+    const retained = monotonic.filter(p => p.source !== "new").length;
+    return {
+      ...next,
+      createdAt: previous.createdAt || next.createdAt,
+      baseFlowMultiplier: Number.isFinite(Number(next.baseFlowMultiplier)) ? next.baseFlowMultiplier : previous.baseFlowMultiplier,
+      suggestedFlowMultiplier: Number.isFinite(Number(next.suggestedFlowMultiplier)) ? next.suggestedFlowMultiplier : previous.suggestedFlowMultiplier,
+      revisedAt: new Date().toISOString(),
+      revision: Number(previous.revision || 1) + 1,
+      points: monotonic,
+      actualRange: [Number(monotonic[0].actualFlow), Number(monotonic[monotonic.length - 1].actualFlow)],
+      merge: {
+        at: new Date().toISOString(),
+        previousRevision: Number(previous.revision || 1),
+        retained,
+        added,
+        replaced,
+        droppedNonMonotonic: dropped
+      }
+    };
+  }
+
+  function adoptCalibrationMap(next) {
+    const merged = mergeCalibrationMap(state.calibrationMap, next);
+    state.calibrationMap = merged;
+    state.calibrationPendingMultiplier = null;
+    storageWrite(STORAGE_CAL, merged);
+    
+    
+    if (!merged.merge) {
+      state.testOverrides = null;
+      state.adaptiveHistory = [];
+      storageWrite(STORAGE_TEST_OVERRIDES, "");
+      storageWrite(STORAGE_PENDING_MULT, "");
+    }
+    recomputeCalibrationUsability();
+    return merged;
+  }
+  function presetSlotNumber(value) {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 1 && n <= 5 ? n : null;
+  }
+  function presetTargetValue(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.max(LIMITS.desiredRealFlowMin, Math.min(LIMITS.desiredRealFlowMax, n)) : null;
+  }
+  function presetCommandValue(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.max(LIMITS.commandFlowMin, Math.min(LIMITS.commandFlowMax, n)) : null;
+  }
+  function presetSlots() {
+    const list = Array.isArray(state.presets) ? state.presets.slice(0, 5) : [];
+    while (list.length < 5) list.push(null);
+    return list;
+  }
+  function currentPresetSnapshot() {
+    const c = commandFlowSummary();
+    return {
+      targets: { stage1: round(state.cfg.stage1Flow, 3), stage2: round(state.cfg.stage2Flow, 3), stage3: round(state.cfg.stage3Flow, 3) },
+      commands: {
+        stage1: round(Number.isFinite(Number(c.stage1CommandMlS)) ? Number(c.stage1CommandMlS) : 0, 3),
+        stage2: round(Number.isFinite(Number(c.stage2CommandMlS)) ? Number(c.stage2CommandMlS) : 0, 3),
+        stage3: round(Number.isFinite(Number(c.stage3CommandMlS)) ? Number(c.stage3CommandMlS) : 0, 3)
+      }
+    };
+  }
+  function presetsPayload() {
+    const slots = presetSlots().map((p, i) => p ? {
+      slot: i + 1, name: String(p.name || ""), targets: { ...p.targets }, commands: { ...p.commands }, savedAt: p.savedAt || null
+    } : { slot: i + 1, empty: true });
+    return { slots, current: state.cfg ? currentPresetSnapshot() : null };
+  }
+  function savePresetSlot(slot, body) {
+    const index = presetSlotNumber(slot);
+    if (!index) throw new Error("Preset slot 1-5 required");
+    const source = body && body.targets && body.commands ? body : currentPresetSnapshot();
+    const targets = {
+      stage1: presetTargetValue(source.targets.stage1), stage2: presetTargetValue(source.targets.stage2), stage3: presetTargetValue(source.targets.stage3)
+    };
+    const commands = {
+      stage1: presetCommandValue(source.commands.stage1), stage2: presetCommandValue(source.commands.stage2), stage3: presetCommandValue(source.commands.stage3)
+    };
+    if (Object.values(targets).some(v => v === null) || Object.values(commands).some(v => v === null)) throw new Error("Preset values must be finite");
+    const list = presetSlots();
+    list[index - 1] = { name: String((body && body.name) || "").slice(0, 24), targets, commands, savedAt: new Date().toISOString() };
+    state.presets = list;
+    if (!storageWrite(STORAGE_PRESETS, list)) throw new Error("Preset storage write failed");
+    emitSkinChanged();
+    return presetsPayload();
+  }
+  function clearPresetSlot(slot) {
+    const index = presetSlotNumber(slot);
+    if (!index) throw new Error("Preset slot 1-5 required");
+    const list = presetSlots();
+    list[index - 1] = null;
+    state.presets = list;
+    storageWrite(STORAGE_PRESETS, list);
+    emitSkinChanged();
+    return presetsPayload();
+  }
+  async function applyPresetSlot(slot) {
+    if (state.phase !== "idle" || state.calibrationActive) throw new Error("Apply presets only while idle");
+    const index = presetSlotNumber(slot);
+    if (!index) throw new Error("Preset slot 1-5 required");
+    const preset = presetSlots()[index - 1];
+    if (!preset) throw new Error("Preset slot is empty");
+    const pending = { slot: index, name: preset.name || "", targets: { ...preset.targets }, commands: { ...preset.commands }, at: new Date().toISOString() };
+    if (!storageWrite(STORAGE_PRESET_PENDING, pending)) throw new Error("Preset apply could not be stored");
+    state.pendingPreset = pending;
+    api("/plugins/" + ID + "/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Stage1Flow: preset.targets.stage1, Stage2Flow: preset.targets.stage2, Stage3Flow: preset.targets.stage3 })
+    }).catch((error) => log(`Preset settings write failed: ${error.message || error}`));
+    return { applying: true, slot: index, targets: preset.targets };
+  }
+  function applyPendingPreset() {
+    const pending = state.pendingPreset;
+    if (!pending || !state.cfg) return false;
+    const match = ["stage1", "stage2", "stage3"].every(key => Math.abs(Number(state.cfg[key + "Flow"]) - Number(pending.targets[key])) <= 0.0001);
+    if (!match) return false;
+    const binding = testOverrideBinding();
+    state.testOverrides = {
+      schema: 3, writerVersion: PLUGIN_VERSION, savedAt: new Date().toISOString(), ...binding,
+      stages: {
+        stage1: { mode: "manual", origin: "manual", command: presetCommandValue(pending.commands.stage1) },
+        stage2: { mode: "manual", origin: "manual", command: presetCommandValue(pending.commands.stage2) },
+        stage3: { mode: "manual", origin: "manual", command: presetCommandValue(pending.commands.stage3) }
+      },
+      s3Shape: { enabled: false },
+      presetSource: { slot: pending.slot, name: pending.name || "", appliedAt: pending.at || null }
+    };
+    storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
+    storageWrite(STORAGE_PRESET_PENDING, "");
+    state.pendingPreset = null;
+    syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle), "preset applied").catch(error => log(`Preset profile sync failed: ${error.message || error}`));
+    log(`Preset ${pending.slot} applied: ${pending.targets.stage1}/${pending.targets.stage2}/${pending.targets.stage3} g/s -> ${pending.commands.stage1}/${pending.commands.stage2}/${pending.commands.stage3} ml/s`);
+    emitSkinChanged();
+    return true;
+  }
+  function schedulePendingPresetApply(attempt) {
+    clearTimer("presetApplyTimer");
+    const tries = Number(attempt) || 0;
+    state.presetApplyTimer = setTimeout(() => {
+      state.presetApplyTimer = null;
+      if (!state.pendingPreset) return;
+      if (applyPendingPreset()) return;
+      if (tries < 8) { schedulePendingPresetApply(tries + 1); return; }
+      storageWrite(STORAGE_PRESET_PENDING, "");
+      state.pendingPreset = null;
+      log("Preset apply abandoned: settings did not change");
+    }, 1000);
+  }
+  
+  
+  
+  function rescaleOverridesForTargets() {
+    const o = state.testOverrides;
+    const map = state.calibrationMap;
+    if (!o || !state.cfg || !o.targets || !map || map.valid !== true || Number(map.schema || 0) < 3) return false;
+    const stages = ["stage1", "stage2", "stage3"];
+    const ratios = {};
+    for (const st of stages) {
+      const before = Number(o.targets[st]);
+      const now = Number(state.cfg[st + "Flow"]);
+      if (!(before > 0.1) || !(now > 0.1)) return false;
+      ratios[st] = now / before;
+    }
+    if (stages.every(st => Math.abs(ratios[st] - 1) <= 0.001)) return false;
+    const next = JSON.parse(JSON.stringify(o));
+    let touched = 0;
+    for (const st of stages) {
+      const q = next.stages && next.stages[st];
+      if (q && String(q.mode) === "manual" && Number.isFinite(Number(q.command))) {
+        q.command = snapCommandFlow(clampCommandFlow(Number(q.command) * ratios[st]));
+        touched += 1;
+      }
+    }
+    if (next.s3Shape && next.s3Shape.enabled === true) {
+      for (const key of ["earlyCommand", "midCommand", "lateCommand"]) {
+        if (Number.isFinite(Number(next.s3Shape[key]))) next.s3Shape[key] = snapCommandFlow(clampCommandFlow(Number(next.s3Shape[key]) * ratios.stage3));
+      }
+    }
+    next.targets = { stage1: round(state.cfg.stage1Flow, 4), stage2: round(state.cfg.stage2Flow, 4), stage3: round(state.cfg.stage3Flow, 4) };
+    next.rescaledAt = new Date().toISOString();
+    next.rescaledFrom = { ...o.targets };
+    state.testOverrides = next;
+    storageWrite(STORAGE_TEST_OVERRIDES, next);
+    if (isHyperExProfileTitle(state.workflowTitle)) {
+      syncHyperExProfile(true, "targets rescaled").catch(function (error) { log("Rescaled profile sync failed: " + (error && error.message ? error.message : error)); });
+    }
+    log(`Overrides rescaled to targets ${next.targets.stage1}/${next.targets.stage2}/${next.targets.stage3} g/s (S2 ratio ${round(ratios.stage2, 3)}, ${touched} commands)`);
+    emitSkinChanged();
+    return true;
+  }
+
+
+
+
+
+  async function finalizeCalibrationRun(result) {
+    if (!state.calibrationActive || state.calibrationFinalizeBusy) return;
+    state.calibrationFinalizeBusy = true;
+    try {
+      const run = state.diagnosticCurrent;
+      if (!run || run.kind !== 'calibration') {
+        state.calibrationActive = false;
+        state.phase = 'idle';
+        return;
+      }
+      diagnosticSample('calibration_final', true);
+      run.endedAt = new Date().toISOString();
+      run.result = String(result || 'calibration ended');
+      const base = Number(run.config && run.config.flowMultiplier);
+      const analysis = analyzeCalibrationRun(run, Number.isFinite(base) ? base : state.flowMultiplierCurrent);
+      run.calibration = analysis;
+      run.summary = diagnosticSummary(run);
+      state.calibrationLast = {
+        result: run.result,
+        valid: analysis.valid,
+        createdAt: new Date().toISOString(),
+        plateauResults: analysis.plateauResults,
+        map: analysis.map
+      };
+      state.diagnosticLast = run;
+      state.diagnosticCurrent = null;
+      state.diagnosticLastSampleAtMs = 0;
+      state.calibrationActive = false;
+      state.phase = 'idle';
+
+      if (analysis.valid) {
+        const map = adoptCalibrationMap(analysis.map);
+        log(`Flow Calibration VALID: ${map.points.length} LUT points (${map.algorithm}), real-flow range ${map.actualRange[0]}..${map.actualRange[1]} g/s.` +
+          (map.merge ? ` Merged with revision ${map.merge.previousRevision}: ${map.merge.retained} retained, ${map.merge.added} new, ${map.merge.replaced} replaced.` : ` New LUT identity.`) +
+          ` Suggested DE1 flowMultiplier=${map.suggestedFlowMultiplier ?? 'n/a'}.`);
+        if (state.cfg.calibrationAutoSync) {
+          try { await syncHyperExProfile(false); }
+          catch (error) { state.profileSyncStatus = `Auto-sync failed: ${error.message || error}`; log(state.profileSyncStatus); }
+        }
+      } else {
+        log('Flow Calibration INVALID: one or more HyperEx real-flow targets failed the target-search quality gate (or Full staircase coverage was insufficient). Existing valid LUT was kept unchanged and HyperEx was NOT auto-synced.');
+      }
+      emitSkinChanged();
+    } finally {
+      state.calibrationFinalizeBusy = false;
+    }
+  }
+
+  async function handleCalibrationMachine(machine, pourHasBegun) {
+    if (!state.calibrationArmed && !state.calibrationActive) return false;
+    if (!state.calibrationActive && machine.machineState === 'espresso' && pourHasBegun) {
+      const preflight = waterPreflightStatus();
+      const preflightApproved = Date.now() <= Number(state.calibrationWaterPreflightApprovedUntilMs || 0);
+      const mustBlock = preflight.status === 'block' || ((preflight.status === 'unknown' || preflight.status === 'warn') && !preflightApproved);
+      if (mustBlock) {
+        log(`CALIBRATION WATER PREFLIGHT STOP: ${preflight.message}${preflightApproved ? '' : ' Use PREPARE FLOW CAL for explicit confirmation.'}`);
+        try { await requestMachineState('idle'); } catch (_) {}
+        return true;
+      }
+      await beginCalibrationRun();
+      return true;
+    }
+    if (!state.calibrationActive) return true;
+
+    if (Number(machine.pressure) > state.cfg.hardPressureLimit) {
+      state.calibrationHardPressureSamples += 1;
+      if (state.calibrationHardPressureSamples >= 3) {
+        log(`CALIBRATION EMERGENCY STOP: pressure > ${state.cfg.hardPressureLimit.toFixed(2)} bar for 3 samples.`);
+        try { await requestMachineState('idle'); } catch (_) {}
+        await finalizeCalibrationRun('aborted: pressure safety');
+        return true;
+      }
+    } else {
+      state.calibrationHardPressureSamples = 0;
+    }
+
+    const waterCap = calibrationModeConfig().hardStopG;
+    if (Number.isFinite(waterCap) && state.cumulativeWeight >= waterCap) {
+      log(`CALIBRATION WATER SAFETY STOP: collected ${state.cumulativeWeight.toFixed(1)} g reached ${waterCap} g cap (${calibrationModeConfig().label}). Requesting Idle to stay below 300 ml.`);
+      try { await requestMachineState('idle'); } catch (_) {}
+      await finalizeCalibrationRun(`water safety stop at ${state.cumulativeWeight.toFixed(1)} g`);
+      return true;
+    }
+
+    if (machine.machineState === 'idle' || machine.substate === 'pouringDone') {
+      await finalizeCalibrationRun('completed');
+    }
+    return true;
+  }
+
+  function resetWeightTracking(rawWeight) {
+    state.rawBaseline = Number.isFinite(rawWeight) ? rawWeight : null;
+    state.lastRawWeight = Number.isFinite(rawWeight) ? rawWeight : null;
+    state.cumulativeOffset = 0;
+    state.cumulativeWeight = 0;
+    state.hasScaleSample = Number.isFinite(rawWeight);
+  }
+
+  function updateCumulativeWeight(rawWeight) {
+    if (!Number.isFinite(rawWeight)) return state.cumulativeWeight;
+
+    state.hasScaleSample = true;
+    clearTimer("noScaleTimer");
+
+    if (state.rawBaseline === null || state.lastRawWeight === null) {
+      state.rawBaseline = rawWeight;
+      state.lastRawWeight = rawWeight;
+      state.cumulativeWeight = state.cumulativeOffset;
+      return state.cumulativeWeight;
+    }
+
+    const downwardJump = state.lastRawWeight - rawWeight;
+    if (downwardJump >= state.cfg.scaleResetThreshold) {
+      const carried = state.cumulativeWeight;
+      state.cumulativeOffset = carried;
+      state.rawBaseline = rawWeight;
+      state.lastRawWeight = rawWeight;
+      state.cumulativeWeight = carried;
+      log(`Detected scale tare/reset (${downwardJump.toFixed(2)} g drop); carrying cumulative ${carried.toFixed(2)} g.`);
+      return state.cumulativeWeight;
+    }
+
+    let total = state.cumulativeOffset + (rawWeight - state.rawBaseline);
+    if (!Number.isFinite(total)) total = state.cumulativeWeight;
+    
+    if (total < state.cumulativeWeight - 0.5) total = state.cumulativeWeight;
+    state.cumulativeWeight = Math.max(0, total);
+    state.lastRawWeight = rawWeight;
+    return state.cumulativeWeight;
+  }
+
+  function resetSequence(reason) {
+    let completedDiagnosticRun = null;
+    if (state.diagnosticCurrent) completedDiagnosticRun = finalizeDiagnostics(reason || "reset");
+    clearAllTimers();
+    const previous = state.phase;
+    if (previous === "restart_wait") {
+      stopGhcPrompt("cleared", "GHC confirmation wait cleared");
+    } else {
+      state.ghcPromptStartedAtMs = 0;
+    }
+    state.phase = "idle";
+    if (state.liveTrimDirty) {
+      invalidateProfileTruth("Experimental raw frame changed; restoring original profile before next shot", true);
+      state.liveTrimDirty = false;
+    }
+    state.lowFlowSamples = 0;
+    state.idleConfirmedAtMs = 0;
+    state.dumpAcceptedAtMs = 0;
+    state.dumpReinforceSent = false;
+    state.hardPressureSamples = 0;
+    state.dumpRequestedAtMs = 0;
+    state.dumpAcceptedAtMs = 0;
+    state.dumpReinforceSent = false;
+    state.lastMachineAtMs = 0;
+    state.commandBusy = false;
+    state.stage1DumpSent = false;
+    state.stage2SkipSent = false;
+    state.stage3StartedAtMs = 0;
+    state.stage3PlannedMs = 0;
+    state.finalStopSent = false;
+    state.sequenceStartedAtMs = 0;
+    state.soakPromptStartedAtMs = 0;
+    state.soakSecondsRemaining = 0;
+    state.ghcSecondsRemaining = 0;
+    state.armRequestCount = 0;
+    state.lastArmRequestAtMs = 0;
+    state.rawBaseline = null;
+    state.lastRawWeight = null;
+    state.cumulativeOffset = 0;
+    state.cumulativeWeight = 0;
+    state.hasScaleSample = false;
+    state.lastFrame = null;
+    state.lastPhysicalFrame = null;
+    emitSkinChanged();
+    if (reason) log(`Sequence reset (${previous} -> idle): ${reason}`);
+    
+    
+    
+    const cupCompletion = !!(completedDiagnosticRun && /^completed at /i.test(String(reason || "")) && state.autoApplyNextShot);
+    if (reason && isHyperExProfileTitle(state.workflowTitle) && !cupCompletion) scheduleProfileVerification('sequence reset');
+    if (cupCompletion) {
+      state.cupVerificationRunId = completedDiagnosticRun.runId;
+      state.autoApplyLastStatus = {runId:completedDiagnosticRun.runId,status:"scheduled",at:new Date().toISOString(),message:"Completed shot queued for next-shot evaluation"};
+      scheduleAutoApplyGrace(completedDiagnosticRun, AUTO_APPLY_GRACE_MS);
+    }
+  }
+
+  function abortSequence(reason, requestIdle) {
+    if (state.phase === "idle" || state.phase === "aborted") return;
+    diagnosticEvent("learning_fault",{reason:String(reason||"sequence aborted")});
+    const wasRestartWait = state.phase === "restart_wait";
+    clearAllTimers();
+    if (wasRestartWait) {
+      stopGhcPrompt("timeout", `GHC confirmation cancelled: ${reason}`);
+    }
+    state.phase = "aborted";
+    log(`ABORT: ${reason}`);
+    if (requestIdle) {
+      requestMachineState("idle").catch((error) => log(`Abort idle command failed: ${error.message || error}`));
+    }
+    if(state.abortResetTimer)clearTimeout(state.abortResetTimer);
+    state.abortResetTimer=setTimeout(()=>{state.abortResetTimer=null;if(state.phase==="aborted")resetSequence(reason);},1200);
+  }
+
+  function startSequence(rawWeight) {
+    refreshLearningStage();
+    if (state.autoApplyTimer !== null) {
+      state.autoApplyLastStatus = {status:"cancelled",at:new Date().toISOString(),message:"New shot started before pending adaptation; current shot commands retained"};
+      state.cupVerificationRunId = null;
+    }
+    clearAllTimers();
+    state.phase = "stage1";
+    state.directStartTestEnabledForRun = isRestartRelease(state.cfg) && !!state.cfg.directDriverStartTest;
+    state.directStartTest = null;
+    state.lowFlowSamples = 0;
+    state.idleConfirmedAtMs = 0;
+    state.hardPressureSamples = 0;
+    state.stage1DumpSent = false;
+    state.stage2SkipSent = false;
+    state.stage3StartedAtMs = 0;
+    state.stage3PlannedMs = 0;
+    state.finalStopSent = false;
+    state.sequenceStartedAtMs = Date.now();
+    state.soakSecondsRemaining = 0;
+    state.ghcSecondsRemaining = 0;
+    state.armRequestCount = 0;
+    state.lastArmRequestAtMs = 0;
+    resetWeightTracking(rawWeight);
+    startDiagnostics("hyperex");
+    initializeLiveTrim();
+    if(!activeReleaseEnabled(state.cfg))startLiveTrim();
+    diagnosticSample("sequence-start", true);
+
+    state.noScaleTimer = setTimeout(() => {
+      if (!state.hasScaleSample && state.phase !== "idle") {
+        abortSequence(`No usable scale snapshot received within ${state.cfg.noScaleTimeoutSeconds}s`, true);
+      }
+    }, state.cfg.noScaleTimeoutSeconds * 1000);
+
+    state.maxRunTimer = setTimeout(() => {
+      if (state.phase !== "idle") abortSequence(`Maximum sequence time ${state.cfg.maxRunSeconds}s exceeded`, true);
+    }, state.cfg.maxRunSeconds * 1000);
+
+    log(`START stage1: desired real ${state.cfg.stage1Flow.toFixed(2)} g/s -> DE1 command ${resolvedStageCommandFlow("stage1", state.cfg.stage1Flow).toFixed(2)} ml/s, dump at ${state.cfg.stage1Weight.toFixed(2)} g; scale=${state.hasScaleSample ? "ready" : "waiting"}.`);
+  }
+
+  function dumpLooksReleased(machine) {
+    if (!machine) return false;
+    if (machine.machineState === "idle") return true;
+    if (machine.substate === "pouringDone") return true;
+    const flow = Number(machine.flow);
+    const pressure = Number(machine.pressure);
+    const lowFlow = Number.isFinite(flow) && Math.abs(flow) <= state.cfg.dumpFlowThreshold;
+    const lowPressure = Number.isFinite(pressure) && pressure <= 0.8;
+    return lowFlow && lowPressure;
+  }
+
+  function confirmDumpIdle(source, machine) {
+    if (state.phase !== "dumping" || state.idleConfirmedAtMs) return;
+    state.idleConfirmedAtMs = Date.now();
+    clearTimer("idlePollTimer");
+    clearTimer("dumpFallbackTimer");
+    const pressure = machine && Number.isFinite(Number(machine.pressure)) ? Number(machine.pressure) : state.lastPressure;
+    const flow = machine && Number.isFinite(Number(machine.flow)) ? Number(machine.flow) : state.lastFlow;
+    log(`Active release confirmed via ${source}; pressure=${pressure.toFixed(2)} bar, flow=${flow.toFixed(2)} ml/s. Holding ${state.cfg.dumpMinSettleSeconds.toFixed(1)} s for valve/water-path settling.`);
+
+    state.dumpSettleTimer = setTimeout(() => {
+      state.dumpSettleTimer = null;
+      if (state.phase !== "dumping") return;
+      beginSoak(`${source} + ${state.cfg.dumpMinSettleSeconds.toFixed(1)} s timed water-path settle`);
+    }, state.cfg.dumpMinSettleSeconds * 1000);
+  }
+
+  function noteMachine(machine) {
+    if (!machine) return;
+    state.lastMachineAtMs = Date.now();
+    state.lastMachineState = machine.machineState;
+    state.lastSubstate = machine.substate;
+    state.lastPressure = machine.pressure;
+    state.lastMachineTelemetryValid = machine.telemetryValid === true;
+    state.lastFlow = machine.flow;
+    state.lastTargetFlow = machine.targetFlow;
+    state.lastTargetPressure = machine.targetPressure;
+    state.lastMachineWeightFlow = machine.machineWeightFlow;
+    diagnosticSample("machine", false);
+  }
+
+  function pollForDumpIdle() {
+    clearTimer("idlePollTimer");
+    const poll = async () => {
+      if (state.phase !== "dumping" || state.idleConfirmedAtMs) return;
+      try {
+        const snapshot = await getMachineSnapshot();
+        const machine = extractMachine(snapshot);
+        noteMachine(machine);
+        const elapsed = state.dumpAcceptedAtMs ? (Date.now() - state.dumpAcceptedAtMs) / 1000 : 0;
+        if (machine.machineState === "idle") {
+          confirmDumpIdle("REST idle", machine);
+          return;
+        }
+        if (elapsed >= state.cfg.dumpMinSettleSeconds && dumpLooksReleased(machine)) {
+          confirmDumpIdle(`REST settled (${machine.machineState || "?"}/${machine.substate || "?"})`, machine);
+          return;
+        }
+      } catch (error) {
+        log(`Release-state poll transient error: ${error.message || error}`);
+      }
+      if (state.phase === "dumping" && !state.idleConfirmedAtMs) {
+        state.idlePollTimer = setTimeout(poll, 150);
+      }
+    };
+    state.idlePollTimer = setTimeout(poll, 120);
+  }
+
+  function armDumpFallback() {
+    clearTimer("dumpFallbackTimer");
+    state.dumpFallbackTimer = setTimeout(async () => {
+      state.dumpFallbackTimer = null;
+      if (state.phase !== "dumping" || state.idleConfirmedAtMs) return;
+      state.dumpReinforceSent = true;
+      log(`No definitive Idle frame after ${state.cfg.dumpFallbackSeconds.toFixed(1)} s; reinforcing active release with one more Idle request.`);
+      try {
+        await requestMachineState("idle");
+      } catch (error) {
+        log(`Release reinforcement Idle failed: ${error.message || error}`);
+        return;
+      }
+
+      
+      setTimeout(async () => {
+        if (state.phase !== "dumping" || state.idleConfirmedAtMs) return;
+        try {
+          const snapshot = await getMachineSnapshot();
+          const machine = extractMachine(snapshot);
+          noteMachine(machine);
+          if (dumpLooksReleased(machine) || machine.machineState !== "espresso") {
+            confirmDumpIdle(`reinforced Idle + REST (${machine.machineState || "?"}/${machine.substate || "?"})`, machine);
+            return;
+          }
+          const flow = Number(machine.flow);
+          const clearlyStillPouring = machine.machineState === "espresso" &&
+            (machine.substate === "preinfusion" || machine.substate === "pouring") &&
+            Number.isFinite(flow) && Math.abs(flow) > Math.max(0.8, state.cfg.dumpFlowThreshold);
+          if (clearlyStillPouring) {
+            log(`Reinforced Idle not yet settled: still ${machine.substate}, flow=${flow.toFixed(2)} ml/s; continuing polls.`);
+            return;
+          }
+          
+          
+          confirmDumpIdle(`two acknowledged Idle writes; state ambiguous ${machine.machineState || "?"}/${machine.substate || "?"}`, machine);
+        } catch (error) {
+          
+          
+          log(`Post-reinforcement state read unavailable (${error.message || error}); accepting two acknowledged Idle writes as release confirmation.`);
+          confirmDumpIdle("two acknowledged Idle writes; REST unavailable during finalize", null);
+        }
+      }, 450);
+    }, state.cfg.dumpFallbackSeconds * 1000);
+  }
+
+  function beginAutoRelease() {
+    if (!isAutoRelease(state.cfg) || state.stage1DumpSent || state.phase !== "stage1") return;
+    state.stage1DumpSent = true;
+    state.phase = "dumping";
+    state.lowFlowSamples = 0;
+    state.dumpRequestedAtMs = Date.now();
+    emitSkinChanged();
+    diagnosticEvent("auto_release_enter", { cumulativeWeightG: round(state.cumulativeWeight, 3), soakSeconds: round(state.cfg.soakSeconds, 2) });
+    const token = state.sequenceStartedAtMs;
+    const layout = runProfileLayout(state.diagnosticCurrent);
+    guardedSingleSkip(layout.s1, layout.release, "auto S1 -> release", () => state.phase === "dumping" && state.sequenceStartedAtMs === token)
+      .then(() => {
+        if (state.phase !== "dumping" || state.sequenceStartedAtMs !== token) return;
+        state.phase = "soak";
+        state.soakPromptStartedAtMs = Date.now();
+        state.soakSecondsRemaining = Math.max(0, Math.ceil(state.cfg.soakSeconds));
+        diagnosticEvent("auto_release_soak_start", { soakSeconds: round(state.cfg.soakSeconds, 2), pressureBar: round(state.lastPressure, 3) });
+        emitSkinChanged();
+        startSoakCountdown();
+        
+        
+        
+        state.soakTimer = setTimeout(finishAutoSoak, Math.max(0, Number(state.cfg.soakSeconds) || 0) * 1000);
+      })
+      .catch((error) => abortSequence(`Auto release frame failed: ${error.message || error}`, true));
+  }
+
+  function waitForAutoS2Frame(expected, timeoutMs) {
+    const target = Math.floor(Number(expected));
+    const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+    return new Promise((resolve) => {
+      const check = () => {
+        const raw = finiteOrNull(state.lastPhysicalFrame);
+        const frame = raw === null ? null : Math.floor(raw);
+        
+        
+        if (frame === target || (frame !== null && frame > target) || Date.now() >= deadline) {
+          resolve(frame);
+          return;
+        }
+        setTimeout(check, 40);
+      };
+      check();
+    });
+  }
+
+  async function finishAutoSoak() {
+    clearTimer("soakTimer");
+    clearTimer("soakCountdownTimer");
+    state.soakSecondsRemaining = 0;
+    if (state.phase !== "soak") return;
+    const token = state.sequenceStartedAtMs;
+    const layout = runProfileLayout(state.diagnosticCurrent);
+    try {
+      
+      
+      
+      
+      let frame = await waitForAutoS2Frame(layout.s2, AUTO_S2_FRAME_WAIT_MS);
+      if (frame !== null && frame > layout.s2) {
+        throw new Error(`machine already at profileFrame=${frame}`);
+      }
+      if (frame !== layout.s2) {
+        await guardedSingleSkip(layout.release, layout.s2, "auto release -> S2", () => state.phase === "soak" && state.sequenceStartedAtMs === token);
+        frame = await waitForAutoS2Frame(layout.s2, 400);
+      }
+      if (frame !== layout.s2) {
+        throw new Error(`expected profileFrame=${layout.s2}, got ${frame === null ? "unknown" : frame}`);
+      }
+      if (state.phase !== "soak" || state.sequenceStartedAtMs !== token) return;
+      state.phase = "stage2";
+      state.stage2StartedAtMs = Date.now();
+      diagnosticEvent("stage2_start", { autoRelease: true, cumulativeWeightG: round(state.cumulativeWeight, 3), targetFlowMlS: state.cfg.stage2Flow });
+      diagnosticSample("stage2-start", true);
+      emitSkinChanged();
+      startFlowStripTicker();
+      startLiveTrim();
+      log(`AUTO release -> S2: 0 bar soak finished (${state.cfg.soakSeconds.toFixed(1)} s); no GHC restart.`);
+    } catch (error) {
+      abortSequence(`Auto release -> S2 failed: ${error.message || error}`, true);
+    }
+  }
+
+  function beginDump() {
+    if (!isRestartRelease(state.cfg)||state.stage1DumpSent || state.phase !== "stage1") return;
+    state.stage1DumpSent = true;
+    state.phase = "dumping";
+    state.lowFlowSamples = 0;
+    state.idleConfirmedAtMs = 0;
+    state.dumpAcceptedAtMs = 0;
+    state.dumpReinforceSent = false;
+    state.dumpRequestedAtMs = Date.now();
+    emitSkinChanged();
+    diagnosticEvent("stage1_weight_trigger", { cumulativeWeightG: round(state.cumulativeWeight, 3) });
+    log(`Stage1 reached ${state.cumulativeWeight.toFixed(2)} g. Requesting active water-path release via Espresso -> Idle.`);
+
+    state.dumpTimer = setTimeout(async () => {
+      if (state.phase !== "dumping") return;
+      
+      
+      
+      let machine = null;
+      try {
+        const snapshot = await getMachineSnapshot();
+        machine = extractMachine(snapshot);
+        noteMachine(machine);
+      } catch (_) {}
+      const flow = machine ? Number(machine.flow) : NaN;
+      const explicitlyStillPouring = machine && machine.machineState === "espresso" &&
+        (machine.substate === "preinfusion" || machine.substate === "pouring") &&
+        Number.isFinite(flow) && Math.abs(flow) > Math.max(0.8, state.cfg.dumpFlowThreshold);
+      if (explicitlyStillPouring) {
+        abortSequence(`Active release still shows ${machine.substate} at ${flow.toFixed(2)} ml/s after ${state.cfg.dumpTimeoutSeconds}s`, true);
+      } else if (state.dumpAcceptedAtMs) {
+        confirmDumpIdle("release timeout fallback after acknowledged Idle", machine);
+      } else {
+        abortSequence(`Idle release command was never acknowledged within ${state.cfg.dumpTimeoutSeconds}s`, true);
+      }
+    }, state.cfg.dumpTimeoutSeconds * 1000);
+
+    requestMachineState("idle")
+      .then(() => {
+        if (state.phase !== "dumping") return;
+        state.dumpAcceptedAtMs = Date.now();
+        pollForDumpIdle();
+        armDumpFallback();
+      })
+      .catch((error) => {
+        log(`Initial active dump command failed: ${error.message || error}; retrying once.`);
+        setTimeout(() => {
+          if (state.phase !== "dumping") return;
+          requestMachineState("idle")
+            .then(() => {
+              state.dumpAcceptedAtMs = Date.now();
+              state.dumpReinforceSent = true;
+              pollForDumpIdle();
+              armDumpFallback();
+            })
+            .catch((retryError) => abortSequence(`Active dump command failed twice: ${retryError.message || retryError}`, true));
+        }, 300);
+      });
+  }
+
+
+  function beginSoak(reason) {
+    if (state.phase !== "dumping") return;
+    clearTimer("dumpTimer");
+    clearTimer("dumpSettleTimer");
+    clearTimer("dumpFallbackTimer");
+    clearTimer("idlePollTimer");
+    state.phase = "soak";
+    state.armRequestCount = 0;
+    state.lastArmRequestAtMs = 0;
+    const soakStartWeight = state.cumulativeWeight;
+    diagnosticEvent("soak_start", { reason, cumulativeWeightG: round(soakStartWeight, 3), pressureBar: round(state.lastPressure, 3), machineFlowMlS: round(state.lastFlow, 3) });
+    log(`Active-release confirmed (${reason}); pressure=${state.lastPressure.toFixed(2)} bar, flow=${state.lastFlow.toFixed(2)} ml/s. Starting ${state.cfg.soakSeconds.toFixed(1)} s soak at ${soakStartWeight.toFixed(2)} g.`);
+    startSoakCountdown();
+    startLiveTrim(); 
+
+    state.soakTimer = setTimeout(() => {
+      state.soakTimer = null;
+      clearTimer("soakCountdownTimer");
+      state.soakSecondsRemaining = 0;
+      if (state.phase !== "soak") return;
+      state.phase = "restart_wait";
+      state.armRequestCount = 1;
+      state.lastArmRequestAtMs = Date.now();
+      emitSkinChanged();
+      diagnosticEvent("soak_complete_arm1", { cumulativeWeightG: round(state.cumulativeWeight, 3) });
+      log(`Soak complete at cumulative ${state.cumulativeWeight.toFixed(2)} g. Sending second-stage Espresso arm request now.`);
+      if (state.directStartTestEnabledForRun) {
+        beginDirectStartTest();
+        return;
+      }
+      requestMachineState("espresso")
+        .then(() => startRestartPoll())
+        .catch((error) => abortSequence(`Espresso restart failed: ${error.message || error}`, false));
+    }, state.cfg.soakSeconds * 1000);
+  }
+
+
+
+  
+
+  
+  
+
+  function controlQualityGood(q) {
+    return !!(q&&q.available&&Math.abs(q.tailErrorPct)<=8&&q.tailRippleCVPct<=10
+      &&Number.isFinite(q.tailP95ErrorPct)&&q.tailP95ErrorPct<=15
+      &&q.tailOvershootPct<=20&&q.tailRMSEGS/q.targetGS<=.10);
+  }
+  function controlRunReview(run) {
+    if(!run||run.kind!=="hyperex")return null;
+    const excluded=!learningRunAllowed(run);
+    const trace=run.liveFlowTrim&&run.liveFlowTrim.trace||[],writes=trace.filter(x=>x.kind==="write").sort((a,b)=>a.tMs-b.tMs);
+    const phases=(run.config&&run.config.activeRelease===false?["stage1","stage2","stage3"]:["stage2","stage3"]).map(phase=>{
+      const q=controlOutputQuality(run,phase),learning=controlLearningAssessment(run,phase);
+      const good=controlQualityGood(q);
+      const status=!q.available?"缺少可靠杯流量窗口":good?"目标跟踪及平滑度良好":Math.abs(q.tailErrorPct)>8?"杯流量仍偏离目标":"均值接近目标，波动仍需改善";
+      const phaseWrites=writes.filter(x=>phase==="stage1"?Number(x.frame)===0:phase==="stage2"?Number(x.frame)===1:Number(x.frame)>=2);
+      let directionReversals=0,lastDirection=0,lastDirectionFrame=null;
+      for(const w of phaseWrites){
+        const previous=finiteOrNull(w.previousMlS),next=finiteOrNull(w.commandMlS);
+        const direction=previous===null||next===null?0:Math.sign(next-previous);
+        if(lastDirectionFrame!==w.frame){lastDirection=0;lastDirectionFrame=w.frame;}
+        if(direction){if(lastDirection&&direction!==lastDirection)directionReversals++;lastDirection=direction;}
+      }
+      const groups=[];
+      for(const w of phaseWrites){const g=groups[groups.length-1];if(g&&g.frame===Number(w.frame)&&w.tMs-g.lastMs<3000){g.lastMs=w.tMs;g.writes++;}else groups.push({frame:Number(w.frame),firstMs:w.tMs,lastMs:w.tMs,writes:1});}
+      const raw=phaseRawSamples(run,phase),target=Number(desiredRealForRunPhase(run,phase));
+      const window=(frame,lo,hi)=>{const a=raw.filter(x=>Number(x.profileFrame)===frame&&Number(x.tMs)>=lo&&Number(x.tMs)<=hi),seen=new Set();const rows=a.filter(x=>{const t=finiteOrNull(x.scaleTimestampSeconds);if(t===null||seen.has(t))return false;seen.add(t);return true;});if(rows.length<6||rows.some((x,i)=>i>0&&(Number(x.scaleTimestampSeconds)<=Number(rows[i-1].scaleTimestampSeconds)||Number(x.scaleTimestampSeconds)-Number(rows[i-1].scaleTimestampSeconds)>.6)))return null;const r=regressionForRawSamples(rows);return r&&r.seconds>=1.2&&r.r2>=.90&&r.slope>0?r:null;};
+      for(let i=0;i<groups.length;i++){
+        const g=groups[i],before=window(g.frame,g.firstMs-1800,g.firstMs-100),next=groups[i+1];
+        const after=window(g.frame,g.lastMs+750,Math.min(g.lastMs+2750,next?next.firstMs-100:Infinity));
+        g.attribution=g.writes>1?"重叠动作组，仅评价组合后的变化":"单次动作前后变化，不能单凭一次观察确定因果";
+        if(!before||!after){g.status="前后有效窗口不足，保留记录";continue;}
+        g.beforeGS=before.slope;g.afterGS=after.slope;g.errorReductionGS=round(Math.abs(before.slope-target)-Math.abs(after.slope-target),3);
+        g.status=g.errorReductionGS>target*.02?"组后目标误差减小":g.errorReductionGS< -target*.02?"组后目标误差增大":"组前后变化较小";
+      }
+      return {phase,status,output:q,writes:phaseWrites.length,directionReversals,actionGroups:groups,
+        learningStatus:excluded?"Shot excluded from learning":learning.applicable?(learning.eligible?"已纳入学习候选；仍经过杯间共识与限幅":"暂未纳入："+learning.reason+(learning.outputQualityReason?"（S2 输出质量："+learning.outputQualityReason+"）":"")):"使用原固定曲线学习规则"};
+    });
+    const good=phases.every(x=>controlQualityGood(x.output));
+    return {status:good?"本杯后段目标跟踪及平滑度良好":"本杯仍有偏差或数据不足，详情见阶段诊断",phases,
+      controllerStatus:run.liveFlowTrim&&run.liveFlowTrim.status||"未开启杯内调流",writes:writes.length,
+      note:"自动分析用于日常判断；动作响应重叠时评价组合效果。无需日常上传截图或CSV；异常时可选择导出深入排查。"};
+  }
+
+
+  function controlOutputQuality(run,phase) {
+    const target=desiredRealForRunPhase(run,phase),whole=diagnosticRawRegression(run,phase);
+    const win=phase==="stage2"?s2LearningWindow(run):null;
+    const plateauStart=phase==="stage2"?stage2PlateauStartMs(run):null;
+    const cutoffMs=phase==="stage2"?(plateauStart!==null?plateauStart:(win&&Number.isFinite(win.startMs)?win.startMs:null)):(win&&Number.isFinite(win.startMs)?win.startMs:null);
+    if(win&&win.refill&&!win.confirmed)return {available:false,reason:"refill-return-unconfirmed",windowSettleMs:win.settleMs,chainSettleMs:win.chainSettleMs}; 
+    const all=scaleSampleGate(phaseRawSamples(run,phase)),raw=cutoffMs===null?all:all.filter(x=>Number(x.tMs)>=cutoffMs);
+    const lastAt=all.length?Number(all[all.length-1].tMs):null;
+    const plateauFallback=phase==="stage2"&&plateauStart!==null&&Number.isFinite(lastAt)&&plateauStart>=lastAt-1200-1;
+    if(!target)return {available:false,reason:"no-target"};
+    
+    
+    if(raw.length<6)return {available:false,reason:cutoffMs===null||all.length<6?"raw-samples-insufficient":"learning-window-too-short",rawSamples:all.length,windowSamples:raw.length};
+    const stamps=new Set(),data=raw.filter(x=>{const t=finiteOrNull(x.scaleTimestampSeconds);if(t===null||stamps.has(t))return false;stamps.add(t);return true;});
+    
+    
+    
+    
+    let reducedWindow=false;
+    if(data.length<6)return {available:false};
+    const lo=Number(data[0].scaleTimestampSeconds),hi=Number(data[data.length-1].scaleTimestampSeconds),tail=phase==="stage2"&&plateauStart!==null?lo:lo+(hi-lo)*.4;
+    const flows=[];
+    for(let i=0;i<data.length;i++){
+      const end=Number(data[i].scaleTimestampSeconds);if(end<tail+1.2)continue;
+      const rows=data.slice(0,i+1).filter(x=>Number(x.scaleTimestampSeconds)>=Math.max(tail,end-2));
+      if(rows.length<6||rows.some((x,j)=>j>0&&(Number(x.scaleTimestampSeconds)<=Number(rows[j-1].scaleTimestampSeconds)||Number(x.scaleTimestampSeconds)-Number(rows[j-1].scaleTimestampSeconds)>.6)))continue;
+      const r=regressionForRawSamples(rows);if(r&&r.seconds>=1.2&&r.r2>=.90&&r.slope>0)flows.push(r.slope);
+    }
+    if(!flows.length&&phase==="stage2"&&data.length>=6){
+      
+      
+      for(let i=0;i<data.length;i++){
+        const end=Number(data[i].scaleTimestampSeconds);if(end<tail+0.8)continue;
+        const rows=data.slice(0,i+1).filter(x=>Number(x.scaleTimestampSeconds)>=Math.max(tail,end-2));
+        if(rows.length<6||rows.some((x,j)=>j>0&&(Number(x.scaleTimestampSeconds)<=Number(rows[j-1].scaleTimestampSeconds)||Number(x.scaleTimestampSeconds)-Number(rows[j-1].scaleTimestampSeconds)>.6)))continue;
+        const r=regressionForRawSamples(rows);if(r&&r.seconds>=0.8&&r.r2>=.95&&r.slope>0){flows.push(r.slope);reducedWindow=true;}
+      }
+    }
+    const mean=average(flows),variance=mean===null?null:average(flows.map(x=>(x-mean)*(x-mean)));
+    const errors=flows.map(x=>Math.abs(x/target-1)*100).sort((a,b)=>a-b);
+    return {available:!!flows.length,targetGS:target,wholePhaseErrorPct:whole?round((whole.slope/target-1)*100,2):null,
+      tailMeanGS:round(mean,3),tailErrorPct:mean===null?null:round((mean/target-1)*100,2),tailRippleCVPct:mean?round(Math.sqrt(variance)/mean*100,2):null,
+      tailP95ErrorPct:errors.length?round(errors[Math.max(0,Math.ceil(errors.length*.95)-1)],2):null,
+      tailRMSEGS:flows.length?round(Math.sqrt(average(flows.map(x=>(x-target)*(x-target)))),3):null,
+      tailOvershootPct:flows.length?round(Math.max(0,Math.max(...flows)/target-1)*100,2):null,windows:flows.length,
+      windowSettleMs:win?win.settleMs:null,chainSettleMs:win?win.chainSettleMs:null,tailFraction:phase==="stage2"&&plateauStart!==null?1:.6,plateauFallback,reducedWindow,basisDetail:phase==="stage2"?(plateauFallback?"late peak; last 1.2 s regression (settle "+((win&&win.settleMs)||0)+" ms)":(plateauStart!==null?"after refill peak + 1.5 s (settle "+((win&&win.settleMs)||0)+" ms); plateau regression":(win?"refill settle "+win.settleMs+" ms; final 60% regression":"final 60% regression"))):"final 60% of phase regression",basis:"actual RAW g/s; rolling regressions over the plateau (S2) or final60% (S1/S3), separate from normalized learning model"};
+  }
+
+  
+  
+  
+  
+  function tailMachineGain(run,phase,actuator){
+    
+    
+    if(!actuator||!(Number(actuator.samples)>=4)||!(Number(actuator.total)>0)||Number(actuator.samples)<Number(actuator.total)*.7)return null;
+    if(!(Number(actuator.pressureLimitedFraction)<.2)||!(Number(actuator.underCommandFraction)<.25))return null;
+    const q=controlOutputQuality(run,phase);
+    if(!q||!q.available||!(Number(q.tailMeanGS)>0))return null;
+    const raw=phaseRawSamples(run,phase)||[];
+    const samples=(run.samples||[]).filter(x=>x.phase===phase&&Number.isFinite(Number(x.machineFlowMlS))&&Number(x.machineFlowMlS)>0);
+    if(raw.length<6||samples.length<4)return null;
+    const first=Number(raw[0].tMs),last=Number(raw[raw.length-1].tMs),tailStart=first+(last-first)*.4;
+    const flows=samples.filter(x=>Number(x.tMs)>=tailStart).map(x=>Number(x.machineFlowMlS));
+    if(flows.length<4)return null;
+    const m=median(flows);
+    if(!(m>0))return null;
+    const k=Number(q.tailMeanGS)/m;
+    if(!(k>.2&&k<=3))return null;
+    return {k,tailMeanGS:round(Number(q.tailMeanGS),3),machineFlowMlS:round(m,3),tailErrorPct:q.tailErrorPct,tailRippleCVPct:q.tailRippleCVPct};
+  }
+
+  
+  
+  function controlLearningAssessment(run,phase) {
+    if(phase==="stage1")return stage1LiveLearning(run);
+    const admission=learningAdmission(run);
+    const c=run&&run.config||{},trace=run&&run.liveFlowTrim&&run.liveFlowTrim.trace||[];
+    const frames=phase==="stage2"?[1]:(c.stage3Shape&&c.stage3Shape.enabled?[2,3,4]:[2]);
+    const changed=!!c.experimentalLiveTrim&&trace.some(x=>x.kind==="write"&&frames.includes(Number(x.frame)));
+    const report={admissionFactor:admission.factor,applicable:changed,eligible:false,basis:"confirmed-target windows normalized to shot-start seed (local model)",reason:"Original fixed-command evidence path",frames:[],outputQuality:changed?controlOutputQuality(run,phase):null,angleStats:computeAngleStats(run.liveFlowTrim,trace)};
+    
+    
+    
+    const oq=report.outputQuality;
+    if(oq&&oq.available===false&&oq.reason)report.outputQualityReason=oq.reason+(Number.isFinite(oq.windowSamples)?" (window "+oq.windowSamples+" / phase "+oq.rawSamples+" raw samples)":"");
+    if(!changed)return report;
+    if(phase==="stage2"&&report.outputQuality&&report.outputQuality.available&&report.outputQuality.tailRippleCVPct>admission.spread(12)){report.reason=`S2 tail ripple ${report.outputQuality.tailRippleCVPct}% exceeds ${round(admission.spread(12),2)}% learning limit`;return report;}
+    const onset=phase==="stage2"?stage2CupOnset(run):null;
+    if(onset&&!onset.detected){report.reason="S2 waiting for sustained cup outflow; pre-output time is excluded";return report;}
+    report.cupFlowOnset=onset;
+    let steadyAfter=onset?onset.startMs:-Infinity;
+    if(phase==="stage2"){
+      const win=s2LearningWindow(run);
+      if(win.refill&&!win.confirmed){report.reason="S2 refill base return unconfirmed; retain actual curve but withhold steady-level learning";return report;}
+      if(Number.isFinite(win.startMs)){steadyAfter=Math.max(steadyAfter,win.startMs);report.refillExcludedUntilMs=steadyAfter;report.s2LearningWindow=win;}
+    }
+    const raw=phaseRawSamples(run,phase).filter(x=>Number(x.tMs)>=steadyAfter),allMachine=(run.samples||[]).filter(x=>x.phase===phase&&Number(x.tMs)>=steadyAfter).sort((a,b)=>a.tMs-b.tMs);
+    const shape=c.stage3Shape&&c.stage3Shape.enabled?c.stage3Shape:null;
+    const seedFor=f=>phase==="stage2"?Number(c.stage2CommandMlS):shape?Number(shape[f===2?"earlyCommand":f===3?"midCommand":"lateCommand"]):Number(c.stage3CommandMlS);
+    const known=(m)=>{
+      const f=Number(m.profileFrame),seed=seedFor(f),v=finiteOrNull(m.targetFlowMlS);
+      if(!frames.includes(f)||!Number.isFinite(seed)||seed<=0||v===null||v<=0)return null;
+      const base=Math.floor(seed*16+0.5)/16;
+      if(v<LIMITS.commandFlowMin||v>LIMITS.commandFlowMax||v<base*.65-.02||v>base*1.35+.02)return null;
+      
+      
+      
+      return v;
+    };
+    const limit=finiteOrNull(c[phase+"PressureLimit"]),m0=allMachine.length?Number(allMachine[0].tMs):0;
+    const machine=allMachine.filter(x=>Number(x.tMs)-m0>=1000);
+    const valid=m=>m.machineTelemetryValid===true&&finiteOrNull(m.machineAgeMs)!==null&&Number(m.machineAgeMs)<=600&&known(m)!==null&&finiteOrNull(m.pressureBar)!==null&&Number(m.pressureBar)>=0&&finiteOrNull(m.machineFlowMlS)!==null&&Number(m.machineFlowMlS)>=0;
+    const good=machine.filter(valid),near=good.filter(x=>limit!==null&&Number(x.pressureBar)>=limit*.95).length;
+    const under=good.filter(x=>Number(x.machineFlowMlS)<known(x)*.7).length;
+    report.actuator={samples:good.length,total:machine.length,pressureLimitedFraction:good.length?near/good.length:1,underCommandFraction:good.length?under/good.length:1};
+    if(limit===null||limit<=0||good.length<4||good.length<.7*machine.length){report.reason="Live learning: fresh machine target/frame coverage below70% or fewer than4 samples";return report;}
+    if(near/good.length>=.2){report.reason="Live learning: pressure limiter active in at least20% of samples";return report;}
+    if(under/good.length>=.25){report.reason="Live learning: actual flow below70% of observed target in at least25% of samples";return report;}
+    report.actuator.eligible=true;
+    if(phase==="stage3"){
+      const stability=stage3StabilityDiagnostics(run);
+      if(stability&&stability.stall&&stability.stall.suspected){report.reason="Live learning: confirmed S3 stall; withhold normalized numeric evidence";return report;}
+    }
+    if(raw.length<admission.samples(6)){report.reason="Live learning: fewer than6 RAW scale samples after latest tare";return report;}
+    const first=Number(raw[0].tMs),last=Number(raw[raw.length-1].tMs);
+    const specs=phase==="stage2"?[{frame:1,name:"S2",lo:first,hi:last,seed:seedFor(1)}]:shape?
+      frames.map((frame,i)=>({frame,name:["S3 EARLY","S3 MID","S3 LATE"][i],lo:first,hi:last,seed:seedFor(frame)})):
+      [{frame:2,name:"S3 EARLY",lo:first,hi:first+(last-first)*.25,seed:seedFor(2)},
+       {frame:2,name:"S3 MID",lo:first+(last-first)*.25,hi:first+(last-first)*.75,seed:seedFor(2)},
+       {frame:2,name:"S3 LATE",lo:first+(last-first)*.75,hi:last,seed:seedFor(2)}];
+    const sources=[];
+    for(const spec of specs){
+      const frameRaw=raw.filter(x=>Number(x.profileFrame)===spec.frame),start=frameRaw.length?Number(frameRaw[0].tMs):Infinity;
+      const data=frameRaw.filter(x=>Number(x.tMs)>=spec.lo&&Number(x.tMs)<=spec.hi&&Number(x.tMs)-start>=1000);
+      const epochs=[],paired=[];let epoch=null,mi=-1,previousStamp=null,previousWeight=null,block=0;
+      for(const x of data){
+        while(mi+1<allMachine.length&&Number(allMachine[mi+1].tMs)<=Number(x.tMs))mi++;
+        const m=allMachine[mi],stamp=finiteOrNull(x.scaleTimestampSeconds),weight=finiteOrNull(x.weightG);
+        if(stamp===null||weight===null||!m||Number(x.tMs)-Number(m.tMs)>600||Number(m.profileFrame)!==spec.frame||!valid(m)){
+          epoch=null;previousStamp=null;previousWeight=null;block++;continue;
+        }
+        if(previousStamp!==null&&stamp<=previousStamp)continue; 
+        const command=known(m),gap=previousStamp!==null&&stamp-previousStamp>.6;
+        const reset=previousWeight!==null&&weight<previousWeight-.2;
+        if(gap||reset){epoch=null;block++;}
+        previousStamp=stamp;previousWeight=weight;
+        paired.push({...x,command,block});
+        if(!epoch||Math.abs(epoch.command-command)>.02){epoch={command,at:Number(x.tMs),rows:[]};epochs.push(epoch);}
+        
+        if(Number(x.tMs)-epoch.at>=750)epoch.rows.push(x);
+      }
+      
+      
+      
+      const minSeconds=admission.seconds(phase==="stage2"?1.5:1.2);
+      const observedSpan=data.length?(Number(data[data.length-1].tMs)-Number(data[0].tMs))/1000:0;
+      const assess=rows=>{
+        const center=median(rows.map(x=>x.normalizedGS)),usable=rows.filter(x=>center>0&&Math.abs(x.normalizedGS/center-1)<=admission.spread(.25));
+        const seconds=usable.reduce((a,x)=>a+x.seconds,0),candidateSeconds=rows.reduce((a,x)=>a+x.seconds,0);
+        const coverage=observedSpan>0?seconds/observedSpan:0,cohort=candidateSeconds>0?seconds/candidateSeconds:0;
+        const failures=[];if(!usable.length)failures.push("no usable RAW windows");if(seconds<minSeconds)failures.push(`usable ${round(seconds,2)}s < ${minSeconds}s`);
+        if(coverage<admission.seconds(.25))failures.push(`temporal coverage ${round(coverage*100,1)}% < ${round(admission.seconds(25),2)}%`);
+        if(cohort<admission.seconds(.6))failures.push(`consistent-window share ${round(cohort*100,1)}% < ${round(admission.seconds(60),2)}%`);
+        return {usable,seconds,candidateSeconds,coverage,cohort,failures,eligible:failures.length===0};
+      };
+      let windows=epochs.map(e=>{const reg=regressionForRawSamples(e.rows);return reg&&reg.samples>=admission.samples(6)&&reg.seconds>=admission.seconds(1.2)&&reg.r2>=admission.r2(.90)&&reg.slope>0?
+        {commandMlS:e.command,measuredGS:reg.slope,normalizedGS:reg.slope*spec.seed/e.command,r2:reg.r2,seconds:reg.seconds,samples:reg.samples,startMs:Number(e.rows[0].tMs),endMs:Number(e.rows[e.rows.length-1].tMs)}:null;}).filter(Boolean);
+      let windowAssessment=assess(windows);
+      if(!windowAssessment.eligible){
+        
+        
+        
+        const chunks=[];let chunk=[];
+        for(const row of paired){
+          if(chunk.length&&row.block!==chunk[chunk.length-1].block){chunks.push(chunk);chunk=[];}
+          if(chunk.length&&Number(row.scaleTimestampSeconds)-Number(chunk[0].scaleTimestampSeconds)>=2){
+            chunk.push(row);chunks.push(chunk);chunk=[];
+          }
+          chunk.push(row);
+        }
+        if(chunk.length)chunks.push(chunk);
+        const dynamic=chunks.map(rows=>{
+          if(rows.length<6||rows.some(x=>x.block!==rows[0].block))return null;
+          const rawReg=regressionForRawSamples(rows);if(!rawReg||rawReg.seconds<admission.seconds(1.2)||rawReg.r2<admission.r2(.90)||rawReg.slope<=0)return null;
+          let exposure=0;const points=[{x:0,y:Number(rows[0].weightG)}];
+          for(let i=1;i<rows.length;i++){
+            const dt=Number(rows[i].scaleTimestampSeconds)-Number(rows[i-1].scaleTimestampSeconds);
+            if(!(dt>0&&dt<=.6))return null;
+            exposure+=dt*(rows[i].command+rows[i-1].command)/(2*spec.seed);
+            points.push({x:exposure,y:Number(rows[i].weightG)});
+          }
+          const model=linearRegression(points);if(!model||model.r2<admission.r2(.90)||model.slope<=0)return null;
+          return {commandMlS:spec.seed*exposure/rawReg.seconds,measuredGS:rawReg.slope,normalizedGS:model.slope,r2:Math.min(rawReg.r2,model.r2),seconds:rawReg.seconds,samples:rows.length,startMs:Number(rows[0].tMs),endMs:Number(rows[rows.length-1].tMs),dynamicExposure:true};
+        }).filter(Boolean);
+        const alternative=assess(dynamic);
+        if(alternative.eligible||alternative.seconds>windowAssessment.seconds){windows=dynamic;windowAssessment=alternative;}
+      }
+      const {usable,seconds}=windowAssessment;
+      const info={frame:spec.frame,name:spec.name,seedCommandMlS:spec.seed,windows:usable,windowCount:usable.length,seconds:round(seconds,2),discardedEpochs:Math.max(0,epochs.length-usable.length),
+        admission:{eligible:windowAssessment.eligible,usableSeconds:round(seconds,2),minimumSeconds:minSeconds,candidateSeconds:round(windowAssessment.candidateSeconds,2),temporalCoveragePct:round(windowAssessment.coverage*100,1),minimumTemporalCoveragePct:round(admission.seconds(25),2),consistentWindowSharePct:round(windowAssessment.cohort*100,1),minimumConsistentWindowSharePct:round(admission.seconds(60),2),failures:windowAssessment.failures}};
+      report.frames.push(info);
+      if(!windowAssessment.eligible){report.reason=`Live learning: ${spec.name} withheld: ${windowAssessment.failures.join("; ")}. RAW windows require >=${round(admission.seconds(1.2),2)}s,${admission.samples(6)}unique samples,R²>=${admission.r2(.90)}`;return report;}
+      const mean=usable.reduce((a,x)=>a+x.normalizedGS*x.seconds,0)/seconds;
+      sources.push({name:spec.name,command:round(spec.seed,3),measured:round(mean,3),r2:round(Math.min(...usable.map(x=>x.r2)),5),seconds:round(seconds,2),quality:"target-normalized local model"});
+    }
+    const duration=sources.reduce((a,x)=>a+x.seconds,0);
+    if(phase==="stage3"&&duration<admission.seconds(5)){report.reason=`Live learning: S3 confirmed-target windows total below${round(admission.seconds(5),2)}s`;return report;}
+    report.eligible=true;report.reason=`Live learning admitted: ${sources.length} region(s), ${round(duration,2)}s across ${report.frames.reduce((a,x)=>a+x.windowCount,0)} confirmed-target windows; response normalized to starting seed using a local proportional model`;
+    if(phase==="stage2"){
+      const x=sources[0],target=Number(c.stage2Flow);
+      report.evidence={runId:run.runId,targetGS:target,command:x.command,measured:x.measured,errorPct:round((x.measured/target-1)*100,1),confidence:"MEDIUM",r2:x.r2,seconds:x.seconds,measurementBasis:report.basis};
+    }else{
+      const overall=sources.reduce((a,x)=>a+x.measured*x.seconds,0)/duration,ratio=sources[2].measured/sources[0].measured;
+      report.evidence={runId:run.runId,targetGS:Number(c.stage3Flow),status:ratio<.75?"LATE DECAY":"STABLE",stall:false,stallQualitative:false,
+        lateToEarlyRatio:round(ratio,3),overallGS:round(overall,3),overallR2:Math.min(...sources.map(x=>x.r2)),overallSeconds:round(duration,2),
+        earlySeconds:shape?Number(shape.earlySeconds):8,midSeconds:shape?Number(shape.midSeconds):14,
+        measurementBasis:shape?"live target-normalized frame windows":"live target-normalized stability windows",normalizationModel:report.basis,source:sources};
+    }
+    return report;
+  }
+
+
+  
+  
+  
+  function liveTrimChainEvidence(run){
+    const trace=(run&&run.liveFlowTrim&&run.liveFlowTrim.trace)||[];
+    const win=s2LearningWindow(run,"chain");
+    if(win.refill&&!win.confirmed)return null; 
+    const afterMs=Number.isFinite(win.startMs)?win.startMs:null;
+    const allWrites=trace.filter(x=>x.kind==="write"&&Number(x.frame)===1&&!x.startupAction&&Number.isFinite(Number(x.commandMlS)));
+    const writes=afterMs===null?allWrites:allWrites.filter(x=>Number(x.tMs)>=afterMs);
+    if(writes.length<2)return null;
+    let chain=null,best=null,lastStep=null;
+    for(const w of writes){
+      const prev=chain&&chain[chain.length-1];
+      const step=prev?Number(w.commandMlS)-Number(prev.commandMlS):Number(w.commandMlS)-Number(w.previousMlS);
+      const same=prev&&Number.isFinite(step)&&Number.isFinite(lastStep)&&step!==0&&Math.sign(step)===Math.sign(lastStep)&&Number(w.tMs)-Number(prev.tMs)<=4000;
+      chain=same?chain.concat([w]):[w];
+      if(step!==null)lastStep=step;
+      if(!best||chain.length>best.length)best=chain.slice();
+    }
+    if(!best||best.length<2)return null;
+    const first=best[0],last=best[best.length-1];
+    if(afterMs!==null){const prior=allWrites.filter(x=>Number(x.tMs)<Number(first.tMs)).slice(-1)[0];if(!prior||Number(prior.tMs)<afterMs)return null;}
+    const c0=Number(first.previousMlS),c1=Number(last.commandMlS);
+    const dCmd=c1-c0;
+    if(!Number.isFinite(dCmd)||Math.abs(dCmd)<0.125)return null;
+    const checks=trace.filter(x=>x.kind==="check"&&Number(x.frame)===1&&Number.isFinite(Number(x.rawGS)));
+    const nearest=t=>checks.filter(x=>Number(x.tMs)<=t).slice(-1)[0];
+    const r0=nearest(Number(first.tMs)),r1=nearest(Number(last.tMs)+2500)||nearest(Number(last.tMs));
+    if(!r0||!r1)return null;
+    const dCup=Number(r1.rawGS)-Number(r0.rawGS);
+    const gain=dCup/dCmd;
+    const usable=Math.sign(dCup)===Math.sign(dCmd)&&Math.abs(dCup)>=0.08&&gain>=0.2&&gain<=3;
+    return {usable,startCommandMlS:c0,commandMlS:c1,startGS:Number(r0.rawGS),endGS:Number(r1.rawGS),deltaCommand:dCmd,deltaGS:dCup,gain:gain,writes:best.map(x=>Number(x.commandMlS)),
+      reason:usable?"single-shot chain shows the LUT-mapped command is low":"command rose without a matching cup-flow change; treat as saturated"};
+  }
+
+  function liveTrimLearningView(run,phase) {
+    if(!run||!run.config||!run.config.experimentalLiveTrim)return run;
+    const trace=run.liveFlowTrim&&run.liveFlowTrim.trace||[];
+    const frames=phase==="stage2"?[1]:(run.config.stage3Shape&&run.config.stage3Shape.enabled?[2,3,4]:[2]);
+    const changed=frames.filter(f=>trace.some(x=>x.kind==="write"&&x.frame===f));
+    if(!changed.length)return run; 
+    const bounds={},commands={};
+    for(const frame of changed){
+      const last=trace.filter(x=>x.kind==="write"&&x.frame===frame).slice(-1)[0];
+      const response=trace.find(x=>x.kind==="machine-target-response"&&x.frame===frame&&x.tMs>=last.tMs&&Math.abs(x.commandMlS-last.commandMlS)<0.001);
+      if(!response)return null;
+      bounds[frame]=response.tMs+2000;commands[frame]=last.commandMlS;
+      const raw=(run.rawScaleSamples||[]).filter(x=>x.phase===phase&&Number(x.profileFrame)===frame&&x.tMs>=bounds[frame]);
+      if(raw.length<6||raw[raw.length-1].tMs-raw[0].tMs<5000)return null;
+    }
+    const keep=x=>x.phase!==phase||bounds[Number(x.profileFrame)]===undefined||x.tMs>=bounds[Number(x.profileFrame)];
+    const c={...run.config,liveTrimLearningBasis:"verified stable-command windows after 2s settle"};
+    if(phase==="stage2")c.stage2CommandMlS=commands[1];
+    else if(c.stage3Shape&&c.stage3Shape.enabled){
+      c.stage3Shape={...c.stage3Shape};
+      for(const [frame,key] of [[2,"earlyCommand"],[3,"midCommand"],[4,"lateCommand"]])if(commands[frame]!==undefined)c.stage3Shape[key]=commands[frame];
+      c.stage3CommandMlS=c.stage3Shape.midCommand;
+    }else c.stage3CommandMlS=commands[2];
+    return {...run,config:c,rawScaleSamples:(run.rawScaleSamples||[]).filter(keep),samples:(run.samples||[]).filter(keep)};
+  }
+
+  function liveTrimPayload() { return state.liveTrim ? state.liveTrim.report : null; }
+  function liveTrimRecord(kind, extra) {
+    const t=state.liveTrim;if(!t)return;
+    const row={kind,tMs:Math.max(0,Date.now()-t.run.startedAtMs),...(extra||{})};
+    t.report.trace.push(row);
+    diagnosticEvent("live_flow_trim",row);
+  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  function computeAngleStats(report,trace) {
+    const band=ANGLE_DEADBAND_DEG;
+    const rows=(trace||[]).filter(x=>x.kind==="check"&&x.freshEvaluation!==false&&Number.isFinite(x.rawGS));
+    if(rows.length<2)return {zeroDegreeShare:null,meanAngleDeg:null};
+    let z=0,a=0,n=0,prev=null;
+    for(const c of rows){
+      if(prev&&Number(c.tMs)>Number(prev.tMs)){
+        const dt=(Number(c.tMs)-Number(prev.tMs))/1000,df=Number(c.rawGS)-Number(prev.rawGS);
+        if(dt>0.05){
+          const slope=df/dt,angleScale=report&&report.trendAngleScale==="relative-per-second"?Math.max(.3,Number(c.targetGS)||1):1,mag=Math.atan(Math.abs(slope)/angleScale)*180/Math.PI;
+          const target=Number.isFinite(Number(c.targetGS))?Number(c.targetGS):null;
+          let angle=mag;
+          if(target!==null){
+            const needUp=target>Number(c.rawGS),inBand=Math.abs(Number(c.rawGS)/target-1)<=.02;
+            if(Math.abs(slope)<1e-9)angle=inBand?0:90;
+            else if((needUp&&slope>0)||(!needUp&&slope<0))angle=Math.min(90,mag);
+            else angle=180-Math.min(90,mag);
+          }
+          if(angle<=band)z++;a+=angle;n++;
+        }
+      }
+      prev=c;
+    }
+    return n?{zeroDegreeShare:round(z/n,3),meanAngleDeg:round(a/n,2)}:{zeroDegreeShare:null,meanAngleDeg:null};
+  }
+  
+  
+  
+  function vectorStepCount(errGS,sameSideStreak,target){const rel=target>0?Math.abs(errGS/target):1;const head=rel<=.10?1:Math.min(8,4+Math.floor((sameSideStreak||0)/3)*2);return Math.max(1,Math.min(head,Math.round(Math.abs(errGS)*8)));}
+  function robustLinearRegression(points) {
+    const sorted=(points||[]).slice().sort((a,b)=>a.x-b.x);
+    if(sorted.length<8)return linearRegression(sorted);
+    const trim=Math.max(1,Math.floor(sorted.length*.15));
+    const kept=sorted.slice(trim,sorted.length-trim);
+    return kept.length>=4?linearRegression(kept):linearRegression(sorted);
+  }
+  
+  
+  
+  function s2FinalSignatureClaimsRun(run) {
+    if(!run)return false;
+    const regime=gainRegimeForRun(run);
+    if(!regime||regime.basis!==S2_FINAL_SIGNATURE_BASIS)return false;
+    const memory=gainMemoryState(false);
+    if(!memory||!Array.isArray(memory.buckets)||!memory.buckets.length)return false;
+    return !!selectGainBucket(memory,regime.signature).bucket;
+  }
+  function liveTrimMemoryCandidate(phase,run) {
+    const stageKey=phase==="stage2"?"s2":phase==="stage3"?"s3":null;
+    if(!stageKey)return null;
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    const currentFirst=stageKey==="s3"||(stageKey==="s2"&&s2FinalSignatureClaimsRun(run));
+    const candidates=currentFirst?[run,state.diagnosticLast,state.diagnosticCurrent]:[state.diagnosticLast,run,state.diagnosticCurrent];
+    for(const candidate of candidates){
+      if(!candidate)continue;
+      const gm=gainMemorySuggestion(candidate,stageKey);
+      if(gm&&Number.isFinite(Number(gm.commandMlS))&&Number(gm.commandMlS)>0)return gm;
+    }
+    return null;
+  }
+  
+  
+  
+  function normalTrimQuanta(phase,streak,relativeError,largeGap) {
+    
+    
+    
+    
+    if(largeGap&&phase==="stage2")return streak>=3?8:6;
+    if(relativeError>.15&&streak>=6)return 8;
+    if(relativeError>.15&&streak>=3)return 6;
+    return phase==="stage3"?(relativeError>.15?4:2):4;
+  }
+  function recoveryTimeEstimate(errorGS,r,phase,streak,relativeError,periodS,largeGap) {
+    
+    const quanta=Math.abs(errorGS)/Math.max(.02,r/16);
+    const perWrite=predictiveStepQuanta(errorGS,r,1,normalTrimQuanta(phase,streak,relativeError,largeGap));
+    const fastestS=1.2+Math.ceil(quanta/Math.max(1,perWrite))*periodS;
+    const slowestS=1.2+Math.ceil(quanta*2/Math.max(1,perWrite))*periodS;
+    return {quanta,perWrite,fastestS,slowestS,basis:"average-gain-proxy-range"};
+  }
+  function updateLiveGain(t,reg,frame,command,target) {
+    if(!t.liveGains)t.liveGains={};
+    const key=state.phase+":"+frame,previous=t.liveGains[key];
+    const physicalFrame=physicalFrameForLogical(frame,runProfileLayout(t.run));
+    const now=Date.now(),lim=Number(t.profile.steps[physicalFrame].limiter.value);
+    const quiet=t.lastWriteAt===null||now-t.lastWriteAt>=reg.windowMs;
+    const fast=finiteOrNull(reg.fastSlope);
+    const stable=quiet&&reg.r2>=.98&&fast!==null&&Math.abs(fast-reg.slope)<=Math.max(.03,target*.03)
+      &&!t.pending&&!t.retry&&state.lastPressure<lim*.90&&state.lastFlow>=command*.85
+      &&state.lastFlow<=command*1.15&&command>0;
+    if(!stable){delete t.liveGains[key];return;}
+    const observed=reg.slope/command;
+    if(!(observed>=GAIN_R_MIN&&observed<=GAIN_R_MAX)){delete t.liveGains[key];return;}
+    const reset=!previous||Math.abs(previous.command-command)>1/32;
+    const row=reset?{r:observed,count:0,n:0,stamp:null,firstStamp:reg.sourceEndStamp,command}:previous;
+    if(row.stamp!==null&&reg.sourceEndStamp<=row.stamp)return;
+    
+    row.stamp=reg.sourceEndStamp;row.command=command;row.count++;row.n++;
+    row.r=row.r+.20*(observed-row.r);row.at=now;row.coverageS=reg.sourceEndStamp-row.firstStamp;row.requiredCoverageS=reg.windowMs/1000;t.liveGains[key]=row;
+  }
+  function liveResponseInterval(t,frame,rescue) {
+    
+    
+    
+    
+    const ms=rescue?800:(state.phase==="stage3"?2400:(state.phase==="stage2"&&t.largeGapS2?1000:1200));
+    const entry=t.cupResponseByFrame&&t.cupResponseByFrame[frame];
+    return {ms,basis:"unidentified-response-baseline",observedOnsetMs:entry?entry.ms:null};
+  }
+
+  function liveTrimControlCenter(phase,fallbackBase,run) {
+    
+    
+    if (tickCache) {
+      const key = phase + ":" + fallbackBase + ":" + state.lastFrame + ":" + (run ? run.runId : "");
+      if (tickCache.cc && tickCache.cc.key === key) return tickCache.cc.value;
+      const v = liveTrimControlCenterUncached(phase, fallbackBase, run);
+      tickCache.cc = { key, value: v };
+      return v;
+    }
+    return liveTrimControlCenterUncached(phase, fallbackBase, run);
+  }
+  function liveTrimControlCenterUncached(phase,fallbackBase,run) {
+    const gm=liveTrimMemoryCandidate(phase,run);
+    const live=state.liveTrim,frame=state.lastFrame;
+    const local=live&&live.run===run&&live.liveGains&&live.liveGains[phase+":"+frame];
+    if(local&&local.count>=3&&local.coverageS+1e-9>=local.requiredCoverageS&&Date.now()-local.at<=600){
+      const target=phase==="stage2"?run.config.stage2Flow:run.config.stage3Flow;
+      const prior=platformMemoryGain(gm)||local.r;
+      const weight=Math.min(.75,.15*(local.count-2));
+      const bounded=Math.max(prior*.75,Math.min(prior*1.25,local.r));
+      const r=prior*(1-weight)+bounded*weight;
+      return {commandMlS:snapCommandFlow(target/r),r,source:"current-cup-blend",confidence:"LOCAL",localR:local.r,weight};
+    }
+    const target=phase==="stage2"?state.cfg.stage2Flow:phase==="stage3"?state.cfg.stage3Flow:null;
+    const gmR=platformMemoryGain(gm);
+    const gmCenter=gmR&&Number.isFinite(Number(target))&&Number(target)>0?snapCommandFlow(Number(target)/gmR):null;
+    
+    
+    
+    
+    const ff=phase==="stage2"?s2FfPlatformCandidate(target):null;
+    if(ff){
+      let command=ff.commandMlS;
+      if(gmCenter){const hi=Math.max(gmCenter*1.25,gmCenter+0.35),lo=Math.min(gmCenter*0.75,gmCenter-0.35);command=snapCommandFlow(clampCommandFlow(Math.max(lo,Math.min(hi,command))));}
+      if(command)return {commandMlS:command,r:Number(target)/command,source:"feed-forward-k",bucketId:gm?gm.bucketId:null,confidence:"FF"};
+    }
+    if(gmCenter)return {commandMlS:gmCenter,r:gmR,source:"gain-memory",bucketId:gm.bucketId,confidence:gm.confidence};
+    const mapped=Number.isFinite(Number(target))?mappedCommandForReal(target):null;
+    if(Number.isFinite(Number(mapped))&&Number(mapped)>0)return {commandMlS:snapCommandFlow(mapped),r:null,source:"lut"};
+    return {commandMlS:snapCommandFlow(fallbackBase),r:null,source:"profile-base"};
+  }
+  function predictiveStepQuanta(errGS,r,min,max) {
+    if(!(Number(r)>0)||!Number.isFinite(errGS))return min;
+    return Math.max(min,Math.min(max,Math.round(Math.abs(errGS)/r*16)));
+  }
+  
+  
+  
+  function rescueActualStepCap(actualErrGS,r) {
+    if(!(Number(r)>0)||!Number.isFinite(actualErrGS))return 24;
+    return Math.max(2,Math.min(24,Math.round(Math.abs(actualErrGS)/r*16)));
+  }
+  
+  
+  
+  
+  function rescueDirectionGate(t,target,decisionGS,actualErrGS,steps,rescueActive,now) {
+    const dir=Number(t&&t.rescueDir)||0;
+    if(!dir)return null;
+    const targetGS=Number(target);
+    const stepDir=Math.sign(targetGS-Number(decisionGS));
+    if(!stepDir||stepDir===dir)return null;
+    const actDir=Math.sign(actualErrGS);
+    const confirm=stepDir===actDir&&actDir===-dir&&Number.isFinite(targetGS)&&Math.abs(Number(actualErrGS))>=.12*Math.abs(targetGS);
+    const budget=(Number(t.rescueReverseQuanta)||0)+Math.max(0,Number(steps)||0)<=8;
+    if(rescueActive){
+      const dwell=Number(t.rescueEntryAt)>0&&Number(now)-Number(t.rescueEntryAt)>=1500;
+      return confirm&&dwell&&budget?null:"rescue-direction-lock";
+    }
+    const cooling=Number(t.rescueExitAt)>0&&Number(now)-Number(t.rescueExitAt)<=2000;
+    if(cooling)return confirm&&budget?null:"rescue-reverse-cooldown";
+    return null;
+  }
+  
+  
+  
+  
+  
+  
+  function commandCeilingFor(phase,mode,ctx) {
+    const min=LIMITS.commandFlowMin,max=LIMITS.commandFlowMax;
+    const num=v=>v!==null&&v!==undefined&&Number.isFinite(Number(v))?Number(v):NaN;
+    const command=num(ctx&&ctx.command),center=num(ctx&&ctx.center),mapped=num(ctx&&ctx.mapped);
+    const anchor=Number.isFinite(center)?center:Number.isFinite(mapped)?mapped:command;
+    let lo=Math.min(anchor*.8,Number.isFinite(mapped)?mapped:anchor);
+    let hi=Math.max(anchor*(phase==="stage2"&&mode==="normal"?S2_NORMAL_CEILING_RATIO:1.2),Number.isFinite(mapped)?mapped:anchor);
+    if(mode==="rescue"){lo=min;hi=Math.min(max,Math.max(hi,Number.isFinite(mapped)?mapped*2:anchor*2));}
+    if(Number.isFinite(command)){lo=Math.min(lo,command);hi=Math.max(hi,command);}
+    lo=Math.max(min,Math.min(max,Math.ceil(lo*16)/16));
+    hi=Math.max(min,Math.min(max,Math.floor(hi*16)/16));
+    return {lo,hi};
+  }
+  function closeLiveTrim(t) {
+    if(!t)return;clearS2StartupTimers(t);if(!t.handle)return;const h=t.handle;t.handle=null;
+    host.transport.close(h).catch(()=>{});
+  }
+  function stopLiveTrim(reason) {
+    clearTimer("liveTrimTimer");
+    const t=state.liveTrim;if(!t)return;
+    if(t.active){t.active=false;t.report.status=reason;liveTrimRecord("stopped",{reason});}
+    Object.assign(t.report,computeAngleStats(t.report,t.report.trace));
+    closeLiveTrim(t);
+  }
+  function initializeLiveTrim() {
+    state.liveTrim=null;
+    const run=state.diagnosticCurrent;
+    if(!state.cfg.liveFlowTrimTest||!run)return;
+    const c=run.config;
+    const intervention=algorithmInterventionForRun(run);
+    c.experimentalLiveTrim=true;
+    const seconds=(c.activeRelease===false?c.stage1Weight/c.stage1Flow:0)+(c.stage2Weight-c.stage1Weight)/c.stage2Flow+(c.finalWeight-c.stage2Weight)/c.stage3Flow;
+    const level=[1,2,3,4].includes(state.cfg.liveFlowTrimLevel)?state.cfg.liveFlowTrimLevel:3;
+    const budget=[50,150,200,250][level-1];
+    const period=level===1?Math.max(300,Math.round(seconds*1000/50)):[0,300,250,200][level-1];
+    
+    
+    
+    
+    const report={enabled:true,status:intervention==="off"?"observe-only":(c.activeRelease===false?"armed-for-S1":"armed-for-S2"),algorithmIntervention:intervention,level,decisionModel:state.cfg.liveTrimDecisionModel!==false?"predictive":"legacy",plannedDurationMs:Math.round(seconds*1000),periodMs:period,maxChecks:2000,maxWrites:budget,
+      checks:0,writes:0,normalWrites:0,rescueWrites:0,silenceHolds:0,s3NormalWrites:0,s3RescueWrites:0,acks:0,targetConfirmations:0,targetMissTolerance:3,targetMisses:0,consecutiveTargetMisses:0,retries:0,feedbackReleases:0,feedbackPolicy:"trend-vector-response",degradedRetryIntervalMs:3000,minWriteIntervalMs:50,responseTimeoutMs:2000,deadbandPct:4,coastBandS2Pct:8,coastBandS3Pct:10,trendAngleScale:"absolute-per-second",trace:[],zeroDegreeShare:null,meanAngleDeg:null,sameSignStreak:0,bigAngleStreak:0,vectorAngleDeg:null,adaptiveMode:"trend-confirmed-window-and-dynamic-exposure-learning"};
+    report.learningBand=learningPolicy(c.adaptiveLearningLevel).deadband;report.learningLevel=learningPolicy(c.adaptiveLearningLevel).name;
+    report.s2StartupPlan=c.s2StartupPlan||null;report.startupExecution={status:c.s2StartupPlan&&c.s2StartupPlan.enabled?"armed":"not-planned",reason:c.s2StartupPlan&&c.s2StartupPlan.reason||"S2 startup assist disabled"};
+    run.liveFlowTrim=report;
+    state.liveTrim={active:true,started:false,handle:null,run,report,algorithmIntervention:intervention,phase:null,frame:null,frameAt:0,
+      startup:{status:c.s2StartupPlan&&c.s2StartupPlan.enabled?"armed":"disabled",plan:c.s2StartupPlan||{enabled:false}},
+      commands:{},sentCommands:{},ackCommands:{},cupResponseByFrame:{},pending:null,retry:null,lastDecisionStamp:{},lastEvaluatedStamp:{},lastWriteAt:null,sameSignStreak:0,lastSign:0,bigAngleStreak:0,lastCheckGS:null,lastCheckAtMs:0,
+      rescueMode:false,rescueAngleStreak:0,rescueCalmStreak:0,rescueDir:0,rescueEntryAt:0,rescueExitAt:0,rescueReverseQuanta:0,s2Recovery:null,s3Mono:null,phaseWrites:{stage1:0,stage2:0,stage3:0},phaseRescueWrites:{stage1:0,stage2:0,stage3:0},phaseQuanta:{stage1:{normal:0,rescue:0},stage2:{normal:0,rescue:0},stage3:{normal:0,rescue:0}},profile:JSON.parse(JSON.stringify(profileObject()))};
+    liveTrimRecord("armed",{periodMs:report.periodMs});
+  }
+  async function startLiveTrim() {
+    const t=state.liveTrim;
+    if(!t||!t.active||t.started)return;t.started=true;
+    const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&(liveTrimPhaseAllowed(t)||["soak","restart_wait"].includes(state.phase));
+    
+    scheduleLiveTrimTick(t);
+    try {
+      const rr=await api("/machine/info",{method:"GET"});const info=await rr.json();
+      if(!live())return;
+      
+      if(!info||typeof info.model!=="string"||!/^DE1/i.test(info.model))throw new Error("stock DE1 model not confirmed");
+      const opened=await host.transport.open({kind:"websocket",url:"ws://localhost:8080/ws/v1/machine/raw"});
+      if(!opened||!opened.handle)throw new Error("raw socket missing handle");
+      if(!live()){host.transport.close(opened.handle).catch(()=>{});return;}
+      t.handle=opened.handle;t.report.status=algorithmInterventionForRun(t.run)==="off"?"observe-only":(algorithmInterventionForRun(t.run)==="hec"?"hec-external":"monitoring");
+      kickS2Refill(t);
+      host.transport.onEvent(t.handle,event=>{
+        if(!live())return;
+        if(event.type==="close"||event.type==="error"){t.handle=null;if(t.startup&&["boosting","bleeding","returning","return-unconfirmed"].includes(t.startup.status)&&state.phase==="stage2"&&Number(state.lastFrame)===1)abortSequence("S2 startup raw transport failed",true);stopLiveTrim("raw-transport-failed");return;}
+        if(event.type!=="data"||!t.pending)return;
+        try {
+          const x=typeof event.data==="string"?JSON.parse(event.data):event.data;
+          if(x.type==="response"&&x.operation==="write"&&x.characteristicUUID==="A010"&&!t.pending.ack){
+            const pend=t.pending;pend.ack=true;if(pend.startupAction==="boost"&&t.startupAckTimer){clearTimeout(t.startupAckTimer);t.startupAckTimer=null;}t.report.acks++;
+            t.lastResponseMs=Date.now()-pend.at;
+            t.lastAckLatencyMs=t.lastResponseMs;
+            if(!t.ackCommands)t.ackCommands={};t.ackCommands[pend.frame]=pend.command;
+            liveTrimRecord("driver-ack",{frame:pend.frame,latencyMs:Date.now()-pend.at});
+            
+            
+            
+            if(pend.startupAction==="return"&&t.startup&&["returning","return-unconfirmed"].includes(t.startup.status)){t.startup.returnConfirmation="driver-ack";completeS2Startup(t);}
+          }
+        }catch(_){}
+      });
+    }catch(error){if(live())stopLiveTrim(`setup-failed: ${error.message||error}`);}
+  }
+  function kickS2Refill(t) {
+    if(!t||!t.handle||!t.startup||t.startup.plan.strategy!=="refill-85"||t.startup.status!=="armed"||t.startup.kickQueued||state.phase!=="stage2"||Number(state.lastFrame)!==1)return;
+    t.startup.kickQueued=true;scheduleLiveTrimTick(t,0);
+  }
+  function scheduleLiveTrimTick(t,delay) {
+    if(!t.active||state.liveTrim!==t)return;
+    clearTimer("liveTrimTimer");
+    state.liveTrimTimer=setTimeout(()=>{
+      state.liveTrimTimer=null;
+      liveTrimTick(t).catch(error=>{if(state.liveTrim===t&&t.active){stopLiveTrim(`write-failed: ${error.message||error}`);abortSequence("Live flow driver write failed",true);}});
+    },Number.isFinite(delay)?delay:t.report.periodMs);
+  }
+  function observeLiveTrimMachine(machine) {
+    const t=state.liveTrim;if(!t||!t.active||!t.started)return;
+    if(!liveTrimPhaseAllowed(t))return;
+    
+    
+    
+    const frame=liveFrameForLayout(machine.profileFrame);
+    t.observedTarget=machine.machineState==="espresso"&&machine.telemetryValid===true?finiteOrNull(machine.targetFlow):null;
+    if(state.phase==="stage3"||t.startup&&["boosting","bleeding","returning","return-unconfirmed"].includes(t.startup.status)&&(frame!==null&&frame!==1||state.phase!=="stage2")){
+      clearS2StartupTimers(t);
+      if(t.startup){
+        if(["boosting","bleeding","returning","return-unconfirmed"].includes(t.startup.status))t.report.startupExecution={status:"frame-ended",reason:"S2 frame ended; no write to previous frame",cutoff:t.startup.cutoff||null};
+        t.startup.status="frame-ended";
+      }
+    }
+    if(frame!==t.frame||state.phase!==t.phase){
+      if(state.phase!==t.phase){t.rescueMode=false;t.rescueAngleStreak=0;t.rescueCalmStreak=0;t.rescueDir=0;t.rescueEntryAt=0;t.rescueExitAt=0;t.rescueReverseQuanta=0;t.phaseWrites[state.phase]=0;t.phaseRescueWrites[state.phase]=0;if(t.phaseQuanta&&t.phaseQuanta[state.phase]){t.phaseQuanta[state.phase].normal=0;t.phaseQuanta[state.phase].rescue=0;}}
+      t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();
+    }
+    if(state.phase==="stage2"&&frame===1&&t.startup&&!Number.isFinite(t.startup.frameConfirmedAt))t.startup.frameConfirmedAt=Date.now();
+    kickS2Refill(t);
+    const p=t.pending||t.retry;
+    if(p) p.lastObserved={frame,targetFlowMlS:finiteOrNull(machine.targetFlow),telemetryValid:machine.telemetryValid===true,atMs:Date.now()};
+    
+    
+    
+    if(p&&p.ack&&!p.targetSeen&&p.startupAction==="return"&&t.startup&&t.startup.plan.strategy==="refill-85"&&state.phase==="stage2"&&!state.stage2SkipSent&&["returning","return-unconfirmed"].includes(t.startup.status)){
+      const now=Date.now(),actual=finiteOrNull(machine.flow),pressure=finiteOrNull(machine.pressure),limit=Number(t.profile.steps[runPhysicalStageFrame(t.run,"s2")].limiter.value);
+      const matches=machine.machineState==="espresso"&&machine.telemetryValid===true&&frame===1&&["preinfusion","pouring"].includes(machine.substate)&&actual!==null&&pressure!==null&&pressure<limit*.9&&Math.abs(actual-p.command)<=Math.max(1/16,p.command*.05)&&now-p.at>=600;
+      if(!matches)p.returnFlowEvidence=null;
+      else{
+        let evidence=p.returnFlowEvidence;
+        if(!evidence||now-evidence.lastAt>600)evidence=p.returnFlowEvidence={firstAt:now,lastAt:now,count:0};
+        if(!evidence.count||now>evidence.lastAt){evidence.count++;evidence.lastAt=now;}
+        if(evidence.count>=3&&now-evidence.firstAt>=500){
+          t.commands[1]=p.command;t.report.returnFlowCorroborations=(t.report.returnFlowCorroborations||0)+1;
+          t.startup.returnConfirmation="actual-flow-corroborated";
+          liveTrimRecord("startup-return-corroborated",{frame:1,commandMlS:p.command,actualFlowMlS:actual,samples:evidence.count,spanMs:now-evidence.firstAt});
+          completeS2Startup(t);t.report.status="monitoring-return-flow-corroborated";
+        }
+      }
+    }
+    if(p&&(t.pending===p||t.retry===p)&&machine.machineState==="espresso"&&machine.telemetryValid&&frame===p.frame&&
+       !p.targetSeen){
+      
+      
+      
+      
+      const tgt=state.phase==="stage1"?t.run.config.stage1Flow:state.phase==="stage2"?t.run.config.stage2Flow:t.run.config.stage3Flow;
+      let trend=false,basis="raw";
+      if(Date.now()-p.at>=600&&Number.isFinite(p.slopeAtWrite)){
+        const repr=liveTrimRegression(t);
+        if(repr&&Number.isFinite(repr.slope)&&(p.sourceStamp==null||repr.sourceEndStamp>p.sourceStamp)){const oa=Math.abs(p.slopeAtWrite-tgt),na=Math.abs(repr.slope-tgt);if(na<oa-0.015)trend=true;}
+      }
+      if(!trend&&Number.isFinite(p.flowAtWrite)&&Number.isFinite(machine.flow)&&Math.abs(machine.flow-p.flowAtWrite)>=1/16&&Math.sign(machine.flow-p.flowAtWrite)===Math.sign(p.command-p.flowAtWrite)){trend=true;basis="machine";}
+      if(!trend)return;
+      p.targetSeen=true;p.responseBasis=basis;p.responseAt=Date.now();
+      if(basis==="raw"){
+        if(!t.cupResponseByFrame)t.cupResponseByFrame={};
+        const old=t.cupResponseByFrame[frame],ms=Date.now()-p.at;
+        t.cupResponseByFrame[frame]={ms:old?.ms?old.ms*.75+ms*.25:ms,at:Date.now()};
+      }
+      t.report.targetConfirmations++;
+      t.commands[frame]=p.command;t.report.consecutiveTargetMisses=0;t.report.status="monitoring";
+      if(t.retry===p)t.retry=null;
+      if(p.startupAction==="return"&&p.ack&&t.startup)completeS2Startup(t);
+      liveTrimRecord("machine-target-response",{frame,commandMlS:p.command,latencyMs:Date.now()-p.at,basis});
+    }
+  }
+  function encodeLiveFlowFrame(step,frame,command) {
+    if(!step||step.pump!=="flow"||step.exit||!Number.isInteger(frame)||frame<0||frame>=LIMITS.maxProfileFrames)throw new Error("unsupported frame");
+    if(!Number.isFinite(command)||command<LIMITS.commandFlowMin||command>LIMITS.commandFlowMax)throw new Error("flow out of bounds");
+    const snapped=toDriverStep(command);
+    const temp=Number(step.temperature),seconds=Number(step.seconds),volume=Number(step.volume);
+    if(!Number.isFinite(temp)||temp<70||temp>100||!Number.isFinite(seconds)||seconds<0||!Number.isFinite(volume)||volume!==0)throw new Error("unsupported frame metadata");
+    
+    
+    const flags=0x40|0x01|(step.sensor==="water"?0x10:0)|(step.transition==="smooth"?0x20:0);
+    const duration=seconds===0?0:seconds>=12.75?(0x80|Math.min(127,Math.floor(seconds+0.5))):Math.floor(seconds*10+0.5);
+    const bytes=[frame,flags,Math.round(snapped*16),Math.floor(temp*2+0.5),duration,0,4,0];
+    return bytes.map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join("");
+  }
+  function liveTrimRegression(t) {
+    
+    
+    if (tickCache && t && t.run) {
+      const rss = t.run.rawScaleSamples || [];
+      const key = state.phase + ":" + t.frame + ":" + t.frameAt + ":" + rss.length + ":" + (rss.length ? Number(rss[rss.length - 1].scaleTimestampSeconds) : "");
+      if (tickCache.reg && tickCache.reg.key === key) return tickCache.reg.value;
+      const v = liveTrimRegressionUncached(t);
+      tickCache.reg = { key, value: v };
+      return v;
+    }
+    return liveTrimRegressionUncached(t);
+  }
+  function liveTrimRegressionUncached(t) {
+    
+    
+    
+    
+    const predictive=state.cfg.liveTrimDecisionModel!==false,isS3=state.phase==="stage3";
+    const windowMs=isS3?3000:1600,tailSec=isS3?1.2:.75,headSec=isS3?1.2:.65,horizon=isS3?(predictive?1.2:2):(predictive?1.5:.5);
+    const now=Date.now(),raw=state.phase==="stage2"?phaseRawSamples(t.run,"stage2"):t.run.rawScaleSamples||[],seen=new Set(),points=[];
+    
+    
+    
+    const nowRel=now-t.run.startedAtMs,loMs=Math.max(t.frameAt-t.run.startedAtMs,nowRel-windowMs);
+    let startIdx=0,hiIdx=raw.length;
+    while(startIdx<hiIdx){const mid=(startIdx+hiIdx)>>1;if(Number(raw[mid].tMs)<loMs)startIdx=mid+1;else hiIdx=mid;}
+    for(let k=startIdx;k<raw.length;k++){
+      const x=raw[k];
+      if(Number(x.tMs)>nowRel)break;
+      if(x.phase!==state.phase||Number(x.profileFrame)!==t.frame)continue;
+      if(x.tareReset){points.length=0;seen.clear();continue;}
+      const stamp=finiteOrNull(x.scaleTimestampSeconds),weight=finiteOrNull(x.weightG);
+      if(stamp===null||weight===null||seen.has(stamp))continue;
+      if(points.length&&(stamp<=points[points.length-1].x||stamp-points[points.length-1].x>0.6)){points.length=0;seen.clear();} 
+      seen.add(stamp);points.push({x:stamp,y:weight});
+    }
+    if(points.length<6||points[points.length-1].x-points[0].x<1.2)return null;
+    const r=predictive&&isS3?robustLinearRegression(points):linearRegression(points),end=points[points.length-1].x;
+    const tail=points.filter(p=>end-p.x<=tailSec),head=points.filter(p=>end-p.x>=headSec);
+    const fit=a=>a.length>=4&&a[a.length-1].x-a[0].x>=.45?linearRegression(a):null;
+    const fast=fit(tail),early=fit(head);
+    const fastSlope=fast&&fast.r2>=.90&&fast.slope>=0?fast.slope:null;
+    
+    
+    
+    
+    const targetGS=Number(isS3?state.cfg.stage3Flow:state.cfg.stage2Flow)||0,moveCap=Math.max(.2,.6*targetGS);
+    const center=a=>average(a.map(p=>p.x));
+    const separationS=fast&&early?center(tail)-center(head):null;
+    const acceleration=fastSlope!==null&&early&&early.r2>=.90&&separationS>.1?(fastSlope-early.slope)/separationS:null;
+    const predicted=acceleration!==null?Math.max(0,fastSlope+Math.max(-moveCap,Math.min(moveCap,acceleration*horizon))):fastSlope;
+    return r&&r.r2>=0.90&&r.slope>0?{...r,fastSlope,predicted,sourceEndStamp:end,predictive,windowMs,horizon,acceleration,separationS}:null;
+  }
+  
+  
+  
+  
+  
+  function liveTrimGovernor(t,reg,frame,command,target,base){
+    const now=Date.now();
+    if(state.cfg.liveTrimDecisionModel===false)return null;
+    if(effectiveInterventionForRun(t.run)==="off")return null;
+    if(t.rescueMode)return null;
+    if(state.phase==="stage2"&&t.startup&&t.startup.status==="complete"&&t.startup.plan&&t.startup.plan.strategy==="refill-85"){
+      const rec=t.s2Recovery||(t.s2Recovery={});
+      if(rec.done)return null;
+      const doneAt=Number(t.startup.completedAt);
+      if(!Number.isFinite(doneAt))return null;
+      const handoverEnd=Math.max(doneAt,Number(t.startup.approachAt||0)+Number(t.startup.plan.approachMs||0));
+      if(now<handoverEnd)return null;
+      const since=now-handoverEnd;
+      const fast=finiteOrNull(reg.fastSlope);
+      const flowNow=Number(reg.slope);
+      const remainNow=flowNow>0?Math.max(.5,(Number(t.run.config.stage2Weight)-Number(state.cumulativeWeight))/Math.max(.5,flowNow)):Infinity;
+      const shortS2=Number.isFinite(remainNow)&&remainNow<4;
+      if(!rec.active){
+        
+        
+        const predicted=Number(reg.predicted);
+        if(Number.isFinite(predicted)&&predicted<=target*1.05&&reg.slope<target*1.01)return null;
+        
+        
+        
+        const settleMs=shortS2?500:1500;
+        
+        const previous=rec.peakEvidence;
+        const fresh=!previous||reg.sourceEndStamp>previous.stamp;
+        const noiseFloor=Math.max(.03,target*.01);
+        const falling=fast!==null&&fast<flowNow-noiseFloor;
+        if(fresh&&Number.isFinite(reg.sourceEndStamp))rec.peakEvidence={stamp:reg.sourceEndStamp,
+          fallingCount:falling?((previous&&previous.fallingCount)||0)+1:0};
+        const peakPassed=rec.peakEvidence&&rec.peakEvidence.fallingCount>=2;
+        const peakReady=shortS2?since>=settleMs:(since>=settleMs&&(peakPassed||since>=6000));
+        if(!peakReady)return {hold:true,reason:"S2 post-refill settle"};
+        const T=Number(target),f0=Number(reg.slope);
+        if(!(T>0)||!(f0>0)){rec.done=true;return null;}
+        const uEnd=snapCommandFlow(Math.max(LIMITS.commandFlowMin,Math.min(LIMITS.commandFlowMax,command*T/f0)));
+        if(Math.abs(uEnd-command)<1/16-1e-9){rec.done=true;return null;}
+        const remainS=Math.max(.5,(Number(t.run.config.stage2Weight)-Number(state.cumulativeWeight))/Math.max(.5,f0));
+        rec.active=true;rec.at=now;rec.u0=command;rec.u1=uEnd;rec.dir=Math.sign(uEnd-command);
+        rec.durationMs=shortS2?Math.max(900,Math.min(8000,Math.round(remainS*700))):Math.max(1500,Math.min(8000,Math.round(remainS*700)));
+        rec.f0=f0;rec.T=T;rec.short=shortS2;
+        return {hold:true,reason:"S2 post-refill ramp armed"};
+      }
+      const actualError=flowNow/target-1;
+      const fastError=fast===null?null:fast/target-1;
+      if(Math.abs(actualError)<=.04&&(fastError===null||Math.abs(fastError)<=.04)){
+        rec.active=false;rec.done=true;return {hold:true,reason:"S2 feedback ramp reached target"};
+      }
+      
+      
+      
+      
+      
+      if(rec.dir<0&&actualError>=.08){
+        rec.active=false;rec.done=true;
+        return null;
+      }
+      const wanted=Math.sign(target-flowNow);
+      if(rec.dir&&wanted!==rec.dir){
+        rec.active=false;rec.done=true;
+        return {hold:true,reason:"S2 feedback ramp crossed target"};
+      }
+      if(now-rec.at>=rec.durationMs){
+        rec.active=false;rec.done=true;return null; 
+      }
+      
+      const progress=Math.max(0,Math.min(1,(now-rec.at)/rec.durationMs));
+      const desired=rec.u0+(rec.u1-rec.u0)*progress;
+      
+      const elapsed=Math.max(0,now-Math.max(rec.at,t.lastWriteAt===null?rec.at:t.lastWriteAt));
+      const allowed=Math.min(2,Math.floor(elapsed/600));
+      const distance=Math.max(0,rec.dir*(desired-command));
+      const quanta=Math.min(allowed,Math.floor(distance*16+1e-9));
+      const ref=snapCommandFlow(command+rec.dir*quanta/16);
+      rec.lastFeedbackAt=now;
+      if(Math.abs(ref-command)<1/16-1e-9)return {hold:true,reason:"S2 feedback ramp quantum hold"};
+      return {hold:false,ref,mode:"s2-ramp",steps:Math.max(1,Math.round(Math.abs(ref-command)*16))};
+    }
+    if(state.phase==="stage3"){
+      const entryAge=Number(state.stage3StartedAtMs)>0?now-Number(state.stage3StartedAtMs):Infinity;
+      if(entryAge<3500)return null;
+      const mono=t.s3Mono||(t.s3Mono={frame:null,out:0,sign:0,dir:0,holdUntil:0});
+      if(mono.frame!==frame){mono.frame=frame;mono.out=0;mono.sign=0;mono.dir=0;mono.holdUntil=0;}
+      
+      const T=Number(target),f=Number(reg.slope);
+      if(!(T>0)||!(f>0))return null;
+      const err=f/T-1;
+      if(Math.abs(err)<=0.10){mono.out=0;mono.sign=0;return {hold:true,reason:"coast-trend-stable",trimMode:"coast"};}
+      
+      
+      if(Math.abs(err)>0.15)return null;
+      const sign=Math.sign(err);
+      if(sign===mono.sign)mono.out++;else{mono.sign=sign;mono.out=1;}
+      if(mono.out<2&&Math.abs(err)<0.12)return {hold:true,reason:"S3 monotone confirm"};
+      const dir=-sign;
+      if(mono.dir&&dir!==mono.dir&&(mono.out<3||Math.abs(err)<0.10))return {hold:true,reason:"S3 monotone hysteresis"};
+      const ref=snapCommandFlow(command+dir/16);
+      if(Math.abs(ref-command)<1/16-1e-9)return {hold:true,reason:"S3 monotone command-bound"};
+      return {hold:false,ref,mode:"s3-mono",steps:1,dir};
+    }
+    return null;
+  }
+  async function liveTrimTick(t) {
+    tickCache = { eff: new Map(), reg: null, cc: null, refill: null };
+    try {
+    if(t.startup)t.startup.autoConfirmDelay=null;
+    const predictiveMode=state.cfg.liveTrimDecisionModel!==false;
+    let intervention=effectiveInterventionForRun(t.run);
+    const live=()=>state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&liveTrimPhaseAllowed(t);
+    if(!live()){
+      if(state.liveTrim===t&&t.active&&state.diagnosticCurrent===t.run&&["soak","restart_wait"].includes(state.phase))scheduleLiveTrimTick(t);
+      return;
+    }
+    
+    
+    
+    if(algorithmInterventionForRun(t.run)==="hec"&&!hecTakeoverActive(t.run)&&state.phase==="stage2"&&Number(state.lastFrame)===1&&t.startup&&(t.startup.status==="armed"||(t.startup.status==="disabled"&&state.hecLastContactAtMs===0))&&!hecHeartbeatFresh(Date.now()))hecLatchTakeover(t.run,"hec-no-handshake");
+    
+    
+    if(t.startup&&["boosting","bleeding","returning","return-unconfirmed"].includes(t.startup.status)){
+      if(state.phase!=="stage2"||finiteOrNull(state.lastFrame)!==null&&Number(state.lastFrame)!==1){clearS2StartupTimers(t);t.startup.status="frame-ended";}
+      else if(["returning","return-unconfirmed"].includes(t.startup.status)&&(t.pending||t.retry)&&(t.pending||t.retry).ack&&(t.pending||t.retry).targetSeen&&Date.now()-(t.pending||t.retry).at>=50){
+        t.retry=null;completeS2Startup(t);
+      }else{
+        if(t.startup.status==="boosting"){
+          const reason=t.startup.plan.strategy==="refill-85"?s2RefillReturnReason(t):Date.now()-t.startup.startedAt>=t.startup.plan.holdMs?"S2 startup maximum duration reached":state.lastMachineTelemetryValid&&Date.now()-state.lastMachineAtMs<=600&&state.lastPressure>=Number(t.profile.steps[runPhysicalStageFrame(t.run,"s2")].limiter.value)*.95?"S2 startup pressure margin reached":null;
+          if(reason){
+            t.startup.returnReason=reason;
+            
+            
+            
+            if(t.startup.plan.strategy==="refill-85"&&t.startup.plan.boundedModel===true)await dispatchS2Startup(t,"bleed");
+            else await dispatchS2Startup(t,"return");
+          }
+          
+          
+          
+          
+          
+          else if(t.startup.plan.strategy==="refill-85"&&t.startup.plan.boundedModel===true)await dispatchS2Startup(t,"trim");
+        }
+        if(t.startup.status==="bleeding"){
+          const bp=t.startup,bplan=bp.plan,btarget=t.run.config.stage2Flow;
+          const best=s2RefillFlowEstimate(t);
+          
+          
+          
+          const bflow=best&&Number.isFinite(Number(best.predicted))?Number(best.predicted):best&&Number(best.slope);
+          const bobserved=best&&Number.isFinite(Number(best.slope))?Number(best.slope):null;
+          const bleedElapsed=Date.now()-(Number(bp.bleedStartedAt)||Date.now());
+          
+          
+          const bsettled=bleedElapsed>=Number(bplan.bleedMs||700)
+            ||(Number.isFinite(bflow)&&bflow<=btarget*1.02)
+            ||(bleedElapsed>=250&&Number.isFinite(bobserved)&&bobserved<=btarget*1.02);
+          if(bsettled)await dispatchS2Startup(t,"return");
+        }
+        if(t.startup.status==="return-unconfirmed"){
+          if(t.report.checks>=t.report.maxChecks&&!t.pending){stopLiveTrim(`${t.report.maxChecks}-check-budget-complete`);return;}
+          if(t.pending&&Date.now()-t.pending.at>2000){
+            if(!t.pending.ack){abortSequence("S2 startup base retry driver ACK missing",true);return;}
+            t.retry=t.pending;t.pending=null;
+          }
+          if(!t.pending&&t.retry&&Date.now()-t.retry.at>=3000&&t.report.writes<t.report.maxWrites){
+            if(await dispatchS2Startup(t,"return")){t.report.retries++;t.startup.status="return-unconfirmed";}
+          }
+        }
+        if(t.report.checks<t.report.maxChecks)t.report.checks++;
+        const rfEst=s2RefillFlowEstimate(t);liveTrimRecord("check",{frame:1,phase:state.phase,decision:"hold",reason:"S2 startup bounded pulse or base-return confirmation",startupStatus:t.startup.status,rawGS:rfEst?round(rfEst.slope,3):null,predictedGS:rfEst?round(rfEst.predicted,3):null,predictedCappedGS:rfEst&&rfEst.predictedCapped!=null?rfEst.predictedCapped:null,accelGS2:rfEst?round(rfEst.acceleration,3):null,backstopGS:round(t.run.config.stage2Flow*S2_REFILL_CUTOFF_BACKSTOP,3),estimateGate:rfEst?null:(t.startup.lastEstimateGate?t.startup.lastEstimateGate.gate:null),estimateGateDetail:rfEst?null:(t.startup.lastEstimateGate||null)});
+        scheduleLiveTrimTick(t);return;
+      }
+    }
+    
+    
+    
+    if(algorithmInterventionForRun(t.run)==="hec"&&!hecTakeoverActive(t.run))await hecHeartbeatWatchdog(t);
+    
+    intervention=effectiveInterventionForRun(t.run);
+    const exhausted=t.report.checks>=t.report.maxChecks;
+    if(exhausted&&!t.pending){stopLiveTrim(`${t.report.maxChecks}-check-budget-complete`);return;}
+    if(!exhausted)t.report.checks++;
+    const row={check:t.report.checks,frame:t.frame,phase:state.phase,decision:"hold",freshEvaluation:false};
+    const checkReg=liveTrimRegression(t);
+    if(checkReg)row.rawGS=round(checkReg.slope,3);
+    try {
+      if(t.startup&&t.startup.status==="armed"){
+        const refill=t.startup.plan.strategy==="refill-85";
+        
+        
+        
+        if(refill&&t.startup.adaptiveReplanAt==null&&state.phase==="stage2")adaptiveReplanAtStage2Entry(t);
+        if(refill&&state.phase==="stage2"&&!Number.isFinite(t.startup.enteredAt))t.startup.enteredAt=Date.now();
+        const startupAge=Date.now()-(refill&&Number.isFinite(t.startup.enteredAt)?t.startup.enteredAt:t.frameAt);
+        const early=state.phase==="stage2"&&Number(state.lastFrame)===1&&startupAge<=(t.startup.plan.dispatchWindowMs||2000);
+        if(early&&refill){
+          const autoConfirmMs=releaseMode(t.run.config)==="auto"?AUTO_S2_REFILL_CONFIRM_MS:0;
+          if(!Number.isFinite(t.startup.frameConfirmedAt))t.startup.frameConfirmedAt=Date.now();
+          const confirmMs=Math.max(Number(t.startup.plan.startDelayMs)||0,autoConfirmMs);
+          const elapsed=Date.now()-t.startup.frameConfirmedAt;
+          if(elapsed<confirmMs){
+            
+            
+            
+            if(autoConfirmMs>0){t.startup.autoConfirmScheduled=true;t.startup.autoConfirmDelay=Math.max(20,confirmMs-elapsed);}
+            row.reason="S2 refill start delay";return;
+          }
+        }
+        if(early&&await dispatchS2Startup(t,"boost")){row.reason="S2 startup boost";return;}
+        if(state.phase==="stage3"||state.phase==="stage2"&&startupAge>(t.startup.plan.dispatchWindowMs||2000)){t.startup.status="skipped";t.report.startupExecution={status:"skipped",reason:t.startup.blockReason||"Startup dispatch guards not satisfied in time"};liveTrimRecord("startup-skipped",t.report.startupExecution);}
+      }
+      if(t.startup&&t.startup.resumeAt>Date.now()){row.reason="S2 startup response settling";return;}
+      if(t.pending){
+        const p=t.pending;
+        if(p.ack&&p.targetSeen&&Date.now()-p.at>=50){
+          t.report.feedbackReleases++;liveTrimRecord("feedback-wait-released",{frame:p.frame,latencyMs:Date.now()-p.at});t.pending=null;
+        }else if(Date.now()-p.at>Math.max(2000,t.report.periodMs*2)){
+          if(!p.ack){stopLiveTrim("driver-ack-timeout");abortSequence("Live flow driver acknowledgement timeout",true);return;}
+          if(!p.targetSeen){
+            t.report.targetMisses++;t.report.consecutiveTargetMisses++;
+            liveTrimRecord("vector-unresponsive",{frame:p.frame,commandMlS:p.command,lastObserved:p.lastObserved||null,currentFrame:state.lastFrame,stageTransition:state.stage2SkipSent===true,
+              consecutiveMisses:t.report.consecutiveTargetMisses,tolerance:t.report.targetMissTolerance});
+            
+            
+            
+            t.retry=p;t.report.status=t.report.consecutiveTargetMisses>t.report.targetMissTolerance?
+              "monitoring-unresponsive-trend":`monitoring-unresponsive-${t.report.consecutiveTargetMisses}`;
+            liveTrimRecord("target-feedback-bypass",{frame:p.frame,commandMlS:p.command,consecutiveMisses:t.report.consecutiveTargetMisses});
+          }
+          t.pending=null;
+        }else {row.reason="waiting-for-write-response";return;}
+      }
+      if(exhausted){stopLiveTrim(`${t.report.maxChecks}-check-budget-complete`);return;}
+      if(!t.handle){row.reason="raw-socket-not-ready";return;}
+      if(state.stage1DumpSent&&state.phase==="stage1"){row.reason="stage-transition";return;}
+      if(state.stage2SkipSent&&state.phase==="stage2"){row.reason="stage-transition";return;}
+      const frame=finiteOrNull(state.lastFrame);
+      const layout=runProfileLayout(t.run);
+      const logicalS3Max=2+Math.max(0,t.profile.steps.length-layout.s3-1);
+      if(frame===null||!Number.isInteger(frame)||(state.phase==="stage1"?frame!==0:state.phase==="stage2"?frame!==1:frame<2||frame>logicalS3Max)){row.reason="frame-not-confirmed";return;}
+      if(frame!==t.frame||state.phase!==t.phase){
+        if(state.phase!==t.phase){t.rescueMode=false;t.rescueAngleStreak=0;t.rescueCalmStreak=0;t.rescueDir=0;t.rescueEntryAt=0;t.rescueExitAt=0;t.rescueReverseQuanta=0;t.phaseWrites[state.phase]=0;t.phaseRescueWrites[state.phase]=0;if(t.phaseQuanta&&t.phaseQuanta[state.phase]){t.phaseQuanta[state.phase].normal=0;t.phaseQuanta[state.phase].rescue=0;}}
+        t.frame=frame;t.phase=state.phase;t.frameAt=Date.now();row.reason="frame-settle";return;
+      }
+      const predictive=predictiveMode&&(state.phase==="stage2"||state.phase==="stage3");
+      if(Date.now()-t.frameAt<1600||Date.now()-state.latestScaleAtMs>600||Date.now()-state.lastMachineAtMs>600||!state.lastMachineTelemetryValid||state.lastMachineState!=="espresso"||!["preinfusion","pouring"].includes(state.lastSubstate)){row.reason="settling-or-stale-telemetry";return;}
+      const reg=liveTrimRegression(t);if(!reg){row.reason="raw-regression-insufficient";return;}
+      if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<50){row.reason="minimum-write-interval";return;}
+      if(!t.lastEvaluatedStamp)t.lastEvaluatedStamp={};
+      if(t.lastEvaluatedStamp[frame]===reg.sourceEndStamp||t.lastDecisionStamp[frame]===reg.sourceEndStamp){row.reason="waiting-for-new-scale-sample";return;}
+      t.lastEvaluatedStamp[frame]=reg.sourceEndStamp;
+      row.freshEvaluation=true;
+      const finalTarget=state.phase==="stage1"?t.run.config.stage1Flow:state.phase==="stage2"?t.run.config.stage2Flow:t.run.config.stage3Flow;
+      const handover=state.phase==="stage2"&&t.startup&&t.startup.plan.strategy==="refill-85"&&Number.isFinite(t.startup.approachAt)&&Date.now()-t.startup.approachAt<t.startup.plan.approachMs;
+      const fraction=handover?Math.min(1,Math.max(0,(Date.now()-t.startup.approachAt)/t.startup.plan.approachMs)):1;
+      const target=finalTarget; 
+      
+      
+      row.finalTargetGS=finalTarget;row.handoverProgress=round(fraction,3);row.handoverActive=!!handover;
+      
+      
+      const decisionGS=predictive&&reg.predicted!==null&&reg.predicted!==undefined&&Number.isFinite(Number(reg.predicted))?Number(reg.predicted):reg.slope;
+      row.rawGS=round(reg.slope,3);row.predictedGS=round(decisionGS,3);row.windowMs=reg.windowMs;row.horizonS=reg.horizon;row.targetGS=target;row.errorPct=round((reg.slope/target-1)*100,2);row.r2=round(reg.r2,4);
+      const physicalFrame=physicalFrameForLogical(frame,layout);
+      const step=t.profile.steps[physicalFrame],base=Math.floor(Number(step.flow)*16+0.5)/16;
+      const acknowledged=t.ackCommands&&finiteOrNull(t.ackCommands[frame]);
+      const command=predictive&&acknowledged!==null&&acknowledged!==undefined?acknowledged:(Number.isFinite(t.commands[frame])?t.commands[frame]:base);
+      updateLiveGain(t,reg,frame,command,target);
+      t.refCommand=null;t.governorSteps=null;t.governorMode=null;
+      if(t.retry&&t.retry.frame!==frame){
+        liveTrimRecord("unconfirmed-frame-ended",{frame:t.retry.frame,commandMlS:t.retry.command,nextFrame:frame});
+        t.retry=null; 
+      }
+      const retry=t.retry;
+      
+      if(retry&&Math.sign(retry.command-command)!==Math.sign(target-reg.slope)){
+        if(!predictive){row.reason="unconfirmed-target-direction-changed";return;}
+        row.unconfirmedDirectionChanged=true; 
+      }
+      
+      
+      
+      
+      
+      
+      const errGS=target-decisionGS; 
+      const dir=decisionGS<target?-1:decisionGS>target?1:0;
+      if(dir!==0&&dir===t.lastSign)t.sameSignStreak=(t.sameSignStreak||0)+1;else{t.sameSignStreak=dir!==0?1:0;t.lastSign=dir;}
+      t.report.sameSignStreak=t.sameSignStreak;
+      
+      
+      
+      const prevGS=Number(t.lastCheckGS),prevAt=Number(t.lastCheckAtMs);
+      let angleDeg=null,trendSlope=null;
+      if(Number.isFinite(prevGS)&&prevAt>0){
+        const dtS=(Date.now()-prevAt)/1000;
+        if(dtS>0.1){
+          trendSlope=(reg.slope-prevGS)/dtS;
+          const mag=Math.atan(Math.abs(trendSlope))*180/Math.PI,inBand=Math.abs(reg.slope/target-1)<=0.02;
+          angleDeg=Math.abs(trendSlope)<1e-9?(inBand?0:90):((target>reg.slope?trendSlope>0:trendSlope<0)?Math.min(90,mag):180-Math.min(90,mag));
+        }
+      }
+      
+      
+      if(angleDeg!==null&&angleDeg>=90)t.bigAngleStreak=(t.bigAngleStreak||0)+1;else t.bigAngleStreak=0;
+      t.report.bigAngleStreak=t.bigAngleStreak;t.report.vectorAngleDeg=angleDeg===null?null:round(angleDeg,1);
+      const predictedRel=target>0?Math.abs(target-decisionGS)/target:1;
+      
+      
+      
+      
+      const actualRel=target>0?Math.abs(target-reg.slope)/target:1;
+      if(predictive){
+        if(angleDeg!==null&&angleDeg>=120)t.rescueAngleStreak=(t.rescueAngleStreak||0)+1;else t.rescueAngleStreak=0;
+        const stageEndWeight=state.phase==="stage2"?t.run.config.stage2Weight:t.run.config.finalWeight;
+        const remainingS=Math.max(0,(stageEndWeight-state.cumulativeWeight)/Math.max(.1,decisionGS));
+        
+        
+        
+        const ccRescue=liveTrimControlCenter(state.phase,base,t.run);
+        const rRescue=Number(ccRescue.r)>0?Number(ccRescue.r):(state.phase==="stage3"?1.8:1.2);
+        
+        
+        
+        
+        const gapRel=Number.isFinite(ccRescue.commandMlS)&&ccRescue.commandMlS>0?Math.abs(command-ccRescue.commandMlS)/ccRescue.commandMlS:null;
+        const largeGap=state.phase==="stage2"&&gapRel!==null&&gapRel>.30;
+        t.largeGapS2=largeGap;
+        const estimate=recoveryTimeEstimate(target-decisionGS,rRescue,state.phase,t.bigAngleStreak||0,predictedRel,liveResponseInterval(t,frame,false).ms/1000,largeGap);
+        const cannotReturn=estimate.fastestS>remainingS;
+        row.stepsNeeded=round(estimate.quanta,1);row.timeToReturnS=round(estimate.fastestS,2);
+        row.timeToReturnUpperS=round(estimate.slowestS,2);row.recoveryEstimateBasis=estimate.basis;
+        row.recoveryQuantaPerWrite=estimate.perWrite;row.remainingS=round(remainingS,2);
+        row.commandGapPct=gapRel===null?null:round(gapRel*100,1);row.largeGap=largeGap;
+        const rescueHot=(t.rescueAngleStreak>=2||largeGap)&&predictedRel>.25&&actualRel>=.12&&cannotReturn;
+        if(rescueHot){
+          
+          
+          if(!t.rescueMode){
+            t.rescueDir=Math.sign(target-reg.slope)||0;
+            t.rescueEntryAt=Date.now();
+            t.rescueExitAt=0;
+            t.rescueReverseQuanta=0;
+          }
+          t.rescueMode=true;t.rescueCalmStreak=0;
+        }
+        else if(t.rescueMode){
+          if(predictedRel<.06||(angleDeg!==null&&angleDeg<90))t.rescueCalmStreak=(t.rescueCalmStreak||0)+1;else t.rescueCalmStreak=0;
+          if(t.rescueCalmStreak>=2){t.rescueMode=false;t.rescueExitAt=Date.now();}
+        }
+      }else{
+        t.rescueAngleStreak=0;t.rescueMode=false;t.rescueCalmStreak=0;
+      }
+      const rescueActive=predictive&&!!t.rescueMode&&predictedRel>=.08;
+
+      row.rescue=rescueActive;row.rescueAngleStreak=t.rescueAngleStreak||0;row.predictedErrorPct=round(predictedRel*100,1);
+      
+      
+      
+      if(intervention==="off"){
+        row.decision="observe";row.reason="algorithm-intervention-off-observe-only";
+        t.report.observeOnlyChecks=(t.report.observeOnlyChecks||0)+1;
+        if(rescueActive)t.report.observeOnlyRescue=(t.report.observeOnlyRescue||0)+1;
+        return;
+      }
+      
+      
+      
+      if(intervention==="hec"){
+        row.decision="observe";row.reason="hec-external-only";
+        t.report.hecObserveChecks=(t.report.hecObserveChecks||0)+1;
+        if(rescueActive)t.report.hecObserveRescue=(t.report.hecObserveRescue||0)+1;
+        return;
+      }
+      
+      
+      
+      
+      
+      const decayTarget=t.run.config.stage2Flow;
+      if(state.phase==="stage2"&&t.startup&&t.startup.status==="complete"&&Number.isFinite(reg.slope)&&Number.isFinite(decayTarget)){
+        if(reg.slope>decayTarget*S2_DECAY_EXCEPTION_FACTOR){
+          t.hotStreak=(t.hotStreak||0)+1;
+          if(!t.decayException&&t.hotStreak>=S2_DECAY_EXCEPTION_SAMPLES&&(t.decayExceptionWrites||0)<S2_DECAY_EXCEPTION_MAX_WRITES){
+            t.decayException=true;
+            liveTrimRecord("decay-exception-trigger",{frame,rawGS:round(reg.slope,3),thresholdGS:round(decayTarget*S2_DECAY_EXCEPTION_FACTOR,3),streak:t.hotStreak});
+          }
+        }else{t.hotStreak=0;}
+        if(t.decayException&&reg.slope<decayTarget*S2_DECAY_EXCEPTION_EXIT_FACTOR){
+          liveTrimRecord("decay-exception-exit",{frame,reason:"hysteresis",rawGS:round(reg.slope,3),writes:t.decayExceptionWrites||0});
+          t.decayException=false;t.hotStreak=0;
+        }
+      }else{t.hotStreak=0;if(t.decayException){liveTrimRecord("decay-exception-exit",{frame,reason:"stage-ended",writes:t.decayExceptionWrites||0});t.decayException=false;}} 
+      const decayException=!!t.decayException;
+      if(!rescueActive){
+      if(handover&&reg.slope>target*1.02&&!decayException){
+        const fast=s2RefillFlowEstimate(t);
+        if(!fast||fast.slope<=target*1.02||fast.predicted<=target*1.02){row.reason="S2 handover falling response; avoid an extra decrease";return;}
+      }
+      if(handover&&reg.slope<target){
+        const fast=s2RefillFlowEstimate(t);
+        if(fast&&fast.predicted>=target){row.reason="S2 approach rising response; hold for inertia";return;}
+      }
+      
+      
+      
+      
+      if(state.phase==="stage2"&&!rescueActive&&!handover&&t.startup&&t.startup.status==="complete"&&t.startup.plan&&t.startup.plan.strategy==="refill-85"&&Number.isFinite(t.startup.completedAt)&&Date.now()-t.startup.completedAt<S2_POST_REFILL_UP_HOLD_MS&&decisionGS<target&&reg.slope<=target*1.04){row.reason="s2-post-refill-up-hold";return;}
+      
+      
+      
+      
+      
+      if(state.phase==="stage3"&&Number(state.stage3StartedAtMs)>0&&Date.now()-Number(state.stage3StartedAtMs)<3500&&reg.slope>target*1.2&&decisionGS<target){row.reason="S3 entry overshoot; hold upward correction";return;}
+      if(state.phase==="stage3"&&reg.slope<target&&t.refCommand==null){
+        
+        
+        if(reg.fastSlope!==null&&reg.fastSlope!==undefined&&(reg.fastSlope>=target*.98||reg.predicted>=target)){row.reason="S3 rising response; hold upward correction";return;}
+      }
+      }
+        const governor=(rescueActive||decayException)?null:liveTrimGovernor(t,reg,frame,command,target,base);
+      if(governor&&governor.hold){row.reason=governor.reason;if(governor.trimMode)row.trimMode=governor.trimMode;return;}
+      if(governor&&governor.ref!=null){t.refCommand=governor.ref;t.governorSteps=governor.steps;t.governorMode=governor.mode;row.governor=governor.mode;row.shortS2=!!(t.s2Recovery&&t.s2Recovery.short);}
+      row.refCommand=t.refCommand;
+      const deadband=(Number(t.report.deadbandPct)||4)/100;
+      if(t.refCommand==null&&Math.abs(decisionGS/target-1)<=deadband+1e-9){row.reason="inside-"+Math.round(deadband*100)+"pct-band";return;}
+      const limiter=Number(step.limiter&&step.limiter.value);
+      const pressureLimited=!Number.isFinite(limiter)||state.lastPressure>=0.95*limiter;
+      const actuatorLow=state.lastFlow<command*0.7;
+      if(!predictive&&reg.slope<target&&(pressureLimited||actuatorLow)){row.reason="pressure-or-actuator-limited";return;}
+      if(predictive&&pressureLimited&&decisionGS<target){row.reason="pressure-limited-upward-blocked";return;}
+      if(predictive&&actuatorLow&&decisionGS<target&&!rescueActive){row.reason="actuator-low-normal-hold";return;}
+      
+      
+      
+      const forecast=finiteOrNull(reg.predicted)??finiteOrNull(reg.fastSlope);
+      
+      const observedError=target-reg.slope;
+      const forecastError=forecast===null?null:target-forecast;
+      const closing=forecastError!==null&&Math.abs(forecastError)<Math.abs(observedError)-Math.max(.015,target*.002)
+        &&(observedError*forecastError>=0||Math.abs(forecastError)<=target*.02);
+      
+      
+      
+      const trendFlat=Number.isFinite(trendSlope)&&Math.abs(trendSlope)<0.1;
+      
+      
+      
+      
+      const stage3EntryAge=state.phase==="stage3"&&Number(state.stage3StartedAtMs)>0?Date.now()-Number(state.stage3StartedAtMs):Infinity;
+      const stage3EntryCoast=state.phase==="stage3"&&stage3EntryAge<3500&&(reg.slope>target*1.02||(Number.isFinite(trendSlope)&&trendSlope<0));
+      const coastBand=state.phase==="stage3"?0.10:0.08;
+      const predictiveCoast=t.refCommand==null&&!rescueActive&&!stage3EntryCoast&&Math.abs(errGS/target)<=coastBand&&(closing||trendFlat);
+      const trimMode=predictive?(stage3EntryCoast?"coast":rescueActive?"rescue":predictiveCoast?"coast":"vector"):(Math.abs(errGS/target)<=0.06&&(closing||trendFlat)?"coast":(errGS>0&&angleDeg!==null&&angleDeg>=55&&angleDeg<=125?"lut-compensate":"vector"));
+      row.trimMode=trimMode;
+      if(trimMode==="coast"){row.reason="coast-trend-stable";row.coastEntry=!!stage3EntryCoast;return;}
+      if(predictive){
+        if(state.phase==="stage3"){
+          
+          
+          
+          
+          const q=(t.phaseQuanta&&t.phaseQuanta.stage3)||{normal:0,rescue:0};
+          const bigAngleRelease=(t.rescueAngleStreak||0)>=3;
+          if(rescueActive&&q.rescue>=24){row.reason="S3 rescue quantum budget";return;}
+          if(!rescueActive&&q.normal>=24&&!bigAngleRelease){row.reason="S3 normal quantum budget";return;}
+          row.s3QuantaNormal=q.normal;row.s3QuantaRescue=q.rescue;row.bigAngleRelease=bigAngleRelease;
+        }
+        
+        const responseGate=liveResponseInterval(t,frame,rescueActive);
+        const silenceMs=responseGate.ms;
+        if(t.lastWriteAt!==null&&Date.now()-t.lastWriteAt<silenceMs){
+          t.report.silenceHolds=(t.report.silenceHolds||0)+1;
+          row.silenceMs=silenceMs;row.silenceBasis=responseGate.basis;
+          row.reason="predictive-write-silence";return;
+        }
+      }
+      let steps=0,controlCenter=null;
+      if(predictive){
+        controlCenter=liveTrimControlCenter(state.phase,base,t.run);
+        const r=Number(controlCenter.r)>0?Number(controlCenter.r):(state.phase==="stage3"?1.8:1.2);
+        
+        
+        
+        
+        
+        const rescueMin=Math.max(2,Math.min(8,Math.round(.25*Math.abs(errGS)/r*16)));
+        
+        
+        
+        
+        
+        
+        const normalMax=decayException?Math.min(normalTrimQuanta(state.phase,t.bigAngleStreak||0,predictedRel,!!t.largeGapS2),2):normalTrimQuanta(state.phase,t.bigAngleStreak||0,predictedRel,!!t.largeGapS2);
+        
+        
+        
+        const actualErrGS=target-reg.slope;
+        const rescueMax=rescueActualStepCap(actualErrGS,r);
+        const rescueMinCapped=Math.min(rescueMin,rescueMax);
+        steps=t.governorSteps!=null?t.governorSteps:(rescueActive?predictiveStepQuanta(errGS,r,rescueMinCapped,rescueMax):predictiveStepQuanta(errGS,r,1,normalMax));
+        row.controlCenterMlS=round(controlCenter.commandMlS,3);row.controlSource=controlCenter.source;row.controlR=controlCenter.r;row.controlBucket=controlCenter.bucketId||null;row.stepQuanta=steps;
+      }else{
+        steps=trimMode==="lut-compensate"?Math.max(2,vectorStepCount(errGS,t.bigAngleStreak,target)):vectorStepCount(errGS,t.bigAngleStreak,target);
+      }
+      if(predictive){
+        const actualErrGS=target-reg.slope;
+        const directionHold=rescueDirectionGate(t,target,decisionGS,actualErrGS,steps,rescueActive,Date.now());
+        if(directionHold){row.reason=directionHold;return;}
+      }
+      const commandDeltaMlS=t.refCommand==null?null:t.refCommand-command;
+      const actionDirection=commandDeltaMlS===null?Math.sign(errGS):Math.sign(commandDeltaMlS);
+      const raw=Math.round((command+actionDirection*steps/16)*16)/16;
+      const mapped=Number.isFinite(Number(target))?mappedCommandForReal(target):null;
+      let lo,hi;
+      if(predictive){
+        const center=Number.isFinite(Number(controlCenter&&controlCenter.commandMlS))?Number(controlCenter.commandMlS):base;
+        const ceiling=commandCeilingFor(state.phase,rescueActive?"rescue":"normal",{center,mapped,command});
+        lo=ceiling.lo;hi=ceiling.hi;
+      }else{
+        
+        lo=Math.ceil(base*0.8*16)/16;hi=Math.floor(base*1.2*16)/16;
+        if(trimMode==="lut-compensate"&&Number.isFinite(Number(mapped)))hi=Math.max(hi,Math.floor(Math.min(Number(mapped)*0.9,LIMITS.commandFlowMax)*16)/16);
+      }
+      if(!(hi>=lo)){row.reason="control-center-envelope-invalid";return;}
+      const candidate=Math.max(lo,Math.min(hi,raw));
+      if(candidate>command&&(pressureLimited||actuatorLow&&!rescueActive)){
+        row.reason="upward-candidate-actuator-guard";return;
+      }
+      row.intendedQuanta=steps;row.actualQuanta=Math.round(Math.abs(candidate-command)*16);
+      if(candidate===command||candidate<LIMITS.commandFlowMin||candidate>LIMITS.commandFlowMax){row.reason="command-bound-vector";return;}
+      
+      
+      
+      
+      
+      if(t.refCommand==null&&predictive&&!rescueActive&&state.phase==="stage2"&&candidate<command&&Number.isFinite(reg.slope)&&reg.slope<=target*1.04){
+        row.trimMode="coast";row.reason="s2-actual-in-band-down-hold";return;
+      }
+      if(t.report.writes>=t.report.maxWrites){row.reason=`${t.report.maxWrites}-write-budget`;return;}
+      const payload=encodeLiveFlowFrame(step,physicalFrame,candidate);
+      
+      
+      if(!live()||Number(state.lastFrame)!==frame||state.commandBusy){row.reason="frame-changed-or-command-busy";return;}
+      const p={frame,command:candidate,at:Date.now(),ack:false,targetSeen:false,flowAtWrite:finiteOrNull(state.lastFlow),slopeAtWrite:Number.isFinite(reg.slope)?reg.slope:null,sourceStamp:reg.sourceEndStamp};t.pending=p;
+      t.lastWriteAt=p.at;t.lastDecisionStamp[frame]=reg.sourceEndStamp;
+      if(!t.sentCommands)t.sentCommands={};t.sentCommands[frame]={command:candidate,at:p.at,sample:reg.sourceEndStamp};
+      if(retry){t.report.retries++;t.retry=null;}
+      if(predictive){
+        if(rescueActive)t.report.rescueWrites++;else t.report.normalWrites++;
+        t.phaseWrites[state.phase]=(t.phaseWrites[state.phase]||0)+1;
+        if(rescueActive)t.phaseRescueWrites[state.phase]=(t.phaseRescueWrites[state.phase]||0)+1;
+        if(state.phase==="stage3"){if(rescueActive)t.report.s3RescueWrites++;else t.report.s3NormalWrites++;}
+        const quantumStep=Math.round(Math.abs(candidate-command)*16);
+        if(!t.phaseQuanta[state.phase])t.phaseQuanta[state.phase]={normal:0,rescue:0};
+        if(rescueActive)t.phaseQuanta[state.phase].rescue+=quantumStep;else t.phaseQuanta[state.phase].normal+=quantumStep;
+      }
+      t.report.writes++;state.liveTrimDirty=true;
+      if(t.governorMode==="s3-mono"&&t.s3Mono){t.s3Mono.dir=Math.sign(candidate-command)||t.s3Mono.dir;t.s3Mono.out=0;t.s3Mono.holdUntil=0;}
+      liveTrimRecord("write",{frame,commandMlS:candidate,previousMlS:command,retry:!!retry,rawGS:row.rawGS,predictedGS:row.predictedGS,targetGS:target,rescue:rescueActive,steps,intendedQuanta:steps,actualQuanta:Math.round(Math.abs(candidate-command)*16),controlCenterMlS:row.controlCenterMlS,controlSource:row.controlSource,controlR:row.controlR,controlBucket:row.controlBucket,largeGap:!!t.largeGapS2,commandGapPct:row.commandGapPct!=null?row.commandGapPct:null,shortS2:!!(t.s2Recovery&&t.s2Recovery.short),payload});
+      row.decision="write";row.commandMlS=candidate;
+      
+      if(decayException&&candidate<command){
+        t.decayExceptionWrites=(t.decayExceptionWrites||0)+1;
+        liveTrimRecord("decay-exception-write",{frame,commandMlS:candidate,previousMlS:command,quanta:Math.round(Math.abs(candidate-command)*16),count:t.decayExceptionWrites,rawGS:row.rawGS});
+        if(t.decayExceptionWrites>=S2_DECAY_EXCEPTION_MAX_WRITES){
+          liveTrimRecord("decay-exception-exit",{frame,reason:"max-writes",writes:t.decayExceptionWrites});
+          t.decayException=false;t.hotStreak=0;
+        }
+      }
+      await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A010",payload})});
+      
+      
+      
+      if(rescueActive&&t.rescueDir&&Math.sign(candidate-command)!==t.rescueDir){
+        t.rescueReverseQuanta=(t.rescueReverseQuanta||0)+Math.round(Math.abs(candidate-command)*16);
+      }
+    }finally{
+      if(state.liveTrim===t){
+        if(!exhausted){
+          if(Number.isFinite(row.rawGS)&&Number.isFinite(Number(t.lastCheckGS))&&Number(t.lastCheckAtMs)>0){
+            const dtS=(Date.now()-Number(t.lastCheckAtMs))/1000;
+            if(dtS>0.1){
+              
+              
+              const slope=(row.rawGS-Number(t.lastCheckGS))/dtS,mag=Math.atan(Math.abs(slope)/Math.max(.3,Number(row.targetGS)||Number(t.run.config[state.phase==="stage1"?"stage1Flow":state.phase==="stage2"?"stage2Flow":"stage3Flow"])||1))*180/Math.PI,phase=state.phase;
+              const tg=Number(row.targetGS)||Number(t.run.config[phase==="stage1"?"stage1Flow":phase==="stage2"?"stage2Flow":"stage3Flow"])||0;
+              if(tg>0)row.trendAngleDeg=Math.abs(slope)<1e-9?(Math.abs(row.rawGS/tg-1)<=0.02?0:90):((tg>row.rawGS?slope>0:slope<0)?Math.min(90,mag):180-Math.min(90,mag));
+            }
+          }
+          liveTrimRecord("check",row);
+          if(row.freshEvaluation&&Number.isFinite(row.rawGS)){t.lastCheckGS=row.rawGS;t.lastCheckAtMs=Date.now();}
+        }
+        if(live())scheduleLiveTrimTick(t,t.startup&&t.startup.autoConfirmDelay);
+      }
+    }
+    } finally { tickCache = null; }
+  }
+
+  
+  function directStartTestPayload() {
+    const t=state.directStartTest;
+    return t?{active:t.active,status:t.status,requestAtMs:t.requestAtMs,writeAtMs:t.writeAtMs,
+      rawWriteAcknowledged:!!t.rawWriteAcknowledged,machineConfirmed:!!t.machineConfirmed}:null;
+  }
+  function directTestEvent(status) {
+    const t=state.directStartTest;if(!t)return;
+    t.status=status;diagnosticEvent("direct_driver_start_test",directStartTestPayload());
+    log(`DIRECT START TEST: ${status}`);emitSkinChanged();
+  }
+  function closeDirectTestTransport(t) {
+    if(!t||!t.handle)return;const handle=t.handle;t.handle=null;
+    host.transport.close(handle).catch(()=>{});
+  }
+  function cancelDirectStartTest() {
+    clearTimer("directStartTestTimer");
+    const t=state.directStartTest;
+    if(t){t.active=false;closeDirectTestTransport(t);}
+  }
+  async function beginDirectStartTest() {
+    const t={active:true,status:"requesting-espresso",requestAtMs:Date.now(),writeAtMs:null,handle:null};
+    state.directStartTest=t;
+    const live=()=>state.directStartTest===t&&t.active&&state.phase==="restart_wait";
+    const stop=(reason)=>{
+      if(state.directStartTest!==t||!t.active)return;
+      directTestEvent(reason);cancelDirectStartTest();
+    };
+    try {
+      await requestMachineState("espresso");
+      if(!live())return;
+      
+      startRestartPoll();
+      directTestEvent("espresso-request-accepted; physical-GHC-may-be-required");
+      
+      state.directStartTestTimer=setTimeout(()=>stop("raw-setup-timeout; original-GHC-guard-active"),5000);
+      const rr=await api("/machine/info",{method:"GET"});const info=await rr.json();
+      if(!live())return;
+      if(!info||!/^DE1/i.test(info.model||"")||info.groupHeadControllerPresent!==false){
+        stop(info&&info.groupHeadControllerPresent===true?"GHC-confirmation-required; raw-attempt-skipped":"GHC-capability-unknown; raw-attempt-skipped");
+        return;
+      }
+      const opened=await host.transport.open({kind:"websocket",url:"ws://localhost:8080/ws/v1/machine/raw"});
+      if(!opened||!opened.handle)throw new Error("raw socket missing handle");
+      if(!live()){host.transport.close(opened.handle).catch(()=>{});return;}
+      t.handle=opened.handle;
+      host.transport.onEvent(t.handle,event=>{
+        if(!live())return;
+        if(event.type==="close"||event.type==="error"){stop("raw-transport-closed; original-GHC-guard-active");return;}
+        if(event.type!=="data")return;
+        try {
+          const msg=typeof event.data==="string"?JSON.parse(event.data):event.data;
+          if(t.writeAtMs&&msg.type==="response"&&msg.operation==="write"&&String(msg.characteristicUUID).toUpperCase()==="A002"){
+            t.rawWriteAcknowledged=true;stop("raw-write-acknowledged; physical-GHC-may-be-required");
+          }
+        }catch(_){}
+      });
+      if(!live())return;
+      t.writeAtMs=Date.now();directTestEvent("raw-write-dispatched; original-GHC-guard-active");
+      await host.transport.send(t.handle,{type:"text",data:JSON.stringify({type:"request",operation:"write",characteristicUUID:"A002",payload:"04"})});
+    }catch(error){
+      if(!live())return;
+      if(t.writeAtMs===null&&!state.restartTimeoutTimer){stop("espresso-request-failed");abortSequence(`Espresso restart failed: ${error.message||error}`,false);}
+      else stop(`raw-attempt-failed; original-GHC-guard-active: ${error.message||error}`);
+    }
+  }
+
+  function restartPourConfirmed(source, machine) {
+    if (state.phase !== "restart_wait" || state.restartSkipTimer !== null) return;
+    const pourHasBegun = machine && (machine.substate === "preinfusion" || machine.substate === "pouring");
+    if (!machine || machine.machineState !== "espresso" || !pourHasBegun) return;
+    clearTimer("restartPollTimer");
+    clearTimer("restartTimeoutTimer");
+    clearTimer("armReinforceTimer");
+    clearTimer("armReinforceTimer2");
+    if (state.directStartTest && state.directStartTest.active) {
+      state.directStartTest.machineConfirmed = true;
+      directTestEvent("pouring-observed");
+      cancelDirectStartTest();
+    }
+    stopGhcPrompt("confirmed", "Espresso preinfusion/pouring observed — continuing HyperEx");
+    emitSkinChanged();
+    diagnosticEvent("ghc_pour_confirmed", { source, substate: machine.substate, armRequestCount: state.armRequestCount });
+    log(`GHC CONFIRMED. Restart pour confirmed via ${source} (${machine.substate}); scheduling skipStep to desired real ${state.cfg.stage2Flow.toFixed(2)} g/s (DE1 command ${resolvedStageCommandFlow("stage2", state.cfg.stage2Flow).toFixed(2)} ml/s).`);
+    startLiveTrim(); 
+    scheduleRestartSkip();
+  }
+
+  function startRestartPoll() {
+    clearTimer("restartPollTimer");
+    clearTimer("restartTimeoutTimer");
+    clearTimer("armReinforceTimer");
+    log(`Second-stage Espresso request sent. Wait for the pink GHC light; press the physical GHC Espresso button within ${state.cfg.ghcConfirmTimeoutSeconds.toFixed(1)} s. If no pink light, use RE-ARM.`);
+    startGhcCountdown();
+    emitSkinChanged();
+
+    
+    
+    
+    const scheduleArmRetry = (timerName, delaySeconds, ordinal) => {
+      if (!(delaySeconds > 0)) return;
+      state[timerName] = setTimeout(() => {
+        state[timerName] = null;
+        if (state.phase !== "restart_wait") return;
+        state.armRequestCount += 1;
+        state.lastArmRequestAtMs = Date.now();
+        diagnosticEvent("auto_arm_retry", { ordinal, requestCount: state.armRequestCount, delaySeconds });
+        log(`Second-stage automatic arm reinforcement #${ordinal}: request ${state.armRequestCount} at +${delaySeconds.toFixed(1)} s.`);
+        requestMachineState("espresso")
+          .then(() => emitSkinChanged())
+          .catch((error) => log(`Automatic arm reinforcement #${ordinal} failed: ${error.message || error}`));
+      }, delaySeconds * 1000);
+    };
+
+    scheduleArmRetry("armReinforceTimer", state.cfg.autoArmRetry1Seconds, 1);
+    const retry2 = state.cfg.autoArmRetry2Seconds;
+    const retry1 = state.cfg.autoArmRetry1Seconds;
+    const retry2Effective = retry2 > 0 && retry1 > 0 && retry2 <= retry1 ? retry1 + 1 : retry2;
+    scheduleArmRetry("armReinforceTimer2", retry2Effective, 2);
+
+    state.restartTimeoutTimer = setTimeout(() => {
+      state.restartTimeoutTimer = null;
+      if (state.phase !== "restart_wait") return;
+      log(`>>> GHC TIMEOUT — no second-stage pour detected. Sending Idle and clearing HyperEx state. <<<`);
+      requestMachineState("idle").catch((error) => log(`Timeout Idle command failed: ${error.message || error}`));
+      resetSequence(`GHC confirmation window ${state.cfg.ghcConfirmTimeoutSeconds.toFixed(1)} s expired`);
+    }, state.cfg.ghcConfirmTimeoutSeconds * 1000);
+
+    const poll = async () => {
+      if (state.phase !== "restart_wait") return;
+      try {
+        const snapshot = await getMachineSnapshot();
+        const machine = extractMachine(snapshot);
+        state.lastMachineState = machine.machineState;
+        state.lastSubstate = machine.substate;
+        state.lastPressure = machine.pressure;
+    state.lastMachineTelemetryValid = machine.telemetryValid === true;
+        state.lastFlow = machine.flow;
+        const pourHasBegun = machine.substate === "preinfusion" || machine.substate === "pouring";
+        if (machine.machineState === "espresso" && pourHasBegun) {
+          restartPourConfirmed("REST poll", machine);
+          return;
+        }
+      } catch (error) {
+        log(`Restart poll transient error: ${error.message || error}`);
+      }
+      if (state.phase === "restart_wait") state.restartPollTimer = setTimeout(poll, 150);
+    };
+    state.restartPollTimer = setTimeout(poll, 120);
+  }
+
+  async function manualRearmSecondStage() {
+    cancelDirectStartTest(); 
+    if (state.phase !== "restart_wait") throw new Error("HyperEx is not waiting for second-stage GHC confirmation");
+    const now = Date.now();
+    if (now - state.lastArmRequestAtMs < 800) throw new Error("RE-ARM throttled; wait a moment");
+    
+    
+    clearTimer("armReinforceTimer");
+    clearTimer("armReinforceTimer2");
+    state.armRequestCount += 1;
+    state.lastArmRequestAtMs = now;
+    diagnosticEvent("manual_rearm", { requestCount: state.armRequestCount, cumulativeWeightG: round(state.cumulativeWeight, 3) });
+    log(`User RE-ARM request ${state.armRequestCount}; cancelled pending automatic arm retries, preserving cumulative ${state.cumulativeWeight.toFixed(2)} g and current GHC timeout window.`);
+    await requestMachineState("espresso");
+    emitSkinChanged();
+    return uiStatusPayload();
+  }
+
+  async function guardedSingleSkip(expectedFrom, expectedTo, reason, isCurrent) {
+    let frame = null;
+    try {
+      const snapshot = await getMachineSnapshot();
+      const machine = extractMachine(snapshot);
+      const f = finiteOrNull(machine.profileFrame);
+      if (f!==null) frame = Math.floor(f);
+    } catch (error) {
+      log(`Could not preflight profileFrame before ${reason}: ${error.message || error}; using one bounded skip only.`);
+    }
+    if(isCurrent&&!isCurrent())return {cancelled:true,frame};
+    if (frame === expectedTo) {
+      log(`${reason}: profileFrame already ${expectedTo}; no skipStep sent.`);
+      return { skipped: false, frame };
+    }
+    if (frame !== null && frame !== expectedFrom) {
+      throw new Error(`${reason}: refusing skipStep because profileFrame=${frame}, expected ${expectedFrom} (or already ${expectedTo})`);
+    }
+    await requestMachineState("skipStep");
+    return { skipped: true, frame: expectedTo };
+  }
+
+  function scheduleRestartSkip() {
+    if (!isRestartRelease(state.cfg) || state.restartSkipTimer !== null || state.phase !== "restart_wait") return;
+    state.restartSkipTimer = setTimeout(async () => {
+      try {
+        if (state.phase !== "restart_wait") return;
+        const token=state.sequenceStartedAtMs;
+        await guardedSingleSkip(0, 1, "restart -> S2",()=>state.phase==="restart_wait"&&state.sequenceStartedAtMs===token);
+        if(state.phase!=="restart_wait"||state.sequenceStartedAtMs!==token)return;
+        state.phase = "stage2";
+        emitSkinChanged();
+        startFlowStripTicker();
+        startLiveTrim();
+        diagnosticEvent("stage2_start", { targetFlowMlS: state.cfg.stage2Flow });
+        diagnosticSample("stage2-start", true);
+        log(`START S2: skipped profile frame 0 -> 1; desired real ${state.cfg.stage2Flow.toFixed(2)} g/s, DE1 command ${resolvedStageCommandFlow("stage2", state.cfg.stage2Flow).toFixed(2)} ml/s until cumulative ${state.cfg.stage2Weight.toFixed(2)} g.`);
+      } catch (error) {
+        abortSequence(`Could not skip to 5 ml/s stage after restart: ${error.message || error}`, true);
+      } finally {
+        state.restartSkipTimer = null;
+      }
+    }, 0);
+  }
+
+  function beginStage3LowFlow() {
+    if (state.stage2SkipSent || state.phase !== "stage2") return;
+    state.stage2SkipSent = true;
+    diagnosticEvent("stage2_weight_trigger", { cumulativeWeightG: round(state.cumulativeWeight, 3), nextTargetFlowMlS: state.cfg.stage3Flow });
+    log(`Cumulative ${state.cumulativeWeight.toFixed(2)} g reached. Advancing to desired real ${state.cfg.stage3Flow.toFixed(2)} g/s (DE1 command ${resolvedStageCommandFlow("stage3", state.cfg.stage3Flow).toFixed(2)} ml/s) final stage.`);
+    const sequenceToken=state.sequenceStartedAtMs;
+    const layout=runProfileLayout(state.diagnosticCurrent);
+    guardedSingleSkip(layout.s2, layout.s3, "S2 -> S3",()=>state.phase==="stage2"&&state.sequenceStartedAtMs===sequenceToken)
+      .then(() => {
+        if (state.phase === "stage2"&&state.sequenceStartedAtMs===sequenceToken) {
+          state.phase = "stage3";
+          state.stage3StartedAtMs = Date.now();
+          state.stage3PlannedMs = Math.max(1000, (state.cfg.finalWeight - state.cumulativeWeight) / Math.max(0.1, state.cfg.stage3Flow) * 1000);
+          diagnosticEvent("stage3_start", { targetFlowMlS: state.cfg.stage3Flow });
+          diagnosticSample("stage3-start", true);
+          log(`START S3: desired real ${state.cfg.stage3Flow.toFixed(2)} g/s, DE1 command ${resolvedStageCommandFlow("stage3", state.cfg.stage3Flow).toFixed(2)} ml/s until ${state.cfg.finalWeight.toFixed(2)} g.`);
+        }
+      })
+      .catch((error) => abortSequence(`Could not advance to final low-flow stage: ${error.message || error}`, true));
+  }
+
+  function finishSequence() {
+    if (state.finalStopSent || (!["stage2","stage3"].includes(state.phase)&&!(state.phase==="stage1"&&!activeReleaseEnabled(state.cfg)))) return;
+    state.finalStopSent = true;
+    stopLiveTrim("shot-finished");
+    state.phase = "finishing";
+    diagnosticEvent("final_weight_trigger", { cumulativeWeightG: round(state.cumulativeWeight, 3) });
+    log(`Final cumulative weight ${state.cumulativeWeight.toFixed(2)} g reached. Ending Espresso.`);
+    requestMachineState("idle")
+      .catch((error) => log(`Final idle command failed: ${error.message || error}`));
+  }
+
+  function handlePressureSafety(pressure) {
+    if (state.phase === "idle" || ((state.phase === "soak" || state.phase === "dumping") && !isAutoRelease(state.cfg)) || state.phase === "finishing" || state.phase === "aborted") {
+      state.hardPressureSamples = 0;
+      return;
+    }
+    if (pressure > state.cfg.hardPressureLimit) {
+      state.hardPressureSamples += 1;
+      if (state.hardPressureSamples >= 3) {
+        abortSequence(`Pressure > ${state.cfg.hardPressureLimit.toFixed(2)} bar for 3 samples`, true);
+      }
+    } else {
+      state.hardPressureSamples = 0;
+    }
+  }
+
+  function handleStateUpdate(payload) {
+    const machine = extractMachine(payload);
+    state.lastPhysicalFrame = machine.profileFrame;
+    state.lastFrame = liveFrameForLayout(machine.profileFrame);
+    noteMachine(machine);
+    observeLiveTrimMachine(machine);
+
+    if (state.phase === 'idle' && state.runtimeProfileVerified &&
+        (!profileExecutionEquivalent(state.workflowProfile, profileObject()) || !adaptiveHistoryFingerprint())) {
+      invalidateProfileTruth('Profile or calibration context changed before shot start', true);
+    }
+    const active = state.cfg && state.cfg.enabled && state.armed && state.runtimeProfileVerified;
+
+    
+    
+    if (state.cfg && state.cfg.enabled && isHyperExProfileTitle(state.workflowTitle) && !state.runtimeProfileVerified &&
+        machine.machineState === "espresso" && (machine.substate === "preinfusion" || machine.substate === "pouring")) {
+      if (!state.runtimeProfileMismatchAbortSent) {
+        state.runtimeProfileMismatchAbortSent = true;
+        log(`SAFETY STOP: HyperEx workflow started before profile truth was verified (${state.runtimeProfileStatus}). Sending Idle; this run will not enter adaptive history.`);
+        requestMachineState("idle").catch(error => log(`Profile-mismatch safety Idle failed: ${error.message || error}`));
+      }
+      return;
+    }
+
+    
+    
+    const pourHasBegun = machine.substate === "preinfusion" || machine.substate === "pouring";
+
+    
+    
+    if (state.calibrationArmed || state.calibrationActive) {
+      handleCalibrationMachine(machine, pourHasBegun).catch(error => {
+        log(`Calibration state handler error: ${error.message || error}`);
+      });
+      return;
+    }
+
+    if (active && state.phase === "idle" && machine.machineState === "espresso" && pourHasBegun) {
+      const freshScale = state.latestScaleAtMs > 0 && (Date.now() - state.latestScaleAtMs) < 2500;
+      startSequence(freshScale ? state.latestRawWeight : null);
+      log(`Pour confirmed (${machine.substate}); HyperEx control is now live.`);
+    }
+
+    if (state.phase === "idle") {
+      if (machine.machineState === 'idle' && !state.runtimeProfileVerified) scheduleProfileVerification('machine idle');
+      return;
+    }
+
+    handlePressureSafety(machine.pressure);
+
+    if (state.phase === "dumping") {
+      
+      
+      if (machine.machineState === "idle") {
+        confirmDumpIdle("stateUpdate idle", machine);
+      } else if (state.dumpAcceptedAtMs &&
+                 (Date.now() - state.dumpAcceptedAtMs) >= state.cfg.dumpMinSettleSeconds * 1000 &&
+                 dumpLooksReleased(machine)) {
+        confirmDumpIdle(`stateUpdate settled (${machine.machineState || "?"}/${machine.substate || "?"})`, machine);
+      }
+      return;
+    }
+
+    
+    
+    if (state.phase === "restart_wait" && machine.machineState === "espresso" && pourHasBegun) {
+      restartPourConfirmed("stateUpdate", machine);
+      return;
+    }
+
+    if (state.phase === "finishing" && machine.machineState === "idle") {
+      if (state.completionTimer !== null) return;
+      const finalWeight = state.cumulativeWeight;
+      const sequenceToken = state.sequenceStartedAtMs;
+      const run = state.diagnosticCurrent;
+      state.completionTimer = setTimeout(() => {
+        state.completionTimer = null;
+        if (state.phase !== "finishing" || state.sequenceStartedAtMs !== sequenceToken || state.diagnosticCurrent !== run) return;
+        resetSequence(`completed at ${finalWeight.toFixed(2)} g`);
+      }, 500);
+      return;
+    }
+
+    if (isAutoRelease(state.cfg) && (state.phase === "dumping" || state.phase === "soak") && machine.machineState === "idle") {
+      abortSequence("Machine returned to Idle during auto release/soak", false);
+      return;
+    }
+
+    
+    if ((state.phase === "stage1" || state.phase === "stage2" || state.phase === "stage3") && machine.machineState === "idle") {
+      abortSequence("Machine returned to Idle before the programmed trigger (manual stop or external stop)", false);
+    }
+  }
+
+  function handleWorkflowUpdated(payload) {
+    const title = payload && payload.profile && payload.profile.title ? String(payload.profile.title) : "";
+    const previousTitle = state.workflowTitle;
+    const previousCalMode = calibrationModeFromTitle(previousTitle);
+    const selectedCalMode = calibrationModeFromTitle(title);
+    const eventProfile = payload && payload.profile || null;
+    if(isHyperExProfileTitle(title))adoptWorkflowBrewTemperature(eventProfile,true);
+    const unchanged = previousTitle === title && profileExecutionEquivalent(eventProfile, state.workflowProfile) &&
+      (!state.cfg || !isHyperExProfileTitle(title) || profileExecutionEquivalent(eventProfile, profileObject()));
+    if (previousTitle !== title) state.workflowSelectionRevision += 1;
+    state.workflowTitle = title;
+    state.calibrationArmed = selectedCalMode !== null;
+    if (!unchanged || !state.runtimeProfileVerified) {
+      invalidateProfileTruth(isHyperExProfileTitle(title) ? 'workflow notification; GET verification required' : 'not HyperEx', !unchanged && !state.runtimeProfileRepairBusy);
+      if (state.diagnosticCurrent && state.diagnosticCurrent.kind === 'hyperex' && !unchanged) state.diagnosticCurrent.config.profileTruthVerified = false;
+      if (previousTitle !== title) { state.workflowProfile = null; state.profileReadbackAt = null; }
+      if (!state.runtimeProfileRepairBusy) scheduleProfileVerification('workflowUpdated');
+    }
+
+    if (selectedCalMode !== null && state.calibrationMode !== selectedCalMode) {
+      state.calibrationMode = selectedCalMode;
+      storageWrite(STORAGE_CAL_MODE, selectedCalMode);
+      log(`Flow Calibration mode auto-selected from profile: ${calibrationModeConfig(selectedCalMode).label}.`);
+    }
+
+    if (state.calibrationActive && previousCalMode !== null && title !== previousTitle) {
+      finalizeCalibrationRun('interrupted: workflow changed').catch(error => log(`Calibration finalize error: ${error.message || error}`));
+    }
+
+    if (state.scopeMode === 'hyperex') {
+      if (inHyperExScope(title)) {
+        if (selectedCalMode !== null) enterHyperExScopedMultiplier(selectedCalMode !== null ? `Flow Calibration ${calibrationModeConfig(selectedCalMode).label} selected` : 'HyperEx selected')
+          .catch(error => log(`Scoped flowMultiplier apply failed: ${error.message || error}`));
+      } else {
+        restoreHyperExScopedMultiplier('left HyperEx scope')
+          .catch(error => log(`Scoped flowMultiplier restore failed: ${error.message || error}`));
+      }
+    } else if (finiteOrNull(state.scopedOriginalMultiplier) !== null) {
+      restoreHyperExScopedMultiplier('scope mode no longer HyperEx-only')
+        .catch(error => log(`Scoped flowMultiplier restore failed: ${error.message || error}`));
+    }
+
+    recomputeCalibrationUsability();
+    if (state.calibrationArmed) {
+      log(`FLOW CAL ARMED (${calibrationModeConfig().label}) by workflow '${title}'. EMPTY BASKET: tare scale and start Espresso; let the staircase finish.`);
+    } else if (state.armed) {
+      const flows = commandFlowSummary();
+      log(`ARMED by VERIFIED workflow '${title}'. Real targets ${flows.stage1DesiredGS}/${flows.stage2DesiredGS}/${flows.stage3DesiredGS} g/s -> DE1 commands ${flows.stage1CommandMlS}/${flows.stage2CommandMlS}/${flows.stage3CommandMlS} ml/s.`);
+    } else if (isHyperExProfileTitle(title)) {
+      log(`HyperEx selected but NOT ARMED until profile truth is verified: ${state.runtimeProfileStatus}.`);
+    } else if (title) {
+      log(`Not armed: selected workflow profile is '${title}'.`);
+    }
+    emitSkinChanged();
+  }
+
+  return {
+    id: ID,
+    version: PLUGIN_VERSION,
+
+    onLoad(settings) {
+      state.cfg = loadConfig(settings || {});
+      state.temperatureRecheckNeeded=false;
+      state.legacyProfileHiddenTitle="";
+      state.learningContextLoaded = false;
+      state.scopeMode = normalizeScope(state.cfg.flowMultiplierScope);
+      state.calibrationMode = normalizeCalibrationMode(state.cfg.calibrationMode);
+      state.autoApplyNextShot = state.cfg.autoApplyNextShot !== false;
+      state.autoApplyLastStatus = null;
+      state.armed = false;
+      state.workflowProfile = null;
+      state.machineProfileAckKey = "";
+      state.calibrationStorageLoaded = false;
+      state.overrideStorageLoaded = false;state.s2RefillStorageLoaded=false;state.s2RefillSettings=null;state.s2RefillPrevious=null;state.s2RefillLoadWarning=null;
+      state.algorithmIntervention="full";state.algorithmInterventionStorageLoaded=false;
+      state.scopeStorageLoaded = false;
+      state.scopedOriginalStorageLoaded = false;
+      state.runtimeProfileVerified = false;
+      state.runtimeProfileStatus = "not verified";
+      state.runtimeProfileMismatchAbortSent = false;
+      state.calibrationArmed = false;
+      resetSequence();
+      log(`Loaded v${PLUGIN_VERSION}. Release mode=${releaseMode(state.cfg)} (${releaseModeLabel(releaseMode(state.cfg))}); auto uses S1 → 0 bar release frame → S2 → S3, on uses Idle/soak/GHC restart, off is continuous. Scale feedback is validation/advisory only; optional S3 decay-compensation subframes advance by profile time and add no skipStep calls. Dual calibration profiles are installed/updated at first load; HyperEx flow settings are desired REAL mass flow: ${state.cfg.stage1Flow}/${state.cfg.stage2Flow}/${state.cfg.stage3Flow} g/s. flowMultiplier scope=${scopeLabel(state.scopeMode)}. Dashboard idle shortcut=${state.cfg.idleDashboardShortcut ? "enabled" : "off (plugin page primary)"}.`);
+      connectScaleStream();
+      connectWaterLevelStream();
+      storageRead(STORAGE_UI_LANGUAGE);
+    storageRead(STORAGE_CAL);
+      storageRead(STORAGE_SCOPE);
+      storageRead(STORAGE_PENDING_MULT);
+      storageRead(STORAGE_GLOBAL_PREVIOUS);
+      storageRead(STORAGE_SCOPED_ORIGINAL);
+      storageRead(STORAGE_CAL_MODE);
+      storageRead(STORAGE_S1_STARTUP);
+      storageRead(STORAGE_TEST_OVERRIDES);
+      storageRead(STORAGE_S2_REFILL);
+      storageRead(STORAGE_ALGORITHM_INTERVENTION);
+      storageRead(STORAGE_AUTO_APPLY);
+      storageRead(STORAGE_PRESETS);
+      storageRead(STORAGE_LEGACY_PROFILE);
+      storageRead(STORAGE_PRESET_PENDING);
+      storageRead(STORAGE_HISTORY_FILE);
+      storageRead(STORAGE_ADAPTIVE_HISTORY);
+      startPersistentHistoryProbe();
+      refreshFlowMultiplier(true).then(() => {
+        recomputeCalibrationUsability();
+        rescaleOverridesForTargets();
+        emitSkinChanged();
+      });
+      (async () => {
+        let startupProfileRecords = null;
+        try {
+          const listResponse = await api('/profiles?includeHidden=true', { method: 'GET' });
+          const body = await listResponse.json();
+          if (Array.isArray(body)) startupProfileRecords = body;
+        } catch (_) {}
+        try { await ensureProfileInstalled(startupProfileRecords); } catch (_) {}
+        try { await ensureCalibrationProfilesInstalled(startupProfileRecords); } catch (_) {}
+      })();
+      
+      
+      
+      setTimeout(() => {
+        readWorkflowProfile().then((profile) => {
+          if (!profile || !isHyperExProfileTitle(profile.title)) return;
+          state.workflowTitle = profile.title;
+          scheduleProfileVerification('plugin load release mode');
+        }).catch(() => {});
+      }, 1500);
+    },
+
+    async __httpRequestHandler(request) {
+      if(request.endpoint === "perf-timing"){
+        const method=String(request.method||"GET").toUpperCase();
+        if(method==="POST"){
+          const body=request.body||{};
+          if(Object.prototype.hasOwnProperty.call(body,"statusTimingEnabled")){
+            state.statusTiming=emptyStatusTiming(body.statusTimingEnabled!==false);
+            return pluginHttpJson(request,200,{ok:true,perfTiming:state.perfTiming,statusTiming:statusTimingReport()});
+          }
+          if(body.statusTimingReset===true){state.statusTiming=emptyStatusTiming(state.statusTiming?state.statusTiming.enabled:true);}
+          if(body.reset===true){state.perfTiming={};return pluginHttpJson(request,200,{ok:true,perfTiming:state.perfTiming,statusTiming:statusTimingReport()});}
+          for(const [name,s] of Object.entries(body)){
+            if(!s||typeof s!=="object")continue;
+            const cur=state.perfTiming[name]||(state.perfTiming[name]={count:0,maxMs:0,lastMs:0,over50Ms:0});
+            cur.count+=Number(s.count)||0;
+            cur.maxMs=Math.max(cur.maxMs,Number(s.maxMs)||0);
+            cur.lastMs=Number(s.lastMs)||cur.lastMs;
+            cur.over50Ms+=Number(s.over50Ms)||0;
+          }
+          return pluginHttpJson(request,200,{ok:true,perfTiming:state.perfTiming,statusTiming:statusTimingReport()});
+        }
+        return pluginHttpJson(request,200,{perfTiming:state.perfTiming,statusTiming:statusTimingReport()});
+      }
+      if(request.endpoint === "history-review"){
+        try{return pluginHttpJson(request,200,{history:setLearningHistoryReview(request.body),...calibrationStatusPayload()});}
+        catch(error){return pluginHttpJson(request,409,{error:String(error.message||error),...calibrationStatusPayload()});}
+      }
+      if(request.endpoint === "gain-memory-restore"){
+        try{return pluginHttpJson(request,200,{...restoreGainMemoryFromSnapshot(request.body),...calibrationStatusPayload()});}
+        catch(error){return pluginHttpJson(request,409,{error:String(error.message||error),...calibrationStatusPayload()});}
+      }
+      if(request.endpoint === "language"){
+        if(request.body&&Object.prototype.hasOwnProperty.call(request.body,"language")||String(request.method||"GET").toUpperCase()==="POST"){
+          const language=request.body&&request.body.language;if(!["zh","en"].includes(language))return pluginHttpJson(request,400,{error:"Unsupported language"});
+          if(!storageWrite(STORAGE_UI_LANGUAGE,language))return pluginHttpJson(request,503,{error:"Language save failed"});
+          state.uiLanguageEdited=true;state.uiLanguage=language;emitSkinChanged();
+        }
+        return pluginHttpJson(request,200,{language:state.uiLanguage});
+      }
+      if (request.endpoint === "skin") return pluginHttpJson(request, 200, buildSkinSurfaceAnswer());
+      if (request.endpoint === "ui") return pluginHttpHtml(request, 200, buildGhcOverlayHtml());
+      if (request.endpoint === "status") {
+        if (!statusTimingOn()) return pluginHttpJson(request, 200, uiStatusPayload());
+        const timing = {}, started = perfNow();
+        const body = uiStatusPayload({ timing });
+        const built = perfNow();
+        const response = pluginHttpJson(request, 200, body);
+        const ended = perfNow();
+        recordStatusTiming("status", { totalMs: ended - started, buildMs: built - started, diagnosticMs: timing.diagnosticMs, calibrationMs: timing.calibrationMs, serializeMs: ended - built, bytes: utf8ByteLength(response.body) });
+        return response;
+      }
+      if (request.endpoint === "advanced-settings") return pluginHttpJson(request, 200, advancedSettingsPayload());
+      if (request.endpoint === "control-mode") {
+        const method = String(request.method || "GET").toUpperCase();
+        if (method === "POST") {
+          if (state.phase !== "idle" || state.calibrationActive) return pluginHttpJson(request, 409, { error: "Change algorithm intervention only while idle", ...algorithmInterventionPayload() });
+          const mode = normalizeAlgorithmIntervention(request.body && request.body.mode);
+          if (!storageWrite(STORAGE_ALGORITHM_INTERVENTION, mode)) return pluginHttpJson(request, 503, { error: "Algorithm intervention save failed", ...algorithmInterventionPayload() });
+          state.algorithmIntervention = mode;
+          state.algorithmInterventionStorageLoaded = true;
+          emitSkinChanged();
+          return pluginHttpJson(request, 200, algorithmInterventionPayload());
+        }
+        return pluginHttpJson(request, 200, algorithmInterventionPayload());
+      }
+      if (request.endpoint === "external-hello") {
+        if (String(request.method || "GET").toUpperCase() !== "POST") return pluginHttpJson(request, 405, { ok: false, reason: "method-not-allowed" });
+        hecTouchContact(request.body && typeof request.body === "object" ? request.body : null);
+        return pluginHttpJson(request, 200, { ok: true, ...externalStatusPayload(), gainMemory: gainMemoryMirrorPayload(), adaptiveHistory: adaptiveHistoryMirrorPayload(), diagnosticLast: diagnosticLastMirrorPayload(), excludedRunIds: learningExcludedRunIds() });
+      }
+      if (request.endpoint === "external-status") {
+        hecTouchContact(null);
+        return pluginHttpJson(request, 200, externalStatusPayload());
+      }
+      if (request.endpoint === "external-flow") {
+        if (String(request.method || "GET").toUpperCase() !== "POST") return pluginHttpJson(request, 405, { ok: false, reason: "method-not-allowed" });
+        return await externalFlowCommand(request);
+      }
+      if (request.endpoint === "diagnostics") {
+        const run = state.diagnosticLast;
+        if (!run) return pluginHttpJson(request, 404, { error: "No diagnostic run captured yet" });
+        if (!statusTimingOn()) return pluginHttpJson(request, 200, { summary: diagnosticSummaryForStatus(run), run });
+        const timing = {}, started = perfNow();
+        const summary = timedStatusPart(timing, "diagnosticMs", () => diagnosticSummaryForStatus(run));
+        const built = perfNow();
+        const response = pluginHttpJson(request, 200, { summary, run });
+        const ended = perfNow();
+        recordStatusTiming("diagnostics", { totalMs: ended - started, diagnosticMs: timing.diagnosticMs, serializeMs: ended - built, bytes: utf8ByteLength(response.body) });
+        return response;
+      }
+      if (request.endpoint === "diagnostics-csv") {
+        const run = state.diagnosticLast;
+        return pluginHttpText(request, run ? 200 : 404, "text/csv; charset=utf-8", diagnosticCsv(run), run ? { "Content-Disposition": `attachment; filename=hyperex-${run.runId}.csv` } : {});
+      }
+      if (request.endpoint === "history-export") return pluginHttpText(request, 200, "application/json; charset=utf-8", JSON.stringify(historyExportPayload()), { "Content-Disposition": "attachment; filename=hyperex-history.json" });
+
+      if (request.endpoint === "history-import") {
+        if (state.phase !== "idle") return pluginHttpJson(request, 409, { error: "Import only while HyperEx is idle" });
+        if (!state.persistentHistoryLoaded || !state.storageProbeVerified || state.persistentHistoryAvailable === false) return pluginHttpJson(request, 503, { error: "Persistent history storage is not ready" });
+        let body;
+        try { body = typeof request.body === "string" ? JSON.parse(request.body) : (request.body || {}); } catch (_) { return pluginHttpJson(request, 400, { error: "Invalid JSON body" }); }
+        const incoming = Array.isArray(body && body.shots) ? body.shots : (Array.isArray(body) ? body : []);
+        if (!incoming.length) return pluginHttpJson(request, 400, { error: "No shots in file" });
+        const file = state.persistentHistoryFile && Array.isArray(state.persistentHistoryFile.shots)
+          ? state.persistentHistoryFile
+          : { schema: 2, kind: "HyperExAdaptiveHistory", writerVersion: PLUGIN_VERSION, createdAt: new Date().toISOString(), shots: [] };
+        const byId = new Map();
+        for (const row of file.shots || []) if (row && row.runId) byId.set(String(row.runId), row);
+        let imported = 0, replaced = 0, skipped = 0;
+        for (const row of incoming) {
+          if (!row || typeof row !== "object" || !row.runId) { skipped += 1; continue; }
+          const id = String(row.runId);
+          if (byId.has(id)) replaced += 1; else imported += 1;
+          byId.set(id, { ...row, runId: id });
+        }
+        const shots = Array.from(byId.values())
+          .sort((a, b) => String(a.endedAt || a.startedAt || "").localeCompare(String(b.endedAt || b.startedAt || "")))
+          .slice(-HISTORY_FILE_MAX_SHOTS);
+        state.persistentHistoryFile = { ...file, shots, updatedAt: new Date().toISOString() };
+        const persisted = persistHistoryFile();
+        restoreAdaptiveHistoryFromPersistentFile();
+        emitSkinChanged();
+        return pluginHttpJson(request, 200, { imported, replaced, skipped, total: shots.length, persisted: !!persisted });
+      }
+
+      if (request.endpoint === "calibration-import") {
+        if (state.phase !== "idle" || state.calibrationActive) return pluginHttpJson(request, 409, { error: "Import only while HyperEx is idle" });
+        let body;
+        try { body = typeof request.body === "string" ? JSON.parse(request.body) : (request.body || {}); } catch (_) { return pluginHttpJson(request, 400, { error: "Invalid JSON body" }); }
+        let source = body && (body.map || body.calibration || (Array.isArray(body.points) ? body : null));
+        if (!source && Array.isArray(body && body.shots)) {
+          for (let i = body.shots.length - 1; i >= 0; i -= 1) {
+            const fp = body.shots[i] && body.shots[i].fingerprint;
+            if (fp && Array.isArray(fp.lutPoints) && fp.lutPoints.length >= 3) {
+              source = { schema: Number(fp.lutSchema || 3), valid: true, createdAt: fp.mapCreatedAt, baseFlowMultiplier: fp.baseFlowMultiplier, algorithm: fp.lutAlgorithm || "imported-lut", points: fp.lutPoints };
+              break;
+            }
+          }
+        }
+        if (!source || !Array.isArray(source.points)) return pluginHttpJson(request, 400, { error: "No calibration points in file" });
+        const points = source.points
+          .map(p => ({ ...p, actualFlow: Number(p && p.actualFlow), commandFlow: Number(p && p.commandFlow) }))
+          .filter(p => Number.isFinite(p.actualFlow) && p.actualFlow > 0 && Number.isFinite(p.commandFlow) && p.commandFlow >= 0.1 && p.commandFlow <= 8)
+          .sort((a, b) => a.actualFlow - b.actualFlow);
+        const monotonic = [];
+        for (const p of points) if (!monotonic.length || p.commandFlow > monotonic[monotonic.length - 1].commandFlow + 1e-6) monotonic.push(p);
+        if (monotonic.length < 3) return pluginHttpJson(request, 400, { error: "Need at least 3 monotonic points" });
+        const currentBase = Number(calibrationBaseMultiplier());
+        const base = Number.isFinite(Number(source.baseFlowMultiplier)) ? Number(source.baseFlowMultiplier) : (Number.isFinite(currentBase) ? currentBase : (Number(state.flowMultiplierCurrent) || 1));
+        const map = {
+          schema: 3, valid: true,
+          algorithm: source.algorithm || "imported-lut",
+          createdAt: source.createdAt || new Date().toISOString(),
+          baseFlowMultiplier: base,
+          suggestedFlowMultiplier: Number.isFinite(Number(source.suggestedFlowMultiplier)) ? Number(source.suggestedFlowMultiplier) : null,
+          points: monotonic,
+          actualRange: [monotonic[0].actualFlow, monotonic[monotonic.length - 1].actualFlow]
+        };
+        const merged = adoptCalibrationMap(map);
+        emitSkinChanged();
+        return pluginHttpJson(request, 200, { points: merged.points.length, range: merged.actualRange, usable: !!state.calibrationMapUsable, staleReason: state.calibrationMapStaleReason || "", merge: merged.merge || null });
+      }
+      if (request.endpoint === "presets") return pluginHttpJson(request, 200, presetsPayload());
+      if (request.endpoint === "presets-save") {
+        let body;
+        try { body = typeof request.body === "string" ? JSON.parse(request.body) : (request.body || {}); } catch (_) { return pluginHttpJson(request, 400, { error: "Invalid JSON body" }); }
+        try { return pluginHttpJson(request, 200, savePresetSlot(body.slot, body)); } catch (error) { return pluginHttpJson(request, 400, { error: String(error.message || error) }); }
+      }
+      if (request.endpoint === "presets-clear") {
+        let body;
+        try { body = typeof request.body === "string" ? JSON.parse(request.body) : (request.body || {}); } catch (_) { return pluginHttpJson(request, 400, { error: "Invalid JSON body" }); }
+        try { return pluginHttpJson(request, 200, clearPresetSlot(body.slot)); } catch (error) { return pluginHttpJson(request, 400, { error: String(error.message || error) }); }
+      }
+      if (request.endpoint === "presets-apply") {
+        let body;
+        try { body = typeof request.body === "string" ? JSON.parse(request.body) : (request.body || {}); } catch (_) { return pluginHttpJson(request, 400, { error: "Invalid JSON body" }); }
+        try { return pluginHttpJson(request, 200, await applyPresetSlot(body.slot)); } catch (error) { return pluginHttpJson(request, 409, { error: String(error.message || error) }); }
+      }
+      if (request.endpoint === "adaptive-audit") {
+        try { return pluginHttpJson(request,200,await adaptiveAuditPayload()); }
+        catch(error) { return pluginHttpJson(request,503,{error:String(error.message||error),autoApply:state.autoApplyLastStatus}); }
+      }
+      if (request.endpoint === "calibration-status") {
+        await refreshFlowMultiplier(true);
+        if (isHyperExProfileTitle(state.workflowTitle) && profileSyncIsIdle()) {
+          try { await verifyAndRepairSelectedHyperExProfile('diagnostics refresh'); } catch (_) {}
+        }
+        return pluginHttpJson(request, 200, calibrationStatusPayload());
+      }
+      if (request.endpoint === "calibration-mode") {
+        try {
+          if (state.calibrationActive) throw new Error('Cannot change calibration mode while calibration is running');
+          const raw = request.body && request.body.mode !== undefined ? request.body.mode : 'low';
+          state.calibrationMode = normalizeCalibrationMode(raw);
+          storageWrite(STORAGE_CAL_MODE, state.calibrationMode);
+          await ensureCalibrationProfilesInstalled();
+          log(`Flow Calibration mode -> ${calibrationModeConfig().label}; dedicated profile '${calibrationProfileTitle(state.calibrationMode)}'.`);
+          emitSkinChanged();
+          return pluginHttpJson(request, 200, calibrationStatusPayload());
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if (request.endpoint === "adaptive-next-apply") {
+        try {
+          const result = await applyNextShotAdaptiveSuggestion(state.diagnosticLast, "manual");
+          state.autoApplyLastStatus = { runId: result.suggestion.runId, status:"manual-applied", at:new Date().toISOString(), message:"Verified next-shot adaptive override applied manually", commandFlows:result.commandFlows };
+          return pluginHttpJson(request, 200, { ...result, ...calibrationStatusPayload() });
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if (request.endpoint === "adaptive-auto-set") {
+        try {
+          if (state.phase !== "idle" || state.calibrationActive) throw new Error("Auto-apply mode can only be changed while HyperEx is idle");
+          state.autoApplyNextShot = !(request.body && request.body.enabled === false);
+          storageWrite(STORAGE_AUTO_APPLY, state.autoApplyNextShot ? "true" : "false");
+          state.autoApplyLastStatus = { status:"mode", at:new Date().toISOString(), message: state.autoApplyNextShot ? "AUTO APPLY enabled for future completed shots" : "AUTO APPLY disabled; v0.1.39 manual confirmation flow restored" };
+          emitSkinChanged();
+          log(`AUTO APPLY NEXT SHOT -> ${state.autoApplyNextShot ? "ON" : "OFF"}.`);
+          return pluginHttpJson(request, 200, calibrationStatusPayload());
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if(request.endpoint === "refill-settings-save"){
+        try{return pluginHttpJson(request,200,{...await saveS2RefillSettings(request.body),...calibrationStatusPayload()});}
+        catch(error){return pluginHttpJson(request,409,{error:String(error.message||error),...calibrationStatusPayload()});}
+      }
+      if (request.endpoint === "curve-edit-apply") {
+        try { const result=await applyCurveEditorDraft(request.body);return pluginHttpJson(request,200,{...result,...calibrationStatusPayload()}); }
+        catch(error){return pluginHttpJson(request,409,{error:String(error.message||error),...calibrationStatusPayload()});}
+      }
+      if (request.endpoint === "test-command-set") {
+        const previousOverrides=state.testOverrides?JSON.parse(JSON.stringify(state.testOverrides)):null,previousStatus=state.autoApplyLastStatus;let acquired=false,written=false;
+        try {
+          if(state.curveApplyBusy||state.runtimeProfileRepairBusy||state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")throw new Error("曲线正在同步，请稍后再试");
+          if(!isHyperExProfileTitle(state.workflowTitle)||!state.runtimeProfileVerified)throw new Error("请先选择并校验 HyperEx 曲线");
+          if(request.body&&request.body.revision&&request.body.revision!==curveEditorRevision())throw new Error("下一杯参数已改变，请重新载入后编辑");
+          if (!state.cfg) throw new Error("HyperEx configuration unavailable");
+          if (state.phase !== "idle" || state.calibrationActive) throw new Error("Manual test commands can only be changed while HyperEx is idle");
+          recomputeCalibrationUsability();
+          if (!state.calibrationMapUsable) throw new Error(`Calibration LUT is not usable: ${state.calibrationMapStaleReason || "not ready"}`);
+          const incoming = request.body && request.body.stages && typeof request.body.stages === "object" ? request.body.stages : {};
+          const stages = {};
+          const wantsAdaptive=["stage1","stage2"].some(s=>incoming[s]&&String(incoming[s].mode||"").toLowerCase()==="adaptive");
+          const adaptiveSuggestion=wantsAdaptive&&state.diagnosticLast?nextShotAdaptiveSuggestion(state.diagnosticLast):null;
+          for (const stage of ["stage1","stage2","stage3"]) {
+            const q=incoming[stage]&&typeof incoming[stage]==="object"?incoming[stage]:{},previous=state.testOverrides&&state.testOverrides.stages&&state.testOverrides.stages[stage];
+            let mode=String(q.mode||"auto").toLowerCase(),command=Number(q.command),origin="original";
+            const actual=stage==="stage3"?commandFlowSummary().stage3FlatCommandMlS:resolvedStageCommandFlow(stage,state.cfg[stage+"Flow"]);
+            if(mode==="adaptive"){const node=adaptiveSuggestion&&(stage==="stage1"?adaptiveSuggestion.s1:stage==="stage2"?adaptiveSuggestion.s2:null);const eligible=node&&node.usable&&(stage==="stage1"?node.action==="ADJUST":(node.action==="ADJUST"||node.action==="LUT COMPENSATE"))&&Number.isFinite(Number(node.suggestedCommandMlS));
+              
+              
+              const fallback=eligible?null:(stage==="stage2"?adaptiveEstimateFallback(node,Number(state.cfg.stage2Flow)):null);
+              stages[stage]=eligible?{mode:"manual",origin:"adaptive",command:snapCommandFlow(clampCommandFlow(Number(node.suggestedCommandMlS)))}:fallback?{mode:"manual",origin:"adaptive",command:fallback.commandMlS,estimateSource:fallback.source}:{mode:"auto",origin:"original",command:null};continue;}
+            if(mode==="keep"&&sameCommandFlow(command,actual)){stages[stage]=previous?{...previous,origin:stageCommandOrigin(stage,false)}:{mode:"auto",command:null,origin:"original"};continue;}
+            if(mode==="keep")mode="manual";
+            mode=mode==="manual"?"manual":"auto";
+            if(mode==="manual"&&(!Number.isFinite(command)||command<LIMITS.commandFlowMin||command>LIMITS.commandFlowMax))throw new Error(`${stage.toUpperCase()} manual command must be ${LIMITS.commandFlowMin.toFixed(2)}–${LIMITS.commandFlowMax.toFixed(2)} ml/s`);
+            if(mode==="manual")origin="manual";
+            stages[stage]={mode,origin,command:mode==="manual"?snapCommandFlow(clampCommandFlow(command)):null};
+          }
+          const rawShape = request.body && request.body.s3Shape && typeof request.body.s3Shape === "object" ? request.body.s3Shape : {};
+          const shapeEnabled = rawShape.enabled === true;
+          let s3Shape = { enabled:false };
+          if (shapeEnabled && String(rawShape.model || "") === "drift") {
+            const midCommand=Number(rawShape.midCommand);
+            const manual=rawShape.manual===true;
+            const manualTilt=manual&&Number.isFinite(Number(rawShape.manualTilt))?Math.max(-1,Math.min(1,Number(rawShape.manualTilt))):null;
+            let earlyFactor=Number(rawShape.earlyFactor),drift=Number(rawShape.drift);
+            if(manual&&manualTilt!==null){earlyFactor=1+0.45*manualTilt;drift=1-0.20*manualTilt;}
+            const earlySeconds=Number(rawShape.earlySeconds),midSeconds=Number(rawShape.midSeconds);
+            if(![midCommand,earlyFactor,drift,earlySeconds,midSeconds].every(Number.isFinite))throw new Error("S3 drift shape requires finite MID, earlyFactor, drift and timings");
+            if(midCommand<LIMITS.commandFlowMin||midCommand>LIMITS.commandFlowMax)throw new Error("S3 drift MID command outside hard limits");
+            if(earlyFactor<.50||earlyFactor>2.00||drift<.50||drift>2.00)throw new Error("S3 earlyFactor/drift outside 0.50–2.00");
+            if(earlySeconds<3||earlySeconds>30||midSeconds<3||midSeconds>30)throw new Error("S3 shape EARLY/MID times must be 3–30 seconds");
+            const earlyCommand=midCommand*earlyFactor,lateCommand=midCommand*drift;
+            if(![earlyCommand,lateCommand].every(v=>v>=LIMITS.commandFlowMin&&v<=LIMITS.commandFlowMax))throw new Error("S3 drift-derived command outside hard limits");
+            if(lateCommand>Math.max(midCommand+.25,midCommand*1.35)+1e-9)throw new Error("S3 相邻增幅必须在上限内（max +0.25 ml/s / ×1.35）");
+            s3Shape={enabled:true,model:"drift",origin:"manual",manual,manualTilt,midCommand:round(midCommand,3),earlyFactor:round(earlyFactor,4),drift:round(drift,4),earlySeconds:round(earlySeconds,1),midSeconds:round(midSeconds,1),earlyCommand:round(earlyCommand,3),lateCommand:round(lateCommand,3)};
+            const previousShape=s3ShapeStatus();if(previousShape.enabled&&previousShape.model==="drift"&&["midCommand","earlyFactor","drift","earlySeconds","midSeconds"].every(k=>Math.abs(Number(previousShape[k])-Number(s3Shape[k]))<.00001))s3Shape.origin=stageCommandOrigin("stage3",true);
+          } else if (shapeEnabled) {
+            const earlyCommand = Number(rawShape.earlyCommand), midCommand = Number(rawShape.midCommand), lateCommand = Number(rawShape.lateCommand);
+            const earlySeconds = Number(rawShape.earlySeconds), midSeconds = Number(rawShape.midSeconds);
+            for (const [label,v] of [["EARLY",earlyCommand],["MID",midCommand],["LATE",lateCommand]]) {
+              if (!Number.isFinite(v) || v < LIMITS.commandFlowMin || v > LIMITS.commandFlowMax) throw new Error(`S3 ${label} shape command must be ${LIMITS.commandFlowMin.toFixed(2)}–${LIMITS.commandFlowMax.toFixed(2)} ml/s`);
+            }
+            if (!(earlyCommand <= midCommand && midCommand <= lateCommand)) throw new Error("S3 DECAY COMP commands must satisfy EARLY ≤ MID ≤ LATE");
+            if (!Number.isFinite(earlySeconds) || earlySeconds < 3 || earlySeconds > 30 || !Number.isFinite(midSeconds) || midSeconds < 3 || midSeconds > 30) throw new Error("S3 shape EARLY/MID times must be 3–30 seconds");
+            const boundedRise = (a,b) => b <= Math.max(a + 0.25, a * 1.35) + 1e-9;
+            if (!boundedRise(earlyCommand,midCommand) || !boundedRise(midCommand,lateCommand)) throw new Error("S3 shape adjacent command rise exceeds test bound (max 35% and 0.25 ml/s)");
+            s3Shape = { enabled:true, origin:"manual", earlyCommand:round(earlyCommand,3), earlySeconds:round(earlySeconds,1), midCommand:round(midCommand,3), midSeconds:round(midSeconds,1), lateCommand:round(lateCommand,3) };
+            const previousShape=s3ShapeStatus();if(previousShape.enabled&&["earlyCommand","midCommand","lateCommand","earlySeconds","midSeconds"].every(k=>Math.abs(Number(previousShape[k])-Number(s3Shape[k]))<.00001))s3Shape.origin=stageCommandOrigin("stage3",true);
+          }
+          const binding = testOverrideBinding();
+          state.curveApplyBusy=true;acquired=true;clearTimer("autoApplyTimer");
+          state.testOverrides = { schema:3, writerVersion:PLUGIN_VERSION, savedAt:new Date().toISOString(), mapCreatedAt:binding.mapCreatedAt, activeRelease:binding.activeRelease, basketContext:binding.basketContext, targets:binding.targets, stages, s3Shape,
+            manualCurveSource:{afterRunId:state.diagnosticLast&&state.diagnosticLast.runId||"",appliedAt:new Date().toISOString(),mode:"numeric-editor"} };written=true;
+          storageWrite(STORAGE_TEST_OVERRIDES, state.testOverrides);
+          await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle));
+          log(`Manual test commands updated: ${JSON.stringify(commandFlowSummary())}`);
+          if(!state.runtimeProfileVerified||!state.machineProfileAckKey)throw new Error("下一杯曲线尚未校验成功");
+          state.autoApplyLastStatus={runId:state.testOverrides.manualCurveSource.afterRunId,status:"curve-applied",at:new Date().toISOString(),message:"手动参数已校验并应用；新杯完成后继续自动学习"};
+          const payload=calibrationStatusPayload();if(payload.curveEditor)payload.curveEditor.canApply=true;
+          return pluginHttpJson(request, 200, {verified:true,...payload});
+        } catch (error) {
+          if(written){state.testOverrides=previousOverrides;storageWrite(STORAGE_TEST_OVERRIDES,previousOverrides||"");try{await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle),"manual rollback");}catch(_){}state.autoApplyLastStatus=previousStatus;restoreManualApplySchedule(previousStatus);}
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        } finally {if(acquired)state.curveApplyBusy=false;}
+      }
+      if (request.endpoint === "test-command-clear") {
+        const previousOverrides=state.testOverrides?JSON.parse(JSON.stringify(state.testOverrides)):null,previousStatus=state.autoApplyLastStatus;let acquired=false,written=false;
+        try {
+          if(state.curveApplyBusy||state.runtimeProfileRepairBusy||state.autoApplyLastStatus&&state.autoApplyLastStatus.status==="applying")throw new Error("曲线正在同步，请稍后再试");
+          if(!isHyperExProfileTitle(state.workflowTitle)||!state.runtimeProfileVerified)throw new Error("请先选择并校验 HyperEx 曲线");
+          if(request.body&&request.body.revision&&request.body.revision!==curveEditorRevision())throw new Error("下一杯参数已改变，请重新载入后编辑");
+          if (state.phase !== "idle" || state.calibrationActive) throw new Error("Manual test commands can only be changed while HyperEx is idle");
+          state.curveApplyBusy=true;acquired=true;clearTimer("autoApplyTimer");
+          state.testOverrides={schema:3,writerVersion:PLUGIN_VERSION,savedAt:new Date().toISOString(),...testOverrideBinding(),stages:{stage1:{mode:"auto",command:null},stage2:{mode:"auto",command:null},stage3:{mode:"auto",command:null}},s3Shape:{enabled:false},manualCurveSource:{afterRunId:state.diagnosticLast&&state.diagnosticLast.runId||"",appliedAt:new Date().toISOString(),mode:"lut-reset"}};written=true;
+          storageWrite(STORAGE_TEST_OVERRIDES,state.testOverrides);
+          await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle));
+          log("Manual test commands cleared; all stages returned to AUTO / LUT.");
+          if(!state.runtimeProfileVerified||!state.machineProfileAckKey)throw new Error("下一杯曲线尚未校验成功");
+          state.autoApplyLastStatus={runId:state.testOverrides.manualCurveSource.afterRunId,status:"curve-applied",at:new Date().toISOString(),message:"手动参数已校验并应用；新杯完成后继续自动学习"};
+          const payload=calibrationStatusPayload();if(payload.curveEditor)payload.curveEditor.canApply=true;
+          return pluginHttpJson(request, 200, {verified:true,...payload});
+        } catch (error) {
+          if(written){state.testOverrides=previousOverrides;storageWrite(STORAGE_TEST_OVERRIDES,previousOverrides||"");try{await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle),"manual rollback");}catch(_){}state.autoApplyLastStatus=previousStatus;restoreManualApplySchedule(previousStatus);}
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        } finally {if(acquired)state.curveApplyBusy=false;}
+      }
+      if (request.endpoint === "calibration-prepare") {
+        try {
+          const payload = await prepareCalibrationProfile({
+            allowUnknownWater: !!(request.body && request.body.allowUnknownWater),
+            allowLowMargin: !!(request.body && request.body.allowLowMargin)
+          });
+          return pluginHttpJson(request, 202, payload);
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if (request.endpoint === "calibration-scope") {
+        try {
+          const raw = request.body && request.body.scope !== undefined ? request.body.scope : null;
+          const next = normalizeScope(raw);
+          if (state.scopeMode === 'hyperex' && next !== 'hyperex') await restoreHyperExScopedMultiplier('scope changed');
+          state.scopeMode = next;
+          storageWrite(STORAGE_SCOPE, next);
+          recomputeCalibrationUsability();
+          if (next === 'hyperex' && inHyperExScope(state.workflowTitle)) await enterHyperExScopedMultiplier('scope changed to HyperEx only');
+          if (next !== 'hyperex') await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle));
+          emitSkinChanged();
+          return pluginHttpJson(request, 200, calibrationStatusPayload());
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if (request.endpoint === "calibration-sync") {
+        try {
+          await refreshFlowMultiplier(true);
+          await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle));
+          return pluginHttpJson(request, 200, calibrationStatusPayload());
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if (request.endpoint === "calibration-use-suggested") {
+        try {
+          recomputeCalibrationUsability();
+          const suggested = state.calibrationMap && Number(state.calibrationMap.schema || 0) >= 3 && state.calibrationMap.valid === true ? Number(state.calibrationMap.suggestedFlowMultiplier) : NaN;
+          if (!state.calibrationMapUsable || !Number.isFinite(suggested)) throw new Error('No valid/usable calibration map with a suggested multiplier');
+          state.calibrationPendingMultiplier = suggested;
+          storageWrite(STORAGE_PENDING_MULT, String(suggested));
+          log(`Suggested flowMultiplier ${suggested.toFixed(3)} selected for NEXT Flow Calibration. Existing LUT remains tied to ${round(calibrationBaseMultiplier(),3)} until the rerun completes.`);
+          return pluginHttpJson(request, 200, calibrationStatusPayload());
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if (request.endpoint === "calibration-apply-global") {
+        try {
+          recomputeCalibrationUsability();
+          const suggested = state.calibrationMap && Number(state.calibrationMap.schema || 0) >= 3 && state.calibrationMap.valid === true ? Number(state.calibrationMap.suggestedFlowMultiplier) : NaN;
+          if (!state.calibrationMapUsable || !Number.isFinite(suggested)) throw new Error('No valid/usable calibration map with a suggested multiplier');
+          if (finiteOrNull(state.scopedOriginalMultiplier) !== null) await restoreHyperExScopedMultiplier('before global apply');
+          const previous = await refreshFlowMultiplier(true);
+          if (!Number.isFinite(previous)) throw new Error('Cannot read current DE1 flowMultiplier');
+          state.globalPreviousMultiplier = previous;
+          storageWrite(STORAGE_GLOBAL_PREVIOUS, String(previous));
+          state.scopeMode = 'global';
+          storageWrite(STORAGE_SCOPE, 'global');
+          await writeFlowMultiplier(suggested, 'explicit GLOBAL apply');
+          state.calibrationPendingMultiplier = suggested;
+          storageWrite(STORAGE_PENDING_MULT, String(suggested));
+          recomputeCalibrationUsability();
+          await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle));
+          log(`GLOBAL flowMultiplier applied: ${suggested.toFixed(3)} (previous ${previous.toFixed(3)} saved). Re-run Flow Calibration before trusting the LUT at this multiplier.`);
+          emitSkinChanged();
+          return pluginHttpJson(request, 200, calibrationStatusPayload());
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if (request.endpoint === "calibration-restore-global") {
+        try {
+          const previous = finiteOrNull(state.globalPreviousMultiplier);
+          if (!Number.isFinite(previous)) throw new Error('No saved pre-global flowMultiplier to restore');
+          await writeFlowMultiplier(previous, 'restore pre-global value');
+          state.scopeMode = 'off';
+          storageWrite(STORAGE_SCOPE, 'off');
+          state.calibrationPendingMultiplier = null;
+          storageWrite(STORAGE_PENDING_MULT, '');
+          recomputeCalibrationUsability();
+          await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle));
+          emitSkinChanged();
+          return pluginHttpJson(request, 200, calibrationStatusPayload());
+        } catch (error) {
+          return pluginHttpJson(request, 409, { error: String(error.message || error), ...calibrationStatusPayload() });
+        }
+      }
+      if (request.endpoint === "calibration-clear") {
+        state.calibrationMap = null;
+        state.calibrationMapUsable = false;
+        state.calibrationMapStaleReason = 'calibration cleared';
+        state.calibrationPendingMultiplier = null;
+        storageWrite(STORAGE_CAL, '');
+        state.testOverrides = null; storageWrite(STORAGE_TEST_OVERRIDES, '');
+        state.adaptiveHistory = []; state.persistentHistoryCompatibleCount = 0; storageWrite(STORAGE_ADAPTIVE_HISTORY, '');
+        storageWrite(STORAGE_PENDING_MULT, '');
+        try { await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle)); } catch (_) {}
+        emitSkinChanged();
+        return pluginHttpJson(request, 200, calibrationStatusPayload());
+      }
+      if (request.endpoint === "startup-apply") {
+        return pluginHttpJson(request, 409, { error: "Legacy startup-apply is disabled in v" + PLUGIN_VERSION + ". S1 is handled only by the unified shot-to-shot adaptive engine after two matching MEDIUM-confidence startup shots." });
+      }
+      if (request.endpoint === "startup-clear") {
+        state.stage1StartupCorrection = null; storageWrite(STORAGE_S1_STARTUP, '');
+        try { await syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle)); } catch (_) {}
+        return pluginHttpJson(request, 200, { ok:true, commandFlows: commandFlowSummary() });
+      }
+      if (request.endpoint === "rearm") {
+        try {
+          const payload = await manualRearmSecondStage();
+          return pluginHttpJson(request, 202, payload);
+        } catch (error) {
+          return pluginHttpJson(request, state.phase === "restart_wait" ? 429 : 409, { error: String(error.message || error), ...uiStatusPayload() });
+        }
+      }
+      return pluginHttpJson(request, 404, { error: "not found" });
+    },
+
+    onUnload() {
+      if (state.liveTrim && state.liveTrim.active) requestMachineState("idle").catch(()=>{});
+      if (state.directStartTest && state.directStartTest.active) {
+        requestMachineState("idle").catch(error=>log(`Direct test unload Idle failed: ${error.message||error}`));
+      }
+      clearTimer("storageProbeTimer");
+      clearTimer("historyWriteTimer");
+      clearTimer("historyRecoveryTimer");
+      if (state.calibrationActive) {
+        
+        const run = state.diagnosticCurrent;
+        if (run) {
+          diagnosticSample('plugin_unload', true);
+          run.endedAt = new Date().toISOString();
+          run.result = 'interrupted: plugin unloaded';
+          state.diagnosticLast = run;
+          state.diagnosticCurrent = null;
+        }
+      } else if (state.diagnosticCurrent) {
+        finalizeDiagnostics("plugin unloaded");
+      }
+      if (finiteOrNull(state.scopedOriginalMultiplier) !== null) {
+        restoreHyperExScopedMultiplier('plugin unload').catch(() => {});
+      }
+      clearAllTimers();
+      stopGhcPrompt("cleared", "HyperEx plugin unloaded");
+      closeScaleStream();
+      log("Unloaded; timers cleared and scale stream closed.");
+    },
+
+    onEvent(event) {
+      if (!event || !event.name) return;
+      if (event.name === "workflowUpdated") {
+        handleWorkflowUpdated(event.payload || {});
+      } else if (event.name === "stateUpdate") {
+        handleStateUpdate(event.payload || {});
+      } else if (event.name === "storageRead") {
+        const payload = event.payload || {};
+        const key = payload.key;
+        const value = payload.value;
+        if(key===STORAGE_UI_LANGUAGE){
+          const language=typeof value==="string"?value:parseStoredJson(value);
+          if(!state.uiLanguageEdited&&["zh","en"].includes(language))state.uiLanguage=language;
+          emitSkinChanged();
+        } else if(key===STORAGE_S2_REFILL){
+          const saving=state.pendingRefillSave;
+          if(saving){
+            let ok=false;
+            try{const p=value?parseStoredJson(value):null;ok=!!p&&["basis","startDelayMs","targetPercent","cutoffPercent","maxDurationMs","approachMs"].every(k=>p[k]===saving.expected[k]);}catch(_){ok=false;}
+            saving.resolve(ok);
+            return;
+          }
+          if(state.phase!=="idle"||state.curveApplyBusy)return;
+          try{const parsed=value?parseStoredJson(value):null;if(value&&!parsed)throw new Error("invalid stored JSON");const restored=value?validatedS2RefillSettings(parsed):null;
+            
+            
+            if(restored&&parsed.basis===undefined){const boundedRefill=!!(state.cfg&&state.cfg.s2RefillBoundedModel);restored.targetPercent=160;if(boundedRefill)restored.basis="cup-target";state.s2RefillLoadWarning=boundedRefill?"S2 refill migrated to cup-target; timing and noise floor retained":"S2 refill migrated to160% of base pump flow; timing and noise floor retained";}
+            else state.s2RefillLoadWarning=null;
+            state.s2RefillSettings=restored;state.s2RefillPrevious=validatedRefillPrevious(parsed&&parsed.previousChange);}
+          catch(_){state.s2RefillSettings=null;state.s2RefillPrevious=null;state.s2RefillLoadWarning="Invalid saved S2 refill settings; defaults restored";}
+          state.s2RefillStorageLoaded=true;
+          if(state.cfg&&state.calibrationStorageLoaded)syncHyperExProfile(isHyperExProfileTitle(state.workflowTitle),"S2 refill settings restored").catch(error=>log(String(error.message||error)));
+          emitSkinChanged();
+        } else if (key === STORAGE_ALGORITHM_INTERVENTION) {
+          let raw=value;
+          if(raw!=="off"&&raw!=="full"&&raw!=="hec"){try{const parsed=parseStoredJson(value);raw=parsed==="off"||parsed==="full"||parsed==="hec"?parsed:"full";}catch(_){raw="full";}}
+          state.algorithmIntervention=normalizeAlgorithmIntervention(raw);
+          state.algorithmInterventionStorageLoaded=true;
+          emitSkinChanged();
+        } else if (key === STORAGE_CAL) {
+          state.calibrationStorageLoaded = true;
+          const parsed = parseStoredJson(value);
+          if (parsed && Number(parsed.schema || 0) >= 1) state.calibrationMap = parsed;
+          recomputeCalibrationUsability();
+          rescaleOverridesForTargets();
+          restoreAdaptiveHistoryFromPersistentFile();
+          if (state.cfg && state.cfg.calibrationAutoSync && state.calibrationMapUsable) {
+            const selected = isHyperExProfileTitle(state.workflowTitle);
+            syncHyperExProfile(selected, 'stored calibration loaded').catch(error => log(`Stored calibration auto-sync failed: ${error.message || error}`));
+          }
+          emitSkinChanged();
+        } else if (key === STORAGE_PRESETS) {
+          state.presetsLoaded = true;
+          const storedPresets = parseStoredJson(value); state.presets = Array.isArray(storedPresets) ? storedPresets.slice(0, 5) : (Array.isArray(value) ? value.slice(0, 5) : []);
+          emitSkinChanged();
+        } else if (key === STORAGE_PRESET_PENDING) {
+          const storedPending = parseStoredJson(value); state.pendingPreset = storedPending && typeof storedPending === "object" ? storedPending : null;
+          if (state.pendingPreset) schedulePendingPresetApply(0);
+        } else if (key === STORAGE_LEGACY_PROFILE) {
+          state.legacyProfileHiddenTitle = typeof value === "string" ? value : "";
+        } else if (key === STORAGE_CAL_MODE && value) {
+          state.calibrationMode = normalizeCalibrationMode(value);
+          emitSkinChanged();
+        } else if (key === STORAGE_SCOPE) {
+          state.scopeStorageLoaded = true;
+          if (value) state.scopeMode = normalizeScope(value);
+          recomputeCalibrationUsability();
+          scheduleProfileVerification('stored multiplier scope loaded');
+          emitSkinChanged();
+        } else if (key === STORAGE_PENDING_MULT) {
+          const v = value === '' || value === null || value === undefined ? NaN : Number(value);
+          state.calibrationPendingMultiplier = Number.isFinite(v) ? v : null;
+          emitSkinChanged();
+        } else if (key === STORAGE_GLOBAL_PREVIOUS) {
+          const v = value === '' || value === null || value === undefined ? NaN : Number(value);
+          state.globalPreviousMultiplier = Number.isFinite(v) ? v : null;
+        } else if (key === STORAGE_SCOPED_ORIGINAL) {
+          state.scopedOriginalStorageLoaded = true;
+          const v = value === '' || value === null || value === undefined ? NaN : Number(value);
+          state.scopedOriginalMultiplier = Number.isFinite(v) ? v : null;
+          if (state.scopedOriginalMultiplier !== null && !inHyperExScope(state.workflowTitle)) {
+            restoreHyperExScopedMultiplier('recovery from previous interrupted scoped session').catch(() => {});
+          }
+          scheduleProfileVerification('stored original multiplier loaded');
+        } else if (key === STORAGE_S1_STARTUP) {
+          state.stage1StartupCorrection = parseStoredJson(value);
+          emitSkinChanged();
+        } else if (key === STORAGE_AUTO_APPLY) {
+          if (value !== null && value !== undefined && value !== "") state.autoApplyNextShot = b(value, state.cfg ? state.cfg.autoApplyNextShot !== false : true);
+          emitSkinChanged();
+        } else if (key === STORAGE_HISTORY_PROBE) {
+          if (String(value || "") === String(state.storageProbeToken || "") && state.storageProbeToken) {
+            state.storageProbeVerified = true;
+            state.persistentHistoryStatus = "probe verified; checking history file";
+            if (state.storageProbeTimer) { clearTimeout(state.storageProbeTimer); state.storageProbeTimer = null; }
+            storageWrite(STORAGE_HISTORY_PROBE, "");
+            if (state.persistentHistoryLoaded) persistHistoryFile();
+            else state.storageProbeTimer = setTimeout(() => setPersistentHistoryUnavailable('initial history read timed out'), 3500);
+            emitSkinChanged();
+          }
+        } else if (key === STORAGE_HISTORY_FILE) {
+          const parsed = parseStoredJson(value);
+          if (!state.persistentHistoryLoaded) {
+            const sessionRows = state.persistentHistoryFile && state.persistentHistoryFile.shots || [];
+            state.persistentHistoryFile = parsed && Number(parsed.schema || 0) >= 2 && Array.isArray(parsed.shots) ? parsed
+              : { schema:2, kind:"HyperExAdaptiveHistory", writerVersion:PLUGIN_VERSION, shots:[] };
+            for (const row of sessionRows) {
+              state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.filter(x => x && x.runId !== row.runId).concat(row);
+            }
+            state.persistentHistoryFile.shots = state.persistentHistoryFile.shots.slice(-HISTORY_FILE_MAX_SHOTS);
+            trimHistoryFullRecords(state.persistentHistoryFile);
+            state.persistentHistoryLoaded = true;
+            state.learningContextLoaded = true;
+            gainMemoryState(true);
+            if (state.storageProbeVerified) { clearTimer('storageProbeTimer'); scheduleHistoryTrimWrite(); }
+          } else if (state.pendingHistoryWrite) {
+            if (!parsed || parsed.writeToken !== state.pendingHistoryWriteToken) {
+              setPersistentHistoryUnavailable('history file readback mismatch');
+            } else {
+              clearTimer('historyWriteTimer');
+              state.pendingHistoryWrite = null;
+              state.pendingHistoryWriteToken = null;
+              state.persistentHistoryAvailable = true;
+              state.persistentHistoryStatus = 'probe and history file write/readback verified';
+              state.historyVerifiedRunIds=(parsed.shots||[]).map(x=>x.runId);state.historyLastReadbackAt=new Date().toISOString();state.historyRecoveryAttempts=0;
+              if(state.diagnosticLast&&state.diagnosticLast.summary)state.diagnosticLast.summary.historyPersistence=historyPersistenceAudit(state.diagnosticLast.runId);
+              if (state.historyWriteDirty) persistHistoryFile();
+            }
+          }
+          restoreAdaptiveHistoryFromPersistentFile();
+          scheduleProfileVerification("history context loaded");
+          emitSkinChanged();
+
+
+        } else if (key === STORAGE_ADAPTIVE_HISTORY) {
+          const parsed = parseStoredJson(value);
+          if (Array.isArray(parsed)) {
+            state.legacyAdaptiveHistory = parsed.filter(x => x && typeof x === "object" && x.runId).slice(-8);
+            restoreAdaptiveHistoryFromPersistentFile();
+          }
+          emitSkinChanged();
+        } else if (key === STORAGE_TEST_OVERRIDES || key === "manualTestOverridesContinuousV3") {
+          if(key!==overrideStorageKey())return;
+          state.overrideStorageLoaded = true;
+          state.testOverrides = parseStoredJson(value);
+          rescaleOverridesForTargets();
+          const os = testOverrideStatus();
+          if (state.testOverrides && !os.valid && os.reason !== "none") log(`Stored manual test override ignored: ${os.reason}`);
+          
+          
+          if (state.cfg && state.calibrationStorageLoaded) {
+            const selected = isHyperExProfileTitle(state.workflowTitle);
+            syncHyperExProfile(selected, 'stored override loaded').catch(error => log(`Stored manual test override sync failed: ${error.message || error}`));
+          }
+          emitSkinChanged();
+        }
+      } else if (event.name === "shutdown") {
+        clearTimer("storageProbeTimer");
+        clearTimer("historyWriteTimer");
+      clearTimer("historyRecoveryTimer");
+        if (finiteOrNull(state.scopedOriginalMultiplier) !== null) restoreHyperExScopedMultiplier('shutdown').catch(() => {});
+        clearAllTimers();
+      }
+    }
+  };
+}
+
